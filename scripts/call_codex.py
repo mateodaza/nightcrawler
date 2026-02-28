@@ -90,9 +90,9 @@ def codex_cli_review(project_path: str, base_branch: str = None, instructions: s
 def codex_cli_exec(prompt: str, project_path: str = None) -> dict:
     """Run `codex exec` with a prompt for plan auditing (no file changes).
 
-    Uses --ask-for-approval never to prevent interactive prompts.
+    Uses --full-auto for non-interactive execution with workspace-write sandbox.
     """
-    cmd = ["codex", "exec", "--ask-for-approval", "never", prompt]
+    cmd = ["codex", "exec", "--full-auto", prompt]
 
     try:
         result = subprocess.run(
