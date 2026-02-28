@@ -90,12 +90,14 @@ bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID \
 - If REJECTED: revise (max 3 iterations), then lock and skip
 - If APPROVED: commit and continue
 
-**E) Commit** (local only, NEVER push):
+**E) Commit and push** (ONLY to the session branch):
 ```bash
 cd /home/nightcrawler/projects/clout
 git add -A
 git commit -m "[nightcrawler] feat(NC-XXX): <description>"
+git push origin nightcrawler/session-001
 ```
+⚠️ NEVER push to `main`. Only push to `nightcrawler/session-001`.
 
 **F) Verify** — `forge build && forge test` post-commit. If fails, `git revert HEAD --no-edit`.
 
@@ -136,7 +138,7 @@ When the kill file exists, budget_gate.sh exits 99 on every call. Nothing runs.
 
 1. NEVER write project code yourself — delegate via scripts
 2. NEVER skip the Codex audit
-3. NEVER push to git — local commits only
+3. ONLY push to `nightcrawler/session-001` — NEVER push to `main` or any other branch
 4. NEVER exceed 3 iterations per phase before locking
 5. NEVER modify GLOBAL_PLAN.md or RESEARCH.md
 6. ALWAYS skip MANUAL tasks (marked 🚧)
