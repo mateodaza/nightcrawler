@@ -10,7 +10,7 @@ projects:
     base_branch: main
 
 messaging:
-  platform: whatsapp
+  platform: telegram  # switched from whatsapp to telegram
   rate_limit:
     max_per_hour: 5
     batch_window_minutes: 15  # batch non-blocking notifications
@@ -79,8 +79,8 @@ watchdog:
   enabled: true
   cron: "*/30 * * * *"  # check every 30 minutes
   max_stale_minutes: 30
-  alert_method: twilio_whatsapp  # or email
-  # Twilio config loaded from environment variables:
+  alert_method: telegram  # alerts via OpenClaw's Telegram channel
+  # Fallback: Twilio SMS if Telegram is down (optional)
   # TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM, TWILIO_WHATSAPP_TO
 
 # Response parsing — exact per-escalation parsers (see ESCALATION.md §Response Handling)
@@ -97,14 +97,23 @@ codex_validation:
   expected: "structured text response, clean exit, no interactive prompt"
   fallback_if_fails: openai_api_direct  # use chat completions API instead of CLI
 
-# Planned Skills — NOT loaded at runtime. These are future work, listed here for reference only.
-# The orchestrator logic currently lives in SPEC.md and is injected into prompts directly.
-# Once OpenClaw skill format is finalized, extract the loop and report logic into these.
-# When ready, move entries from planned_skills → skills and create the SKILL.md files.
-planned_skills:
+# Active Skills — loaded by OpenClaw at runtime
+skills:
   - name: nightcrawler-loop
     path: ./skills/nightcrawler-loop/SKILL.md
-    note: "Not yet created. Will encode the main orchestrator loop."
+    trigger: "start <project>"
+    description: "Main orchestrator loop — plan, audit, implement, review"
   - name: nightcrawler-report
     path: ./skills/nightcrawler-report/SKILL.md
-    note: "Not yet created. Will encode session report generation."
+    trigger: "report <session-id>"
+    description: "Generate session report from journal and cost data"
+
+# Helper scripts (called by skills, not loaded as skills themselves)
+scripts:
+  session_manager: ./scripts/session.sh
+  budget_tracker: ./scripts/budget.py
+  call_opus: ./scripts/call_opus.py
+  call_codex: ./scripts/call_codex.py
+  call_sonnet: ./scripts/call_sonnet.py
+  lock_detect: ./scripts/lock_detect.py
+  watchdog: ./scripts/watchdog.sh
