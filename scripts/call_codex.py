@@ -22,7 +22,7 @@ try:
 except ImportError:
     OpenAI = None
 
-MODEL = "codex-mini-latest"
+MODEL = os.environ.get("NIGHTCRAWLER_CODEX_MODEL", "gpt-4o-mini")
 MAX_TOKENS = 1024  # Keep audits concise
 
 

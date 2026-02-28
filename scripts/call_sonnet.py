@@ -26,7 +26,7 @@ except ImportError:
     anthropic = None
 
 STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
-MODEL = "claude-sonnet-4-6"
+MODEL = os.environ.get("NIGHTCRAWLER_SONNET_MODEL", "claude-sonnet-4-5-20250929")
 MAX_TOKENS = 8192  # Higher limit for implementation code
 
 
