@@ -27,7 +27,7 @@ RESERVE = 2.00
 # Model pricing (USD per 1M tokens) — updated for current models
 PRICING = {
     # Anthropic
-    "claude-opus-4-6":   {"input": 15.00, "output": 75.00, "cached_input": 1.50},
+    "claude-opus-4-6":   {"input": 5.00,  "output": 25.00, "cached_input": 0.50},
     "claude-sonnet-4-6": {"input": 3.00,  "output": 15.00, "cached_input": 0.30},
     # OpenAI
     "codex-mini-latest": {"input": 1.50,  "output": 6.00,  "cached_input": 0.375},

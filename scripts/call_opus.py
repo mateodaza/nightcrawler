@@ -23,7 +23,7 @@ except ImportError:
     anthropic = None
 
 STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
-MODEL = os.environ.get("NIGHTCRAWLER_OPUS_MODEL", "claude-sonnet-4-5-20250929")
+MODEL = os.environ.get("NIGHTCRAWLER_OPUS_MODEL", "claude-opus-4-6")
 MAX_TOKENS = 2048  # Cap Opus output for mini-plans (cost control)
 
 
@@ -82,9 +82,9 @@ def call_api(system_prompt: str, user_prompt: str, max_tokens: int = MAX_TOKENS)
         output_tokens = result["usage"]["output_tokens"]
         cached_tokens = result["usage"].get("cache_read_input_tokens", 0)
 
-    # Calculate cost
+    # Calculate cost (Opus 4.6: $5/$25 per MTok, cached $0.50)
     regular_input = input_tokens - cached_tokens
-    cost = (regular_input * 15.0 + cached_tokens * 1.5 + output_tokens * 75.0) / 1_000_000
+    cost = (regular_input * 5.0 + cached_tokens * 0.5 + output_tokens * 25.0) / 1_000_000
 
     return {
         "content": content,
