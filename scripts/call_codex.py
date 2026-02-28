@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-call_codex.py — Call OpenAI Codex-mini for independent audit/review.
+call_codex.py — Independent audit/review via Codex CLI (primary) or OpenAI API (fallback).
+
+PRIMARY: Uses `codex review` CLI which runs gpt-5.3-codex — the best coding model.
+FALLBACK: If CLI fails, falls back to OpenAI API with configurable model.
 
 Usage:
-    call_codex.py audit-plan --plan <path> --task-file <path> --rules <path>
-    call_codex.py review-impl --diff <text|path> --test-output <path> --plan <path> --rules <path>
-    call_codex.py --test   (validate API connectivity)
+    call_codex.py audit-plan --plan <path> --task-file <path> --rules <path> [--project <path>]
+    call_codex.py review-impl --project <path> --plan <path> --rules <path> [--base <branch>]
+    call_codex.py --test   (validate Codex CLI or API connectivity)
 
 Reads OPENAI_API_KEY from environment.
-Output format: JSON with {verdict: "APPROVED"|"REJECTED", feedback: "...", ...}
+Output format: JSON with {verdict: "APPROVED"|"REJECTED", feedback: "...", method: "cli"|"api", ...}
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -22,12 +27,104 @@ try:
 except ImportError:
     OpenAI = None
 
-MODEL = os.environ.get("NIGHTCRAWLER_CODEX_MODEL", "gpt-4o-mini")
-MAX_TOKENS = 1024  # Keep audits concise
+API_MODEL = os.environ.get("NIGHTCRAWLER_CODEX_MODEL", "o4-mini")
+MAX_TOKENS = 1024
+CLI_TIMEOUT = 120  # 2 minutes for CLI commands
+STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
 
 
-def get_client():
-    """Get OpenAI client."""
+# =============================================================================
+# Codex CLI (primary) — uses gpt-5.3-codex
+# =============================================================================
+
+def codex_cli_available() -> bool:
+    """Check if codex CLI is installed and responsive."""
+    try:
+        result = subprocess.run(
+            ["codex", "--version"],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def codex_cli_review(project_path: str, base_branch: str = None, instructions: str = None) -> dict:
+    """Run `codex review` on uncommitted changes in the project.
+
+    Returns {content, method, model}.
+    """
+    cmd = ["codex", "review", "--uncommitted"]
+
+    if base_branch:
+        cmd = ["codex", "review", "--base", base_branch]
+
+    if instructions:
+        cmd.append(instructions)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=CLI_TIMEOUT,
+            cwd=project_path,
+        )
+
+        output = result.stdout.strip()
+        if not output:
+            output = result.stderr.strip()
+
+        if not output:
+            return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "empty output"}
+
+        return {
+            "content": output,
+            "method": "cli",
+            "model": "gpt-5.3-codex",
+        }
+    except subprocess.TimeoutExpired:
+        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "timeout"}
+    except Exception as e:
+        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": str(e)}
+
+
+def codex_cli_exec(prompt: str, project_path: str = None) -> dict:
+    """Run `codex exec` with a prompt for plan auditing (no file changes).
+
+    Uses --approval-mode never to prevent interactive prompts.
+    """
+    cmd = ["codex", "exec", "--approval-mode", "never", prompt]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=CLI_TIMEOUT,
+            cwd=project_path or os.getcwd(),
+        )
+
+        output = result.stdout.strip()
+        if not output:
+            output = result.stderr.strip()
+
+        if not output:
+            return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "empty output"}
+
+        return {
+            "content": output,
+            "method": "cli",
+            "model": "gpt-5.3-codex",
+        }
+    except subprocess.TimeoutExpired:
+        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "timeout"}
+    except Exception as e:
+        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": str(e)}
+
+
+# =============================================================================
+# OpenAI API (fallback)
+# =============================================================================
+
+def get_api_client():
+    """Get OpenAI API client."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("ERROR: OPENAI_API_KEY not set", file=sys.stderr)
@@ -38,12 +135,12 @@ def get_client():
 
 
 def call_api(system_prompt: str, user_prompt: str, max_tokens: int = MAX_TOKENS) -> dict:
-    """Make an API call to Codex. Returns {content, input_tokens, output_tokens, cost_usd}."""
-    client = get_client()
+    """Make an API call. Returns {content, method, model, input_tokens, output_tokens, cost_usd}."""
+    client = get_api_client()
 
     if client:
         response = client.chat.completions.create(
-            model=MODEL,
+            model=API_MODEL,
             max_tokens=max_tokens,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -54,11 +151,10 @@ def call_api(system_prompt: str, user_prompt: str, max_tokens: int = MAX_TOKENS)
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
     else:
-        # Raw HTTP fallback
         import urllib.request
         api_key = os.environ["OPENAI_API_KEY"]
         data = json.dumps({
-            "model": MODEL,
+            "model": API_MODEL,
             "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -79,12 +175,19 @@ def call_api(system_prompt: str, user_prompt: str, max_tokens: int = MAX_TOKENS)
         input_tokens = result["usage"]["prompt_tokens"]
         output_tokens = result["usage"]["completion_tokens"]
 
-    # Calculate cost (codex-mini pricing)
-    cost = (input_tokens * 1.5 + output_tokens * 6.0) / 1_000_000
+    # Estimate cost based on model
+    pricing = {
+        "o4-mini": (1.10, 4.40),
+        "gpt-4o-mini": (0.15, 0.60),
+        "codex-mini-latest": (1.50, 6.00),
+    }
+    in_price, out_price = pricing.get(API_MODEL, (1.50, 6.00))
+    cost = (input_tokens * in_price + output_tokens * out_price) / 1_000_000
 
     return {
         "content": content,
-        "model": MODEL,
+        "method": "api",
+        "model": API_MODEL,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": 0,
@@ -92,8 +195,12 @@ def call_api(system_prompt: str, user_prompt: str, max_tokens: int = MAX_TOKENS)
     }
 
 
+# =============================================================================
+# Verdict parsing
+# =============================================================================
+
 def parse_verdict(content: str) -> dict:
-    """Parse APPROVED/REJECTED verdict from Codex response."""
+    """Parse APPROVED/REJECTED verdict from response."""
     content_upper = content.upper()
 
     if "APPROVED" in content_upper:
@@ -109,12 +216,47 @@ def parse_verdict(content: str) -> dict:
     }
 
 
-def audit_plan(plan_file: str, task_file: str, rules_file: str):
-    """Audit a mini-plan for correctness and completeness."""
+# =============================================================================
+# Main commands
+# =============================================================================
+
+def audit_plan(plan_file: str, task_file: str, rules_file: str, project_path: str = None):
+    """Audit a mini-plan. Tries Codex CLI exec first, falls back to API."""
     plan = Path(plan_file).read_text()
     task = Path(task_file).read_text()
     rules = Path(rules_file).read_text()
 
+    audit_prompt = f"""You are an independent code auditor. Review this implementation plan.
+
+TASK REQUIREMENTS:
+{task}
+
+PROJECT RULES:
+{rules}
+
+MINI-PLAN TO AUDIT:
+{plan}
+
+Check: correctness, completeness, security, edge cases, test coverage, scope creep.
+Start your response with APPROVED or REJECTED, then provide specific feedback."""
+
+    # Try CLI first
+    if codex_cli_available():
+        result = codex_cli_exec(audit_prompt, project_path)
+        if result.get("content") and not result.get("error"):
+            verdict = parse_verdict(result["content"])
+            output = {
+                **verdict,
+                "method": "cli",
+                "model": result["model"],
+                "cost_usd": 0,  # CLI cost tracked by OpenAI account, not per-call
+            }
+            print(json.dumps(output))
+            return
+
+        print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
+
+    # Fallback to API
     system_prompt = """You are an independent code auditor (Codex). You review implementation plans created by another AI model.
 
 YOUR ROLE:
@@ -149,29 +291,73 @@ Is this plan ready for implementation? Reply APPROVED or REJECTED with specific 
 
     output = {
         **verdict,
+        "method": result["method"],
         "model": result["model"],
-        "input_tokens": result["input_tokens"],
-        "output_tokens": result["output_tokens"],
+        "input_tokens": result.get("input_tokens", 0),
+        "output_tokens": result.get("output_tokens", 0),
         "cost_usd": result["cost_usd"],
     }
     print(json.dumps(output))
 
 
-def review_impl(diff_source: str, test_output_file: str, plan_file: str, rules_file: str):
-    """Review an implementation (git diff + test results) against the approved plan."""
-    # diff_source can be inline text or a file path
-    if os.path.isfile(diff_source):
-        diff = Path(diff_source).read_text()
-    else:
-        diff = diff_source
-
-    test_output = Path(test_output_file).read_text() if os.path.isfile(test_output_file) else test_output_file
+def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch: str = None,
+                diff_source: str = None, test_output_file: str = None):
+    """Review implementation. Tries `codex review` CLI first, falls back to API."""
     plan = Path(plan_file).read_text()
     rules = Path(rules_file).read_text()
 
-    # Truncate diff if too long (keep under ~50K tokens input)
+    instructions = (
+        f"Review this code against the approved plan. Check: does it match the plan? "
+        f"Are tests comprehensive? Any bugs, security issues (reentrancy, overflow, access control), or rule violations? "
+        f"Start your response with APPROVED or REJECTED.\n\n"
+        f"APPROVED PLAN:\n{plan[:3000]}\n\n"
+        f"KEY RULES:\n{rules[:2000]}"
+    )
+
+    # Try CLI first
+    if codex_cli_available():
+        result = codex_cli_review(
+            project_path=project_path,
+            base_branch=base_branch,
+            instructions=instructions,
+        )
+        if result.get("content") and not result.get("error"):
+            verdict = parse_verdict(result["content"])
+            output = {
+                **verdict,
+                "method": "cli",
+                "model": result["model"],
+                "cost_usd": 0,  # CLI cost tracked by OpenAI account
+            }
+            print(json.dumps(output))
+            return
+
+        print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
+
+    # Fallback to API
+    if diff_source:
+        diff = Path(diff_source).read_text() if os.path.isfile(diff_source) else diff_source
+    else:
+        # Get diff from git
+        try:
+            result_git = subprocess.run(
+                ["git", "diff"], capture_output=True, text=True, cwd=project_path
+            )
+            diff = result_git.stdout
+            if not diff:
+                result_git = subprocess.run(
+                    ["git", "diff", "--staged"], capture_output=True, text=True, cwd=project_path
+                )
+                diff = result_git.stdout
+        except Exception:
+            diff = "(could not read git diff)"
+
+    test_output = ""
+    if test_output_file and os.path.isfile(test_output_file):
+        test_output = Path(test_output_file).read_text()
+
     if len(diff) > 80000:
-        diff = diff[:40000] + "\n\n... [TRUNCATED — diff too large] ...\n\n" + diff[-40000:]
+        diff = diff[:40000] + "\n\n... [TRUNCATED] ...\n\n" + diff[-40000:]
 
     system_prompt = """You are an independent code reviewer (Codex). You review implementations created by another AI model.
 
@@ -215,49 +401,73 @@ Is this implementation correct and complete? Reply APPROVED or REJECTED with spe
 
     output = {
         **verdict,
+        "method": result["method"],
         "model": result["model"],
-        "input_tokens": result["input_tokens"],
-        "output_tokens": result["output_tokens"],
+        "input_tokens": result.get("input_tokens", 0),
+        "output_tokens": result.get("output_tokens", 0),
         "cost_usd": result["cost_usd"],
     }
     print(json.dumps(output))
 
 
 def test_connectivity():
-    """Test API connectivity with a minimal call."""
+    """Test Codex CLI and API connectivity."""
+    results = {}
+
+    # Test CLI
+    if codex_cli_available():
+        cli_result = codex_cli_exec(
+            "Reply with exactly: CODEX_CLI_OK",
+        )
+        if cli_result.get("content") and not cli_result.get("error"):
+            results["cli"] = {"status": "ok", "model": "gpt-5.3-codex", "response": cli_result["content"][:100]}
+        else:
+            results["cli"] = {"status": "error", "error": cli_result.get("error", "empty output")}
+    else:
+        results["cli"] = {"status": "not_installed"}
+
+    # Test API
     try:
-        result = call_api(
+        api_result = call_api(
             "You are a test assistant.",
-            "Reply with exactly: CODEX_OK",
+            "Reply with exactly: CODEX_API_OK",
             max_tokens=10,
         )
-        if "CODEX_OK" in result["content"]:
-            print(json.dumps({"status": "ok", "model": MODEL, "cost_usd": result["cost_usd"]}))
-        else:
-            print(json.dumps({"status": "ok", "model": MODEL, "response": result["content"][:50]}))
+        results["api"] = {"status": "ok", "model": API_MODEL, "cost_usd": api_result["cost_usd"]}
     except Exception as e:
-        print(json.dumps({"status": "error", "error": str(e)}), file=sys.stderr)
+        results["api"] = {"status": "error", "error": str(e)}
+
+    # Overall status
+    primary = results.get("cli", {}).get("status") == "ok"
+    fallback = results.get("api", {}).get("status") == "ok"
+    results["primary"] = "cli" if primary else ("api" if fallback else "none")
+    results["ready"] = primary or fallback
+
+    print(json.dumps(results, indent=2))
+    if not results["ready"]:
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Call Codex for auditing")
+    parser = argparse.ArgumentParser(description="Call Codex for auditing (CLI primary, API fallback)")
     parser.add_argument("command", nargs="?", choices=["audit-plan", "review-impl"], default=None)
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--plan")
     parser.add_argument("--task-file")
     parser.add_argument("--rules")
+    parser.add_argument("--project")
     parser.add_argument("--diff")
     parser.add_argument("--test-output")
+    parser.add_argument("--base")
 
     args = parser.parse_args()
 
     if args.test:
         test_connectivity()
     elif args.command == "audit-plan":
-        audit_plan(args.plan, args.task_file, args.rules)
+        audit_plan(args.plan, args.task_file, args.rules, args.project)
     elif args.command == "review-impl":
-        review_impl(args.diff, args.test_output, args.plan, args.rules)
+        review_impl(args.project, args.plan, args.rules, args.base, args.diff, args.test_output)
     else:
         parser.print_help()
         sys.exit(1)
