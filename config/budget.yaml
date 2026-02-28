@@ -1,0 +1,41 @@
+# Budget Configuration
+# All values in USD. Billing boundaries use UTC.
+
+billing_timezone: UTC
+
+session:
+  cap: 20.00              # per session hard stop
+  reserve: 2.00           # reserved for mandatory end-of-session work (report, notifications, potential revert)
+  alert_threshold: 0.80   # 80% of effective budget → WhatsApp warning
+  hard_stop_remaining: 1.00  # effective budget < $1 → stop admitting new tasks
+  # effective_budget = cap - reserve - spent_so_far
+
+task:
+  alert_threshold: 5.00   # single task > $5 → something wrong → escalate
+  # Typical task should cost $0.30-0.80
+
+daily:
+  cap: 50.00              # across all sessions in a UTC calendar day
+
+monthly:
+  cap: 200.00             # hard monthly ceiling
+
+# Pre-call budget enforcement
+# Before EVERY model call, estimate cost and reject if it would exceed effective budget.
+# This prevents mid-task budget overruns.
+enforcement: pre_call
+
+# Cost estimates per model (for budget projections)
+estimates:
+  opus_input_per_1m: 5.00
+  opus_output_per_1m: 25.00
+  sonnet_input_per_1m: 3.00
+  sonnet_output_per_1m: 15.00
+  codex_mini_input_per_1m: 1.50
+  codex_mini_output_per_1m: 6.00
+  cache_read_discount: 0.90  # 90% off input on cache hit
+
+# Dry run mode
+# When true, Phase A (planning) runs fully but Phase B (implementation) is skipped
+# Use to validate task queue and mini-plans before a real session
+dry_run: false

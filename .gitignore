@@ -1,0 +1,16 @@
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# OpenClaw local state
+.openclaw/
+
+# IDE
+.vscode/
+.idea/
+
+# Don't ignore sessions — they're the audit trail
+# Don't ignore memory.md — it's persistent state

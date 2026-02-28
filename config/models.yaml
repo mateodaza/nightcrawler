@@ -1,0 +1,52 @@
+# Model Configuration
+# Which model handles which role. Do not change during a session.
+
+roles:
+  planner:
+    provider: anthropic
+    model: claude-opus-4-6
+    interface: claude-code-cli  # runs in Podman container
+    max_output_tokens: 2000     # force concise plans
+    temperature: 0              # deterministic planning
+
+  implementer:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    interface: claude-code-cli
+    max_output_tokens: dynamic   # capped by remaining task budget (see SPEC.md §5.4)
+    temperature: 0
+
+  auditor:
+    provider: openai
+    model: codex-mini-latest
+    interface: auto              # tries codex-cli first, falls back to openai-api-direct
+    max_output_tokens: 1000     # verdict + specific feedback only
+    temperature: 0
+
+  reporter:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    interface: claude-code-cli
+    max_output_tokens: 4000
+    temperature: 0
+
+# Prompt caching strategy (Claude only)
+caching:
+  enabled: true
+  static_prefix:
+    - rules        # RULES.md content
+    - global_plan  # Project GLOBAL_PLAN.md
+    - memory       # Project memory.md
+  # Dynamic content (task, feedback) appended after prefix
+  # Cache TTL: 5 minutes (default, sufficient for loop speed)
+
+# Fallback policy
+fallback:
+  # If Opus is down, PAUSE. Planning quality is critical, Sonnet insufficient.
+  planner_down: pause_and_escalate
+  # If Sonnet is down, PAUSE. Don't use Opus for implementation (too expensive).
+  implementer_down: pause_and_escalate
+  # If Codex CLI fails, switch to direct OpenAI API (same model, different interface).
+  auditor_cli_down: fallback_to_openai_api
+  # If BOTH Codex CLI and OpenAI API fail, PAUSE. Independent audit is non-negotiable.
+  auditor_all_down: pause_and_escalate

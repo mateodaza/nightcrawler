@@ -1,0 +1,110 @@
+# OpenClaw Configuration for Nightcrawler
+# This configures the OpenClaw instance that runs the orchestrator
+
+# Project registry — one entry per project Nightcrawler operates on.
+# base_branch: the branch sessions must start from (checked at startup step 4).
+# path: absolute path to the project repo on the VPS.
+projects:
+  clout:
+    path: /home/nightcrawler/projects/clout
+    base_branch: main
+
+messaging:
+  platform: whatsapp
+  rate_limit:
+    max_per_hour: 5
+    batch_window_minutes: 15  # batch non-blocking notifications
+  blocking_escalations_immediate: true
+
+containers:
+  claude_code:
+    image: ghcr.io/13rac1/openclaw-claude-code:latest
+    runtime: podman
+    rootless: true
+    capabilities_dropped: true
+    apparmor: true
+    auto_cleanup_idle: 300  # seconds
+    allowed_tools:
+      - Bash
+      - Read
+      - Write
+      - Edit
+    # Bash restrictions (injected into Claude Code settings)
+    bash_allow:
+      - npm
+      - npx
+      - forge
+      - foundry
+      - pip
+      - python
+      - node
+      - tsc
+    bash_deny:
+      - curl
+      - wget
+      - ssh
+      - scp
+      - git push
+      - git reset
+      - sudo
+      - rm -rf
+
+  codex_cli:
+    runtime: podman
+    rootless: true
+    capabilities_dropped: true
+    auto_cleanup_idle: 300
+
+session:
+  # How often to check for WhatsApp responses during blocking escalation
+  poll_interval_seconds: 30
+  # Max session duration (safety net)
+  max_duration_hours: 10
+  # Auto-generate report when session ends
+  auto_report: true
+
+# Heartbeat — touched every 10 minutes by OpenClaw during active sessions
+# Contains: session ID (line 1) + PID (line 2). Deleted on clean shutdown.
+heartbeat:
+  enabled: true
+  file: /tmp/nightcrawler-heartbeat
+  interval_minutes: 10
+  content:
+    - session_id
+    - pid
+
+# Watchdog — runs via cron, independent of OpenClaw
+# Alerts if heartbeat file is stale (OpenClaw crashed)
+watchdog:
+  enabled: true
+  cron: "*/30 * * * *"  # check every 30 minutes
+  max_stale_minutes: 30
+  alert_method: twilio_whatsapp  # or email
+  # Twilio config loaded from environment variables:
+  # TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM, TWILIO_WHATSAPP_TO
+
+# Response parsing — exact per-escalation parsers (see ESCALATION.md §Response Handling)
+response_parsing:
+  mode: exact  # each escalation type has its own accepted responses, no fuzzy matching
+  normalize_before_match: true  # strip leading/trailing whitespace, lowercase, then match
+  max_unparseable_retries: 2  # after 2 failed parses, park task and continue
+  confirmation_required: true  # send "✓ Parsed: <action>. Proceeding." before executing
+
+# Codex CLI validation
+# Run this before first real session to confirm headless operation
+codex_validation:
+  test_command: 'codex -p "Review this function: function add(a,b){return a+b} Reply APPROVED or REJECTED with feedback."'
+  expected: "structured text response, clean exit, no interactive prompt"
+  fallback_if_fails: openai_api_direct  # use chat completions API instead of CLI
+
+# Planned Skills — NOT loaded at runtime. These are future work, listed here for reference only.
+# The orchestrator logic currently lives in SPEC.md and is injected into prompts directly.
+# Once OpenClaw skill format is finalized, extract the loop and report logic into these.
+# When ready, move entries from planned_skills → skills and create the SKILL.md files.
+planned_skills:
+  - name: nightcrawler-loop
+    path: ./skills/nightcrawler-loop/SKILL.md
+    note: "Not yet created. Will encode the main orchestrator loop."
+  - name: nightcrawler-report
+    path: ./skills/nightcrawler-report/SKILL.md
+    note: "Not yet created. Will encode session report generation."
