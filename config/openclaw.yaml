@@ -7,7 +7,7 @@
 projects:
   clout:
     path: /home/nightcrawler/projects/clout
-    base_branch: main
+    base_branch: nightcrawler/session-001
 
 messaging:
   platform: telegram  # switched from whatsapp to telegram
