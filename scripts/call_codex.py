@@ -90,9 +90,9 @@ def codex_cli_review(project_path: str, base_branch: str = None, instructions: s
 def codex_cli_exec(prompt: str, project_path: str = None) -> dict:
     """Run `codex exec` with a prompt for plan auditing (no file changes).
 
-    Uses --approval-mode never to prevent interactive prompts.
+    Uses --ask-for-approval never to prevent interactive prompts.
     """
-    cmd = ["codex", "exec", "--approval-mode", "never", prompt]
+    cmd = ["codex", "exec", "--ask-for-approval", "never", prompt]
 
     try:
         result = subprocess.run(
@@ -139,28 +139,34 @@ def call_api(system_prompt: str, user_prompt: str, max_tokens: int = MAX_TOKENS)
     client = get_api_client()
 
     if client:
-        response = client.chat.completions.create(
-            model=API_MODEL,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
+        # o4-mini and reasoning models use max_completion_tokens, not max_tokens
+        model_params = {"model": API_MODEL, "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]}
+        if API_MODEL.startswith("o") or "codex" in API_MODEL:
+            model_params["max_completion_tokens"] = max_tokens
+        else:
+            model_params["max_tokens"] = max_tokens
+        response = client.chat.completions.create(**model_params)
         content = response.choices[0].message.content
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
     else:
         import urllib.request
         api_key = os.environ["OPENAI_API_KEY"]
-        data = json.dumps({
+        req_body = {
             "model": API_MODEL,
-            "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-        }).encode()
+        }
+        if API_MODEL.startswith("o") or "codex" in API_MODEL:
+            req_body["max_completion_tokens"] = max_tokens
+        else:
+            req_body["max_tokens"] = max_tokens
+        data = json.dumps(req_body).encode()
         req = urllib.request.Request(
             "https://api.openai.com/v1/chat/completions",
             data=data,
