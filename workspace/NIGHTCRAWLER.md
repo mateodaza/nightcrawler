@@ -40,18 +40,20 @@ When you receive `start clout` (or any project):
 
 For each QUEUED task (in order, respecting dependencies, skipping 🚧 MANUAL):
 
-**A) Plan** — call Opus to generate mini-plan:
+**A) Plan** — call Opus to generate mini-plan (ALWAYS use budget_gate.sh wrapper):
 ```bash
-python3 ~/nightcrawler/scripts/call_opus.py plan \
+bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID \
+  python3 ~/nightcrawler/scripts/call_opus.py plan \
   --task-file /home/nightcrawler/projects/clout/TASK_QUEUE.md \
   --template ~/nightcrawler/templates/mini_plan.md \
   --session $SESSION_ID \
   --task NC-XXX
 ```
 
-**B) Audit plan** — call Codex to review:
+**B) Audit plan** — call Codex to review (ALWAYS use budget_gate.sh wrapper):
 ```bash
-python3 ~/nightcrawler/scripts/call_codex.py audit-plan \
+bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID \
+  python3 ~/nightcrawler/scripts/call_codex.py audit-plan \
   --plan ~/nightcrawler/sessions/$SESSION_ID/tasks/NC-XXX/mini_plan.md \
   --task-file /home/nightcrawler/projects/clout/TASK_QUEUE.md \
   --rules /home/nightcrawler/projects/clout/GLOBAL_PLAN.md \
@@ -66,18 +68,20 @@ bash pty:true workdir:/home/nightcrawler/projects/clout background:true command:
 ```
 Then monitor with `process action:log sessionId:XXX` until done.
 
-Alternatively, call Sonnet via script:
+Alternatively, call Sonnet via script (ALWAYS use budget_gate.sh wrapper):
 ```bash
-python3 ~/nightcrawler/scripts/call_sonnet.py implement \
+bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID \
+  python3 ~/nightcrawler/scripts/call_sonnet.py implement \
   --plan ~/nightcrawler/sessions/$SESSION_ID/tasks/NC-XXX/mini_plan.md \
   --project /home/nightcrawler/projects/clout \
   --session $SESSION_ID \
   --task NC-XXX
 ```
 
-**D) Review implementation** — call Codex:
+**D) Review implementation** — call Codex (ALWAYS use budget_gate.sh wrapper):
 ```bash
-python3 ~/nightcrawler/scripts/call_codex.py review-impl \
+bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID \
+  python3 ~/nightcrawler/scripts/call_codex.py review-impl \
   --diff "$(cd /home/nightcrawler/projects/clout && git diff)" \
   --plan ~/nightcrawler/sessions/$SESSION_ID/tasks/NC-XXX/mini_plan.md \
   --rules /home/nightcrawler/projects/clout/GLOBAL_PLAN.md \
@@ -105,6 +109,29 @@ When no tasks remain or budget exhausted:
 - Send summary: tasks completed, tasks remaining, total cost
 - Log session to `~/nightcrawler/sessions/$SESSION_ID/report.md`
 
+## Budget Hardstops
+
+| Cap | Default | Env Var | What happens |
+|-----|---------|---------|-------------|
+| Session | $20 | `NIGHTCRAWLER_SESSION_BUDGET` | Session ends gracefully |
+| Daily | $50 | `NIGHTCRAWLER_DAILY_CAP` | No new sessions today |
+| Monthly | $200 | `NIGHTCRAWLER_MONTHLY_CAP` | Kill switch at `/tmp/nightcrawler-budget-kill` |
+
+**EVERY script call MUST go through `budget_gate.sh`:**
+```bash
+bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID <actual command...>
+```
+If you skip the wrapper, you are violating a critical rule. The wrapper checks budget BEFORE execution and refuses if any cap is exceeded.
+
+**Emergency killswitch (Mateo can run manually):**
+```bash
+touch /tmp/nightcrawler-budget-kill    # STOP everything
+rm /tmp/nightcrawler-budget-kill       # Resume
+```
+When the kill file exists, budget_gate.sh exits 99 on every call. Nothing runs.
+
+**OpenClaw itself:** OpenClaw's own API spend (running this agent) is NOT tracked by budget.py. Mateo monitors this via `openclaw gateway usage-cost`. If Nightcrawler is burning too much on orchestration overhead, Mateo will say `stop` — at which point, finish current task and end session.
+
 ## Critical Rules
 
 1. NEVER write project code yourself — delegate via scripts
@@ -115,6 +142,7 @@ When no tasks remain or budget exhausted:
 6. ALWAYS skip MANUAL tasks (marked 🚧)
 7. ALWAYS check dependencies before starting a task
 8. ALWAYS run forge build && forge test after implementation
+9. ALWAYS use budget_gate.sh wrapper for EVERY script call — no exceptions
 
 ## Full Protocol
 
