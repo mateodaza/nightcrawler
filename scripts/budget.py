@@ -30,8 +30,9 @@ PRICING = {
     "claude-opus-4-6":   {"input": 15.00, "output": 75.00, "cached_input": 1.50},
     "claude-sonnet-4-6": {"input": 3.00,  "output": 15.00, "cached_input": 0.30},
     # OpenAI
-    "codex-mini-latest": {"input": 1.50,  "output": 6.00,  "cached_input": 0.15},
+    "codex-mini-latest": {"input": 1.50,  "output": 6.00,  "cached_input": 0.375},
     "o4-mini":           {"input": 1.10,  "output": 4.40,  "cached_input": 0.275},
+    "gpt-4o-mini":       {"input": 0.15,  "output": 0.60,  "cached_input": 0.075},
 }
 
 

@@ -23,7 +23,7 @@ except ImportError:
     anthropic = None
 
 STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
-MODEL = "claude-opus-4-6-20251101"
+MODEL = "claude-opus-4-6"
 MAX_TOKENS = 2048  # Cap Opus output for mini-plans (cost control)
 
 
