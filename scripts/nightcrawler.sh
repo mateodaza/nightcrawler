@@ -393,33 +393,60 @@ except FileNotFoundError:
     pass
 
 with open(queue_path) as f:
-    lines = f.readlines()
+    content = f.read()
+    lines = content.splitlines()
 
-# Find first [ ] task whose deps are all [x]
+# Collect all task lines and their full blocks for dependency parsing
+# Format: #### NC-XXX [x] Title  OR  #### NC-XXX [ ] Title
+# Dependencies appear in later lines as '- **Dependencies:** NC-001, NC-002'
+task_header_re = re.compile(r'^#{1,6}\s+(NC-\d+)\s+\[(.)\]')
+dep_line_re = re.compile(r'^\-\s+\*\*Dependencies?:\*\*\s*(.*)', re.IGNORECASE)
+
+# First pass: find all done task IDs
 done_ids = set()
 for line in lines:
-    m = re.match(r'- \[x\]\s+\*\*(NC-\d+)\*\*', line)
-    if m:
+    m = task_header_re.match(line)
+    if m and m.group(2) == 'x':
         done_ids.add(m.group(1))
 
+# Second pass: find first eligible [ ] task
+current_task = None
+current_task_line = None
 for line in lines:
-    m = re.match(r'- \[ \]\s+\*\*(NC-\d+)\*\*', line)
-    if not m:
-        continue
-    task_id = m.group(1)
-    if task_id in skips:
-        continue
-    if 'MANUAL' in line:
+    m = task_header_re.match(line)
+    if m:
+        if current_task:
+            # Previous task had no deps line — eligible if not skipped/manual
+            print(current_task)
+            sys.exit(0)
+        if m.group(2) == ' ':
+            tid = m.group(1)
+            if tid not in skips and 'MANUAL' not in line:
+                current_task = tid
+                current_task_line = line
+            else:
+                current_task = None
+        else:
+            current_task = None
         continue
 
-    # Check dependencies
-    dep_match = re.search(r'deps?:\s*([\w,\s-]+)', line, re.IGNORECASE)
-    if dep_match:
-        deps = [d.strip() for d in dep_match.group(1).split(',') if d.strip()]
-        if not all(d in done_ids for d in deps):
-            continue
+    if current_task:
+        dm = dep_line_re.match(line.strip())
+        if dm:
+            dep_str = dm.group(1).strip()
+            if dep_str.lower() == 'none' or not dep_str:
+                print(current_task)
+                sys.exit(0)
+            deps = [d.strip() for d in dep_str.split(',') if d.strip()]
+            if all(d in done_ids for d in deps):
+                print(current_task)
+                sys.exit(0)
+            else:
+                current_task = None
 
-    print(task_id)
+# Last task in file with no deps line
+if current_task:
+    print(current_task)
     sys.exit(0)
 
 print('')
@@ -433,31 +460,38 @@ extract_task_context() {
 import re
 
 with open('$queue') as f:
-    content = f.read()
+    lines = f.readlines()
 
-# Find task block
-pattern = r'- \[ \]\s+\*\*' + re.escape('$task_id') + r'\*\*[^\n]*\n((?:  [^\n]*\n)*)'
-m = re.search(pattern, content)
-if m:
-    header = m.group(0).split('\n')[0]
-    body = m.group(1) if m.group(1) else ''
-    print(header)
-    print(body)
-else:
-    print('Task $task_id')
+# Find task header line: #### NC-XXX [ ] Title  or  #### NC-XXX [~] Title
+task_id = '$task_id'
+header_re = re.compile(r'^#{1,6}\s+' + re.escape(task_id) + r'\s+\[.\]')
+found = False
+for i, line in enumerate(lines):
+    if header_re.match(line):
+        print(line.rstrip())
+        # Print subsequent non-header lines (the task body)
+        for j in range(i+1, len(lines)):
+            if re.match(r'^#{1,6}\s', lines[j]):
+                break
+            print(lines[j].rstrip())
+        found = True
+        break
+
+if not found:
+    print('Task ' + task_id)
 " 2>/dev/null
 }
 
 mark_task_done_in_queue() {
     local task_id="$1"
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
-    sed -i "s/- \[ \] \*\*${task_id}\*\*/- [x] **${task_id}**/" "$queue"
+    sed -i "s/${task_id} \[ \]/${task_id} [x]/" "$queue"
 }
 
 mark_task_in_progress() {
     local task_id="$1"
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
-    sed -i "s/- \[ \] \*\*${task_id}\*\*/- [~] **${task_id}**/" "$queue"
+    sed -i "s/${task_id} \[ \]/${task_id} [~]/" "$queue"
 }
 
 append_to_progress() {
@@ -475,7 +509,7 @@ append_to_progress() {
 count_tasks() {
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
     [[ -f "$queue" ]] || { echo "0"; return; }
-    grep -c '^\- \[ \]' "$queue" 2>/dev/null || echo "0"
+    grep -cE '^#{1,6}\s+NC-\d+\s+\[ \]' "$queue" 2>/dev/null || echo "0"
 }
 
 # =============================================================================
@@ -1297,7 +1331,7 @@ main_loop() {
                 log "LOCKED: $TASK_ID plan locked"
                 escalate_urgent "LOCKED ($PROJECT): $TASK_ID plan failed"
             fi
-            sed -i "s/- \[~\] \*\*${TASK_ID}\*\*/- [ ] **${TASK_ID}**/" "$PROJECT_PATH/TASK_QUEUE.md"
+            sed -i "s/${TASK_ID} \[~\]/${TASK_ID} [ ]/" "$PROJECT_PATH/TASK_QUEUE.md"
             echo "$TASK_ID" >> "$CONTROL_DIR/skip"
             continue
         fi
@@ -1307,7 +1341,7 @@ main_loop() {
             log "DRY RUN: Plan approved for $TASK_ID"
             notify_normal "Dry run: $TASK_ID plan approved"
             # Reset [~] marker since we're not implementing
-            sed -i "s/- \[~\] \*\*${TASK_ID}\*\*/- [ ] **${TASK_ID}**/" "$PROJECT_PATH/TASK_QUEUE.md"
+            sed -i "s/${TASK_ID} \[~\]/${TASK_ID} [ ]/" "$PROJECT_PATH/TASK_QUEUE.md"
             break
         fi
 
@@ -1320,7 +1354,7 @@ main_loop() {
                 log "LOCKED: $TASK_ID implementation failed after 3 soft rejections + local verification failure"
                 escalate_urgent "LOCKED ($PROJECT): $TASK_ID impl failed (soft-reject cap + local verify fail)"
             fi
-            sed -i "s/- \[~\] \*\*${TASK_ID}\*\*/- [ ] **${TASK_ID}**/" "$PROJECT_PATH/TASK_QUEUE.md"
+            sed -i "s/${TASK_ID} \[~\]/${TASK_ID} [ ]/" "$PROJECT_PATH/TASK_QUEUE.md"
             echo "$TASK_ID" >> "$CONTROL_DIR/skip"
             revert_owned_files
             continue
