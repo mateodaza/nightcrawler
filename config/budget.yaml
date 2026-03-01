@@ -6,7 +6,7 @@ billing_timezone: UTC
 session:
   cap: 20.00              # per session hard stop
   reserve: 2.00           # reserved for mandatory end-of-session work (report, notifications, potential revert)
-  alert_threshold: 0.80   # 80% of effective budget → WhatsApp warning
+  alert_threshold: 0.80   # 80% of effective budget → Telegram warning
   hard_stop_remaining: 1.00  # effective budget < $1 → stop admitting new tasks
   # effective_budget = cap - reserve - spent_so_far
 

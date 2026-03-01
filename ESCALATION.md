@@ -1,6 +1,6 @@
 # Escalation Protocol (v2)
 
-When and how Nightcrawler messages you on WhatsApp. Every possible escalation is listed here. If it's not on this list, Nightcrawler handles it autonomously.
+When and how Nightcrawler messages you on Telegram. Every possible escalation is listed here. If it's not on this list, Nightcrawler handles it autonomously.
 
 Every message includes the session ID for context. All task references use stable NC-xxx IDs.
 
@@ -97,7 +97,7 @@ Error: <1-line summary>
 
 ### Watchdog Alert (sent by cron, NOT OpenClaw)
 **Trigger:** OpenClaw hasn't updated heartbeat file in 30+ minutes during an active session.
-**Action:** Independent cron job sends WhatsApp via Twilio. OpenClaw is likely dead.
+**Action:** Independent cron job sends Telegram alert (via Twilio fallback if Telegram is down). OpenClaw is likely dead.
 **Message format:**
 ```
 ⚠️ WATCHDOG — Session <session-id>
@@ -165,7 +165,7 @@ Duplicate coalescing: if the same escalation type fires for the same task (same 
 
 All response parsing uses **exact per-escalation parsers**. No generic fuzzy matching. No substring matching. Each escalation type has its own accepted responses.
 
-**Pre-match normalization:** Before matching, the orchestrator normalizes the incoming WhatsApp message: strip leading/trailing whitespace, then lowercase. All patterns below are written in lowercase and match against the normalized input. This prevents harmless case differences (e.g., "Skip", "SKIP", "skip") from causing parse failures while still rejecting genuinely ambiguous replies.
+**Pre-match normalization:** Before matching, the orchestrator normalizes the incoming Telegram message: strip leading/trailing whitespace, then lowercase. All patterns below are written in lowercase and match against the normalized input. This prevents harmless case differences (e.g., "Skip", "SKIP", "skip") from causing parse failures while still rejecting genuinely ambiguous replies.
 
 Before executing ANY parsed action, send a confirmation message:
 ```
@@ -216,9 +216,9 @@ After 2 unparseable responses to the same escalation, park the task and continue
 
 ### Task Queue Modifications
 
-**WhatsApp clarifications NEVER modify TASK_QUEUE.md.** Clarifications and custom instructions from WhatsApp replies are stored in:
+**Telegram clarifications NEVER modify TASK_QUEUE.md.** Clarifications and custom instructions from Telegram replies are stored in:
 - `sessions/<session-id>/decisions.md` — per-session, per-task constraints
-- Session journal — logged as `{"event": "whatsapp_clarification", "task_id": "NC-xxx", "text": "..."}`
+- Session journal — logged as `{"event": "telegram_clarification", "task_id": "NC-xxx", "text": "..."}`
 
 These are ephemeral session-level overrides. Permanent task changes require Mateo editing TASK_QUEUE.md directly during a day session.
 

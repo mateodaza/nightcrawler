@@ -24,13 +24,13 @@ One full implementation cycle for a single task:
 7. If approved → commit, post-commit verify, update progress, next task
 
 **Lock**
-When Opus and Codex cannot converge. Triggers when EITHER: 3 iterations reached (hard cap) OR Jaccard keyword overlap >0.5 across last 3 rejections. Detected by pure string processing — no model judges its own disagreement. Triggers WhatsApp escalation.
+When Opus and Codex cannot converge. Triggers when EITHER: 3 iterations reached (hard cap) OR Jaccard keyword overlap >0.5 across last 3 rejections. Detected by pure string processing — no model judges its own disagreement. Triggers Telegram escalation.
 
 **Session**
 One overnight run with a unique ID: `<YYYYMMDD>-<HHMMSS>-<project>`. Operates on a dedicated git branch (`nightcrawler/<session-id>`). Starts with lockfile acquisition and baseline health check. Ends with report, cleanup, and lock release.
 
 **Session ID**
-Unique identifier for each session: `<YYYYMMDD>-<HHMMSS>-<project>` (e.g., `20260228-234500-clout`). Used for branch name, directory name, lockfile tracking, and all WhatsApp messages.
+Unique identifier for each session: `<YYYYMMDD>-<HHMMSS>-<project>` (e.g., `20260228-234500-clout`). Used for branch name, directory name, lockfile tracking, and all Telegram messages.
 
 **Session Journal (WAL)**
 Append-only JSONL file (`sessions/<session-id>/journal.jsonl`) that records every state transition. Used for crash recovery — on restart, the orchestrator reads the journal to determine where it left off.
@@ -42,7 +42,7 @@ The last-known-green commit hash recorded at session start after running the ful
 Auto-generated summary after a session ends. Two halves: project progress (for you — completed, reverted, blocked, locked) and orchestrator insights (for tuning Nightcrawler itself). Lives in `sessions/<session-id>/report.md`.
 
 **Escalation**
-Any message sent to WhatsApp requiring your decision. Two priority classes: URGENT (blocking — sent immediately, bypasses rate limits) and NORMAL (notifications — batched in 15-min windows, capped at 5/hour). See ESCALATION.md for the full map.
+Any message sent to Telegram requiring your decision. Two priority classes: URGENT (blocking — sent immediately, bypasses rate limits) and NORMAL (notifications — batched in 15-min windows, capped at 5/hour). See ESCALATION.md for the full map.
 
 ## Task States
 
@@ -50,7 +50,7 @@ Any message sent to WhatsApp requiring your decision. Two priority classes: URGE
 **IN_PROGRESS** — Currently being worked on by a session.
 **COMPLETED** — Committed, post-commit verified (zero failing tests), progress updated.
 **BLOCKED** — Needs manual action (external dependency, missing secret, infra issue, etc.). NOT for dependency failures — those use DEP_BLOCKED.
-**NEEDS_CLARIFICATION** — Ambiguous spec, escalated to WhatsApp.
+**NEEDS_CLARIFICATION** — Ambiguous spec, escalated to Telegram.
 **LOCKED** — Opus/Codex disagreement unresolved, needs your decision.
 **DEP_BLOCKED** — Dependency is BLOCKED, SKIPPED, or LOCKED, so this task is auto-skipped.
 **SKIPPED** — Permanently skipped by your decision.
@@ -79,7 +79,7 @@ Writes code based on an approved mini-plan. Addresses review feedback. Output to
 Reviews mini-plans and implementations. Independent from Claude models — provides genuine second opinion. Two interfaces: Codex CLI (preferred) and OpenAI API direct (fallback). If both fail, session pauses — never substituted with Claude.
 
 **Orchestrator** — OpenClaw
-Routes tasks between models. Detects locks. Manages budget (pre-call enforcement). Sends WhatsApp messages. Generates reports. Maintains session journal. Never writes code or plans — only coordinates.
+Routes tasks between models. Detects locks. Manages budget (pre-call enforcement). Sends Telegram messages. Generates reports. Maintains session journal. Never writes code or plans — only coordinates.
 
 **You** — Mateo
 Writes the Global Plan. Prioritizes the Task Queue. Reviews daily reports. Makes architecture decisions. Resolves locks. Improves Nightcrawler's rules over time.

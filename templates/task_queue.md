@@ -9,7 +9,7 @@
 - [~] In Progress (session: {session-id})
 - [x] Completed (session: {session-id}, commit: {hash})
 - [!] Blocked — needs manual action (see BLOCKERS.md)
-- [?] Needs Clarification — escalated to WhatsApp
+- [?] Needs Clarification — escalated to Telegram
 - [🔒] Locked — Opus/Codex disagreement, needs your decision
 - [⛓️] DEP_BLOCKED — dependency is BLOCKED/SKIPPED/LOCKED, auto-skipped
 

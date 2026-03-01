@@ -40,7 +40,7 @@ These rules apply to TWO layers separately:
 The orchestrator layer (NOT project code) is allowed to contact:
 - `api.anthropic.com` — Claude API calls
 - `api.openai.com` — Codex API calls
-- `api.twilio.com` — WhatsApp notifications
+- `api.twilio.com` — Telegram notifications (Twilio as watchdog fallback)
 - `registry.npmjs.org` — npm package installs
 - `github.com` — git clone/fetch only (never push)
 - No other external endpoints
@@ -78,7 +78,7 @@ Every subprocess has a hard wall-clock timeout and a no-output timeout:
 After 2 consecutive timeouts on the same step, declare LOCK and escalate.
 Orchestrator MUST kill child process, release temp files, and clean up before moving on.
 
-## Operational Rules (strong, override only via WhatsApp escalation)
+## Operational Rules (strong, override only via Telegram escalation)
 
 ### Task Discipline
 - Only work on tasks from TASK_QUEUE.md, in order
@@ -121,7 +121,7 @@ Orchestrator MUST kill child process, release temp files, and clean up before mo
 - Session logs (sessions/) are never auto-pruned — they're the audit trail
 
 ### Communication
-- Send WhatsApp notifications only for events defined in ESCALATION.md
+- Send Telegram notifications only for events defined in ESCALATION.md
 - Priority classes: URGENT (blocking escalations — always send immediately, bypass batching), NORMAL (task completions, warnings — batch in 15-min windows)
 - URGENT messages bypass the rate limit. NORMAL messages cap at 5/hour
 - Duplicate alerts for the same event coalesce (don't spam the same lock/failure)

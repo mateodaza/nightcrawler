@@ -7,7 +7,7 @@
 projects:
   clout:
     path: /home/nightcrawler/projects/clout
-    base_branch: nightcrawler/session-001
+    base_branch: main
 
 messaging:
   platform: telegram  # switched from whatsapp to telegram
@@ -56,7 +56,7 @@ containers:
     auto_cleanup_idle: 300
 
 session:
-  # How often to check for WhatsApp responses during blocking escalation
+  # How often to check for Telegram responses during blocking escalation
   poll_interval_seconds: 30
   # Max session duration (safety net)
   max_duration_hours: 10

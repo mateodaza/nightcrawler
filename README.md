@@ -29,7 +29,7 @@ nightcrawler/
 ├── SPEC.md                   ← full orchestrator specification (v2)
 ├── TERMS.md                  ← consolidated glossary
 ├── RULES.md                  ← safety constraints (orchestrator + project layers)
-├── ESCALATION.md             ← when and how to ping WhatsApp
+├── ESCALATION.md             ← when and how to ping Telegram
 ├── config/
 │   ├── models.yaml           ← model assignments per role
 │   ├── budget.yaml           ← spending caps, reserve, alerts
@@ -54,7 +54,7 @@ nightcrawler/
 
 1. Read `SPEC.md` for the full system design
 2. Read `RULES.md` for what Nightcrawler can and cannot do
-3. Read `ESCALATION.md` for when you'll get WhatsApp messages
+3. Read `ESCALATION.md` for when you'll get Telegram messages
 4. Configure `config/` for your project
 5. Deploy to Hetzner CX23 with OpenClaw + Claude Code plugin + Codex CLI
 6. Add tasks to your project's `TASK_QUEUE.md` using NC-xxx stable IDs

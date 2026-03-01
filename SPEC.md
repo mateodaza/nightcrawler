@@ -13,7 +13,7 @@ You plan. Nightcrawler implements. You review.
 │                        NIGHTCRAWLER                           │
 │                                                               │
 │  ┌───────────┐    ┌────────────────────────────────────────┐ │
-│  │ WhatsApp   │◄──►│  OpenClaw (orchestrator)               │ │
+│  │ Telegram   │◄──►│  OpenClaw (orchestrator)               │ │
 │  │ (Mateo)    │    │                                        │ │
 │  └───────────┘    │  ┌──────────────────────────────────┐  │ │
 │                    │  │ Session Controller                │  │ │
@@ -57,7 +57,7 @@ This ID is used for:
 - Git branch: `nightcrawler/20260228-234500-clout`
 - Lockfile PID tracking
 - Heartbeat metadata
-- All WhatsApp messages reference it for context
+- All Telegram messages reference it for context
 
 No two sessions can collide, even on the same day.
 
@@ -74,11 +74,11 @@ SESSION START
   │       → Even if no lockfile exists (it may have been cleaned before crash)
   │       → If incomplete terminal event found: reconcile state (see §4.2 crash recovery), then continue startup
   ├── 3. Check for stale lockfile: if /tmp/nightcrawler-<project>.lock exists and PID dead, clean it up
-  │       → If lock exists and PID alive → REFUSE to start, notify WhatsApp
+  │       → If lock exists and PID alive → REFUSE to start, notify Telegram
   ├── 4. Verify repo is on configured base branch (source of truth: openclaw.yaml → projects.<name>.base_branch)
-  │       → If on wrong branch or detached HEAD → REFUSE to start, notify WhatsApp
+  │       → If on wrong branch or detached HEAD → REFUSE to start, notify Telegram
   ├── 5. Verify clean worktree: git status --porcelain must be empty
-  │       → If dirty → REFUSE to start, notify WhatsApp with dirty file list
+  │       → If dirty → REFUSE to start, notify Telegram with dirty file list
   ├── 6. Acquire lockfile: write to /tmp/nightcrawler-<project>.lock (OUTSIDE repo)
   │       → Contains: PID, session ID, project path, timestamp
   │       → Lockfile lives outside git worktree to avoid contaminating clean status
@@ -95,12 +95,12 @@ SESSION START
   ├── 16. Load nightcrawler/config/ (models, budget, rules)
   ├── 17. Validate Codex availability (test call)
   │       → If Codex CLI fails → try API fallback
-  │       → If both fail → REFUSE to start, release lock, notify WhatsApp
+  │       → If both fail → REFUSE to start, release lock, notify Telegram
   ├── 18. BASELINE CHECK: run full build + test suite, record last-known-green commit hash
-  │       → If tests already fail → notify WhatsApp "repo is red before session", release lock, stop
+  │       → If tests already fail → notify Telegram "repo is red before session", release lock, stop
   ├── 19. Initial dependency scan: mark tasks whose dependencies are in terminal failure (BLOCKED, SKIPPED, LOCKED) as DEP_BLOCKED
   │       → Tasks whose dependencies are not yet COMPLETED stay QUEUED (re-evaluated dynamically — see TASK LOOP below)
-  ├── 20. Send WhatsApp: "▶️ Session <id> started. [N] tasks. Budget: $[X]."
+  ├── 20. Send Telegram: "▶️ Session <id> started. [N] tasks. Budget: $[X]."
   │
   ▼
 TASK LOOP
@@ -122,7 +122,7 @@ TASK LOOP
   │   ├── 01. Run full build + test suite
   │   ├── 02. If tests fail AND were passing at baseline → identify breaking commit
   │   │       → Log in BLOCKERS.md with commit hash
-  │   │       → Escalate to WhatsApp with specific commit blame
+  │   │       → Escalate to Telegram with specific commit blame
   │   │       → Park ALL remaining tasks until resolved
   │   ├── 03. If tests fail AND were ALSO failing at baseline → this was pre-existing, skip
   │   └── 04. If tests pass → proceed to Phase A
@@ -162,7 +162,7 @@ TASK LOOP
   │   ├── C5. Update project PROGRESS.md
   │   ├── C6. Update project memory.md (new patterns, decisions)
   │   ├── C7. Mark task as COMPLETED in TASK_QUEUE.md (with session ID + commit hash)
-  │   ├── C8. Send WhatsApp notification (batched if NORMAL priority)
+  │   ├── C8. Send Telegram notification (batched if NORMAL priority)
   │   └── C9. Check budget → if effective budget < $1 → stop admitting new tasks
   │
   └── Next task or end session
@@ -174,7 +174,7 @@ SESSION END (always runs, even on crash recovery — uses reserved $2 budget)
   ├── Generate cost breakdown → sessions/<session-id>/cost.jsonl
   ├── Update nightcrawler/memory.md with session learnings
   ├── JOURNAL: write + fsync {"event": "session_complete"}  ← MUST be durable before cleanup
-  ├── Send WhatsApp: "⏹️ Session <id> done. Report ready."
+  ├── Send Telegram: "⏹️ Session <id> done. Report ready."
   ├── Release lockfile (/tmp/nightcrawler-<project>.lock)
   ├── Delete heartbeat file
   └── Stop
@@ -223,7 +223,7 @@ QUEUED → PLANNING → PLAN_AUDIT → PLAN_REVISION → PLAN_APPROVED
   → COMMITTING → VERIFYING → COMPLETED
 
 Special states:
-  → LOCKED (Opus/Codex disagreement unresolved, escalated to WhatsApp, parked)
+  → LOCKED (Opus/Codex disagreement unresolved, escalated to Telegram, parked)
   → BLOCKED (manual/external blocker — missing secret, infra issue, etc. — logged, escalated)
   → SKIPPED (permanently skipped by Mateo's decision)
   → DEP_BLOCKED (upstream dependency is in terminal failure: BLOCKED/SKIPPED/LOCKED — auto-skipped)
@@ -260,7 +260,7 @@ on each Codex rejection:
 
     on LOCK:
         → log both positions in BLOCKERS.md (include raw feedback from last 3 iterations)
-        → send WhatsApp with summary
+        → send Telegram message with summary
         → park task, move to next
 ```
 
@@ -347,7 +347,7 @@ before each model call:
 # Tracked per session
 session_budget_cap: 20.00  # USD, configurable
 reserve: 2.00              # for mandatory end-of-session work
-alert_threshold: 0.80      # 80% of effective budget → WhatsApp warning
+alert_threshold: 0.80      # 80% of effective budget → Telegram warning
 hard_stop: 1.00            # effective budget < $1 → stop new tasks
 
 # Tracked per task
@@ -529,7 +529,7 @@ if [ "$FILE_AGE" -gt "$MAX_AGE_MINUTES" ]; then
         exit 0  # already alerted for this session
     fi
 
-    # Send alert
+    # Send alert (Twilio fallback — uses WhatsApp transport as Telegram backup)
     curl -s -X POST "https://api.twilio.com/..." \
         -d "Body=⚠️ Nightcrawler watchdog: session $SESSION_ID unresponsive for ${FILE_AGE}m." \
         -d "To=whatsapp:+YOURNUMBER" \
@@ -596,14 +596,15 @@ None yet.
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 
-# Twilio (for watchdog — loaded by cron script)
+# Twilio (for watchdog fallback — loaded by cron script)
+# Note: Twilio env var names reference "whatsapp" — that's Twilio's API naming
 TWILIO_ACCOUNT_SID=...
 TWILIO_AUTH_TOKEN=...
 TWILIO_WHATSAPP_FROM=whatsapp:+...
 TWILIO_WHATSAPP_TO=whatsapp:+...
 
-# OpenClaw config
-OPENCLAW_WHATSAPP_ENABLED=true
+# OpenClaw config — primary messaging is Telegram (see openclaw.yaml)
+OPENCLAW_TELEGRAM_ENABLED=true
 
 # Nightcrawler config
 NIGHTCRAWLER_PROJECT_PATH=/home/nightcrawler/projects/clutch
@@ -629,6 +630,6 @@ NIGHTCRAWLER_DAILY_CAP=50.00
 2. If currently in Phase A or B: finish the current iteration, then stop
 3. If currently in Phase C: finish the commit + verification
 4. Proceed to SESSION END (report, cleanup, release lock)
-5. WhatsApp: "⏹️ Session <id> hit max duration. [N] tasks done. Report ready."
+5. Telegram: "⏹️ Session <id> hit max duration. [N] tasks done. Report ready."
 
 Never hard-kill during a commit, verification, or state update.
