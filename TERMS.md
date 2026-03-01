@@ -27,7 +27,7 @@ One full implementation cycle for a single task:
 When Opus and Codex cannot converge. Triggers when EITHER: 3 iterations reached (hard cap) OR Jaccard keyword overlap >0.5 across last 3 rejections. Detected by pure string processing — no model judges its own disagreement. Triggers Telegram escalation.
 
 **Session**
-One overnight run with a unique ID: `<YYYYMMDD>-<HHMMSS>-<project>`. Operates on a dedicated git branch (`nightcrawler/<session-id>`). Starts with lockfile acquisition and baseline health check. Ends with report, cleanup, and lock release.
+One overnight run with a unique ID: `<YYYYMMDD>-<HHMMSS>-<project>`. Operates on the persistent dev branch (`nightcrawler/dev`). Session isolation is via the journal, not the branch. Starts with lockfile acquisition and baseline health check. Ends with report, cleanup, and lock release.
 
 **Session ID**
 Unique identifier for each session: `<YYYYMMDD>-<HHMMSS>-<project>` (e.g., `20260228-234500-clout`). Used for branch name, directory name, lockfile tracking, and all Telegram messages.

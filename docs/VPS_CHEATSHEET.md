@@ -89,7 +89,7 @@ openclaw gateway status     # Check if running
 ```bash
 cd /home/nightcrawler/projects/clout
 
-# Check current branch (should be nightcrawler/session-001)
+# Check current branch (should be nightcrawler/dev)
 git branch --show-current
 
 # See recent commits from Nightcrawler
@@ -137,5 +137,5 @@ cd /home/nightcrawler/projects/clout && git branch --show-current
 - **Credits:** $18.20 remaining, auto-reload OFF (natural hard cap)
 - **Budget gate:** Blocks every script call if budget exceeded
 - **Kill switch:** `touch /tmp/nightcrawler-budget-kill` halts everything
-- **Branch protection:** `main` requires PR — Nightcrawler can only push to `nightcrawler/session-001`
+- **Branch protection:** `main` requires PR — Nightcrawler works on `nightcrawler/dev`
 - **Codex audit:** Every plan and implementation is reviewed before commit

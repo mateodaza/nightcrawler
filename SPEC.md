@@ -82,7 +82,7 @@ SESSION START
   ├── 6. Acquire lockfile: write to /tmp/nightcrawler-<project>.lock (OUTSIDE repo)
   │       → Contains: PID, session ID, project path, timestamp
   │       → Lockfile lives outside git worktree to avoid contaminating clean status
-  ├── 7. Create session branch: git checkout -b nightcrawler/<session-id>
+  ├── 7. Switch to dev branch: git checkout nightcrawler/dev || git checkout -b nightcrawler/dev
   ├── 8. Create session directory: sessions/<session-id>/
   ├── 9. Initialize session journal: sessions/<session-id>/journal.jsonl
   ├── 10. Start heartbeat (touch file every 10 min with session ID + PID)

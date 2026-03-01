@@ -53,13 +53,15 @@ Step 5: Repo health check
   - Run: git status --porcelain
     → If not empty: send Telegram with dirty file list → STOP
   - Run: git rev-parse --abbrev-ref HEAD
-    → If not BASE_BRANCH: send Telegram "On wrong branch: <X>, expected <BASE_BRANCH>" → STOP
+    → Must be BASE_BRANCH or DEV_BRANCH (nightcrawler/dev)
+    → If neither: send Telegram "On wrong branch: <X>, expected <BASE_BRANCH> or nightcrawler/dev" → STOP
 
 Step 6: Acquire lock
   - Run: bash ~/nightcrawler/scripts/session.sh acquire <project> $SESSION_ID
 
-Step 7: Create session branch
-  - Run: git checkout -b nightcrawler/$SESSION_ID
+Step 7: Switch to dev branch
+  - Run: git checkout nightcrawler/dev 2>/dev/null || git checkout -b nightcrawler/dev
+  - All sessions accumulate commits on this single branch. Session isolation is via the journal.
 
 Step 8: Initialize session state
   - mkdir -p ~/nightcrawler/sessions/$SESSION_ID/tasks

@@ -77,7 +77,7 @@ nightcrawler/
 - **Subprocess timeouts:** every process has wall-clock + no-output limits
 - **Post-commit verification:** full test suite after every commit, auto-revert on failure
 - **Baseline health check:** records green commit at session start, blames regressions accurately
-- **Lockfile + dedicated branch:** prevents concurrent sessions, isolates changes
+- **Lockfile + persistent dev branch:** prevents concurrent sessions, all work on `nightcrawler/dev`
 - **Independent audit:** Codex (non-Claude) reviews all plans and code — never substituted
 
 ## Cost

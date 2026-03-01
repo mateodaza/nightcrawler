@@ -25,7 +25,7 @@ These rules apply to TWO layers separately:
 - NEVER amend previous commits — always create new commits
 - All commits are local only. Mateo pushes manually after review.
 - Session MUST start on a clean worktree (`git status --porcelain` must be empty)
-- Session MUST operate on a dedicated branch: `nightcrawler/<session-id>`
+- Session MUST operate on the dev branch: `nightcrawler/dev`
 - Session MUST acquire lockfile (`/tmp/nightcrawler-<project>.lock`) before any mutation — lockfile lives OUTSIDE repo to avoid contaminating git clean status
 - If lockfile exists and PID is alive, refuse to start (another session is running)
 

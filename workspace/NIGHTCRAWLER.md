@@ -32,7 +32,7 @@
 |---------|------|-------------|
 | clout | `/home/nightcrawler/projects/clout` | `main` |
 
-Sessions operate on `nightcrawler/<session-id>` branches. Commits are local only — Mateo pushes.
+All sessions operate on `nightcrawler/dev`. Commits are local only — Mateo pushes.
 
 ## Escalation Response Handling
 
