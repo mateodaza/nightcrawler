@@ -731,14 +731,20 @@ Instructions:
     # intermediate output, so idle timeout would kill it prematurely.
     # cd into project dir instead of --cwd (not supported on all CLI versions).
     local raw_output exit_code
+    local claude_stderr="$SESSION_DIR/claude_impl_${task_id}_stderr.log"
     set +e
     raw_output=$(cd "$project_path" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
             --model claude-sonnet-4-6-20250514 \
             --output-format json \
-            --max-turns 25)
+            --max-turns 25 2>"$claude_stderr")
     exit_code=$?
     set -e
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        log "Claude CLI stdout (first 500): ${raw_output:0:500}"
+    fi
 
     record_touched_files
     log_claude_cli_cost "$raw_output" "$task_id" "implementation"
@@ -775,14 +781,20 @@ Instructions:
 
     # Use timeout (not run_timed) — same reason as implement_task
     local raw_output exit_code
+    local claude_stderr="$SESSION_DIR/claude_rev_${TASK_ID}_${iteration}_stderr.log"
     set +e
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
             --model claude-sonnet-4-6-20250514 \
             --output-format json \
-            --max-turns 25)
+            --max-turns 25 2>"$claude_stderr")
     exit_code=$?
     set -e
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        log "Claude CLI stdout (first 500): ${raw_output:0:500}"
+    fi
 
     record_touched_files
     log_claude_cli_cost "$raw_output" "$TASK_ID" "revision"
