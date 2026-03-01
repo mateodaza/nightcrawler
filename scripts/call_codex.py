@@ -127,8 +127,7 @@ def get_api_client():
     """Get OpenAI API client."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        print("ERROR: OPENAI_API_KEY not set", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError("OPENAI_API_KEY not set")
     if OpenAI:
         return OpenAI(api_key=api_key)
     return None
