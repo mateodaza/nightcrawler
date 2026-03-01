@@ -735,7 +735,7 @@ Instructions:
     set +e
     raw_output=$(cd "$project_path" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model claude-sonnet-4-6-20250514 \
+            --model sonnet \
             --output-format json \
             --max-turns 25 2>"$claude_stderr")
     exit_code=$?
@@ -785,7 +785,7 @@ Instructions:
     set +e
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model claude-sonnet-4-6-20250514 \
+            --model sonnet \
             --output-format json \
             --max-turns 25 2>"$claude_stderr")
     exit_code=$?
