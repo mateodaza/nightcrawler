@@ -6,7 +6,7 @@ Be concise. Report results, not process. Budget is sacred — every call through
 ## ABSOLUTE RULES (never overridden)
 
 1. NEVER write project code — delegate via scripts
-2. NEVER push to git — all commits are local only, Mateo pushes
+2. NEVER push to main — push to nightcrawler/dev only
 3. NEVER skip Codex audit — if Codex is down, STOP
 4. NEVER exceed 3 iterations per phase — 3 rejections = LOCK → escalate to Telegram, do NOT auto-resolve
 5. NEVER create probe/test contracts — validate imports via real contracts only
@@ -64,7 +64,9 @@ There is NO "Tier 2 autonomy". If Codex rejects 3 times, you LOCK and escalate. 
 8. mkdir -p ~/nightcrawler/sessions/$SESSION_ID/tasks
    Initialize journal.jsonl with session_start event
 9. Start heartbeat: bash ~/nightcrawler/scripts/session.sh heartbeat-start $SESSION_ID &
-10. Read (never modify): GLOBAL_PLAN.md, TASK_QUEUE.md, PROGRESS.md, memory.md, RULES.md
+10. Read context: GLOBAL_PLAN.md, TASK_QUEUE.md, PROGRESS.md, memory.md, RULES.md
+    Read SESSION_PROGRESS.md if it exists — this tells you where the last session left off.
+    Use TASK_QUEUE.md [x] markers to determine which tasks are already completed.
 11. Validate Codex: python3 ~/nightcrawler/scripts/call_codex.py --test
     → If fails: Telegram CODEX DOWN → release lock → STOP
 12. Baseline: forge build && forge test → if fails: Telegram "Repo is red" → STOP
@@ -111,14 +113,19 @@ PHASE B — IMPLEMENT:
   B5. If APPROVED: proceed to Phase C
 
 PHASE C — CLOSE TASK:
-  C1. git add -A && git commit (structured message per SPEC.md)
-      ⚠️ DO NOT git push. Local commits only.
+  C1. BEFORE committing, update these files:
+      - TASK_QUEUE.md: mark task [x] with commit info
+      - PROGRESS.md: mark task completed with commit hash
+      - SESSION_PROGRESS.md: update session state (see format below)
+      - memory.md: any new patterns/decisions
+      Then: git add -A && git commit (structured message per SPEC.md)
+      ⚠️ Progress updates MUST be in the same commit as the implementation.
   C2. Post-commit: forge build && forge test
       → If fails: git revert HEAD --no-edit
       → 1st revert: re-enter Phase B with error
       → 2nd revert: LOCK → escalate → park task
-  C3. Update PROGRESS.md (mark completed), TASK_QUEUE.md (mark done), memory.md
-      git add -A && git commit -m "[nightcrawler] chore: update progress for $TASK"
+  C3. git push origin nightcrawler/dev
+      ⚠️ NEVER push to main. Only push to nightcrawler/dev.
   C4. Telegram: "✅ $TASK completed — commit <hash>. Remaining: <N>. Spent: $<X>."
   C5. Budget check → if < $1.00 → SESSION END
 
@@ -135,6 +142,20 @@ PHASE C — CLOSE TASK:
 5. Telegram: "⏹️ Session done. Completed: <N> Blocked: <N> Locked: <N>. Cost: $<total>."
 6. bash ~/nightcrawler/scripts/session.sh release <project>
    bash ~/nightcrawler/scripts/session.sh heartbeat-stop
+```
+
+## SESSION_PROGRESS.md Format
+
+Maintain this file in PROJECT_PATH. Update it in C1 (same commit as implementation).
+On startup, read it to resume from where the last session left off.
+
+```
+# Session Progress
+Last session: <SESSION_ID>
+Last completed: <TASK_ID> (<commit_hash>)
+Tasks done: NC-001, NC-002, ...
+Next eligible: <TASK_ID>
+Status: completed | interrupted | locked
 ```
 
 ## Escalation Response Handling
