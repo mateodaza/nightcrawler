@@ -42,6 +42,7 @@ REVIEW_WALL=180 REVIEW_IDLE=60
 FORGE_BUILD_WALL=120 FORGE_BUILD_IDLE=60
 FORGE_TEST_WALL=300  FORGE_TEST_IDLE=120
 CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
+CLAUDE_CLI_TIMEOUT=1200 # wall-clock safety net for Claude Code CLI (no idle — JSON mode has no output)
 
 # =============================================================================
 # SEC 2: State flags
@@ -204,6 +205,7 @@ stop_heartbeat() {
         rm -f "/tmp/nightcrawler-${PROJECT}-heartbeat"
     fi
 }
+
 
 # --- File ownership: content-based provenance ---
 
@@ -723,9 +725,11 @@ Instructions:
     log "Implementing $task_id"
     update_status "implementing $task_id"
 
+    # Use timeout (not run_timed) — Claude Code CLI in JSON mode produces no
+    # intermediate output, so idle timeout would kill it prematurely.
     local raw_output exit_code
     set +e
-    raw_output=$(run_timed $IMPL_WALL $IMPL_IDLE \
+    raw_output=$(timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
             --model claude-sonnet-4-6-20250514 \
             --output-format json \
@@ -767,9 +771,10 @@ Instructions:
     log "Revising implementation (iteration $iteration)"
     update_status "revising $TASK_ID (iteration $iteration)"
 
+    # Use timeout (not run_timed) — same reason as implement_task
     local raw_output exit_code
     set +e
-    raw_output=$(run_timed $IMPL_WALL $IMPL_IDLE \
+    raw_output=$(timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
             --model claude-sonnet-4-6-20250514 \
             --output-format json \
@@ -845,7 +850,9 @@ impl_loop() {
     local plan_file="$1" task_id="$2"
     local -a feedbacks=()
     local iteration=0
+    local reviews_reached=0
     IMPL_REVIEW_MODE="approved"
+    REVIEW_FEEDBACK=""
 
     while (( iteration < 3 )); do
         iteration=$((iteration + 1))
@@ -867,6 +874,7 @@ impl_loop() {
         record_touched_files
 
         run_review "$plan_file"
+        reviews_reached=$((reviews_reached + 1))
         journal '{"event":"impl_reviewed","task_id":"'"$task_id"'","verdict":"'"$REVIEW_VERDICT"'","iteration":'"$iteration"'}'
 
         if [[ "$REVIEW_VERDICT" != "APPROVED" ]]; then
@@ -914,7 +922,13 @@ impl_loop() {
         return 0
     done
 
-    # 3 iterations exhausted — check if we can proceed with local verification
+    # 3 iterations exhausted — distinguish implementation failures from soft rejections
+    if [[ $reviews_reached -eq 0 ]]; then
+        log "impl_loop: all $iteration iterations failed before reaching review — implementation broken"
+        IMPL_REVIEW_MODE="hard_block"
+        return 1
+    fi
+
     log "impl_loop: 3 iterations exhausted — checking local safety gates"
 
     # Scope must be clean
@@ -939,8 +953,10 @@ impl_loop() {
     # All local gates passed — proceed with warning
     log "impl_loop: 3 soft rejections exhausted — local verification passed, proceeding"
     IMPL_REVIEW_MODE="capped_soft_reject"
-    IMPL_LAST_FEEDBACK="$REVIEW_FEEDBACK"
-    journal '{"event":"impl_capped_soft_reject","task_id":"'"$task_id"'","iteration":'"$iteration"',"last_feedback":"'"$(echo "$REVIEW_FEEDBACK" | head -c 500 | sed 's/"/\\"/g')"'"}'
+    IMPL_LAST_FEEDBACK="${REVIEW_FEEDBACK:-no review feedback available}"
+    local safe_feedback
+    safe_feedback=$(echo "${REVIEW_FEEDBACK:-}" | head -c 500 | sed 's/"/\\"/g')
+    journal '{"event":"impl_capped_soft_reject","task_id":"'"$task_id"'","iteration":'"$iteration"',"last_feedback":"'"$safe_feedback"'"}'
     return 0
 }
 
@@ -1429,8 +1445,153 @@ main_loop() {
 }
 
 # =============================================================================
-# SEC 11: Session end + signals
+# SEC 11: Session report, end + signals
 # =============================================================================
+
+generate_session_report() {
+    [[ "$SESSION_INITIALIZED" != "true" ]] && return
+    local report="$SESSION_DIR/report.md"
+    local journal_file="$SESSION_DIR/journal.jsonl"
+    local end_time
+    end_time=$(date -u +%FT%TZ)
+
+    cat > "$report" <<HEADER
+# Nightcrawler Session Report
+
+**Session:** $SESSION_ID
+**Project:** $PROJECT
+**Started:** $(head -1 "$journal_file" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('ts','unknown'))" 2>/dev/null || echo "unknown")
+**Ended:** $end_time
+**Exit:** $(if [[ "$ORDERLY_EXIT" == "true" ]]; then echo "completed"; else echo "aborted"; fi)
+**Budget:** \$$BUDGET_CAP (spent: \$$TOTAL_COST)
+**Baseline:** ${BASELINE:-unknown}
+
+---
+
+## Tasks
+HEADER
+
+    # Parse journal for task events
+    if [[ -f "$journal_file" ]]; then
+        python3 -c "
+import json, sys
+
+journal_path = '$journal_file'
+tasks = {}
+events = []
+
+with open(journal_path) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except:
+            continue
+        events.append(e)
+        tid = e.get('task_id', '')
+        ev = e.get('event', '')
+        if tid and ev:
+            if tid not in tasks:
+                tasks[tid] = {'events': [], 'cost': 0, 'commit': '', 'verdict_history': [], 'degraded': False}
+            tasks[tid]['events'].append(ev)
+            if ev == 'task_complete':
+                tasks[tid]['cost'] = e.get('cost', 0)
+                tasks[tid]['commit'] = e.get('commit', '')[:8]
+            if ev in ('plan_capped_soft_reject', 'impl_capped_soft_reject'):
+                tasks[tid]['degraded'] = True
+                tasks[tid]['last_feedback'] = e.get('last_feedback', '')
+            if ev == 'plan_hard_block':
+                tasks[tid]['hard_block'] = 'plan'
+            if ev == 'impl_hard_block':
+                tasks[tid]['hard_block'] = 'impl'
+            if ev in ('plan_audited', 'impl_reviewed'):
+                tasks[tid]['verdict_history'].append(e.get('verdict', ''))
+
+if not tasks:
+    print('\nNo tasks were attempted this session.')
+else:
+    for tid, info in tasks.items():
+        evts = info['events']
+        status = '?'
+        if 'task_complete' in evts:
+            status = 'COMPLETED'
+        elif info.get('hard_block'):
+            status = f\"HARD BLOCK ({info['hard_block']})\"
+        elif 'session_aborted' in [e.get('event') for e in events]:
+            status = 'ABORTED (session ended)'
+        elif any('locked' in e.lower() for e in evts):
+            status = 'LOCKED'
+        else:
+            status = 'INCOMPLETE'
+
+        line = f\"### {tid} — {status}\"
+        if info['commit']:
+            line += f\" (commit: \`{info['commit']}\`)\"
+        print(line)
+
+        if info['cost']:
+            print(f\"- Cost: \${info['cost']}\")
+
+        verdicts = info['verdict_history']
+        if verdicts:
+            print(f\"- Review history: {' → '.join(verdicts)}\")
+
+        if info['degraded']:
+            print(f\"- ⚠ DEGRADED APPROVAL: Proceeded after 3 soft rejections; local verification passed.\")
+            fb = info.get('last_feedback', '')
+            if fb:
+                print(f\"- Last reviewer feedback: {fb[:500]}\")
+
+        if info.get('hard_block'):
+            print(f\"- BLOCKED on safety/correctness concern\")
+
+        print()
+" 2>/dev/null >> "$report"
+    fi
+
+    # Recovery info
+    if [[ "$RECOVERY_NEEDED" == "true" ]]; then
+        cat >> "$report" <<RECOVERY
+
+## Recovery
+- Previous session: $RECOVERY_SESSION_ID
+- Last event: $RECOVERY_LAST_EVENT
+- Task: $RECOVERY_TASK_ID
+- Commit: ${RECOVERY_COMMIT:-none}
+RECOVERY
+    fi
+
+    # Mateo's notes
+    local notes_file="$CONTROL_DIR/notes"
+    if [[ -f "$notes_file" ]] && [[ -s "$notes_file" ]]; then
+        echo "" >> "$report"
+        echo "## Mateo's Notes" >> "$report"
+        echo '```' >> "$report"
+        cat "$notes_file" >> "$report"
+        echo '```' >> "$report"
+    fi
+
+    # Git log of session commits
+    if [[ -n "${BASELINE:-}" ]]; then
+        local session_commits
+        session_commits=$(git -C "$PROJECT_PATH" log --oneline "${BASELINE}..HEAD" 2>/dev/null || echo "none")
+        if [[ -n "$session_commits" ]] && [[ "$session_commits" != "none" ]]; then
+            echo "" >> "$report"
+            echo "## Commits This Session" >> "$report"
+            echo '```' >> "$report"
+            echo "$session_commits" >> "$report"
+            echo '```' >> "$report"
+        fi
+    fi
+
+    echo "" >> "$report"
+    echo "---" >> "$report"
+    echo "*Generated at $end_time*" >> "$report"
+
+    log "Session report written to $report"
+}
 
 session_end() {
     [[ "$SESSION_ENDING" == "true" ]] && return
@@ -1448,6 +1609,8 @@ session_end() {
     if [[ "$SESSION_INITIALIZED" == "true" ]] && [[ "$ORDERLY_EXIT" != "true" ]]; then
         journal '{"event":"session_aborted","reason":"'"$reason"'","ts":"'"$(date -u +%FT%TZ)"'"}'
     fi
+
+    generate_session_report
 
     if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && [[ "$SESSION_INITIALIZED" == "true" ]]; then
         if [[ "$ORDERLY_EXIT" == "true" ]]; then
