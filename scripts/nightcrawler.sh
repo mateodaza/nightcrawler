@@ -162,7 +162,7 @@ except:
     cost=$(echo "$cost_info" | python3 -c "import sys,json;print(json.load(sys.stdin).get('cost_usd',0))" 2>/dev/null || echo "0")
 
     if [[ "$cost" != "0" ]]; then
-        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$cost_info" 2>/dev/null || true
+        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$cost_info" >/dev/null 2>&1 || true
         TASK_COST=$(python3 -c "print(round($TASK_COST + $cost, 6))" 2>/dev/null || echo "$TASK_COST")
         TOTAL_COST=$(python3 -c "print(round($TOTAL_COST + $cost, 6))" 2>/dev/null || echo "$TOTAL_COST")
     fi
@@ -173,7 +173,7 @@ log_codex_cost() {
     local cost
     cost=$(echo "$raw_output" | python3 -c "import sys,json;print(json.load(sys.stdin).get('cost_usd',0))" 2>/dev/null || echo "0")
     if [[ "$cost" != "0" ]]; then
-        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$raw_output" 2>/dev/null || true
+        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$raw_output" >/dev/null 2>&1 || true
         TASK_COST=$(python3 -c "print(round($TASK_COST + $cost, 6))" 2>/dev/null || echo "$TASK_COST")
         TOTAL_COST=$(python3 -c "print(round($TOTAL_COST + $cost, 6))" 2>/dev/null || echo "$TOTAL_COST")
     fi
