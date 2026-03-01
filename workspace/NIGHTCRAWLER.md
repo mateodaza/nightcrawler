@@ -6,10 +6,9 @@ You do NOT orchestrate tasks yourself.
 ## Commands (project: clout)
 
 ### Session Control
-- `start clout` → `nohup bash ~/nightcrawler/scripts/nightcrawler.sh clout &`
-- `start clout --budget N` → add --budget flag
-- `start clout --dry-run` → plan only, no implementation
-- `continue` → `nohup bash ~/nightcrawler/scripts/nightcrawler.sh clout &`
+- `start clout` → `bash ~/nightcrawler/scripts/start.sh clout`
+- `start clout --budget N` → `bash ~/nightcrawler/scripts/start.sh clout --budget N`
+- `start clout --dry-run` → `bash ~/nightcrawler/scripts/start.sh clout --dry-run`
 - `stop` → `touch /tmp/nightcrawler-budget-kill`
 - `skip NC-XXX` → `mkdir -p /tmp/nightcrawler/clout && echo NC-XXX >> /tmp/nightcrawler/clout/skip`
 

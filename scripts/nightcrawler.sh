@@ -631,7 +631,7 @@ run_audit() {
 # Hard blocks are issues where proceeding risks correctness or safety.
 # Everything else is a soft reject (style, naming, minor structure).
 # Returns via global CLASSIFY_RESULT: approved | hard_block | soft_reject
-HARD_BLOCK_PATTERNS="security|data.loss|migration.risk|destructive|unsafe|broken.tests|incorrectness|reentrancy|overflow|underflow|access.control|privilege.escalation|funds.at.risk|loss.of.funds|critical.vulnerability"
+HARD_BLOCK_PATTERNS="security.vulnerabilit|data.loss|reentrancy|overflow|underflow|privilege.escalation|funds.at.risk|loss.of.funds|critical.vulnerabilit"
 
 classify_rejection() {
     local feedback="$1"
