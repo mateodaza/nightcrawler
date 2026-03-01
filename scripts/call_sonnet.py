@@ -25,6 +25,18 @@ try:
 except ImportError:
     anthropic = None
 
+def _load_env():
+    """Load ~/.env into os.environ (setdefault — won't override existing vars)."""
+    env_file = Path.home() / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+_load_env()
+
 STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
 MODEL = os.environ.get("NIGHTCRAWLER_SONNET_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = 8192  # Higher limit for implementation code
