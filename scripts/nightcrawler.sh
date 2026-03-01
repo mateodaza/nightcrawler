@@ -188,6 +188,7 @@ update_status() {
 
 start_heartbeat() {
     (
+        exec 200>&-  # release inherited lock FD so heartbeat can't hold the flock
         while true; do
             echo "${SESSION_ID} $(date -u +%FT%TZ) $$" > "/tmp/nightcrawler-${PROJECT}-heartbeat"
             sleep 600
