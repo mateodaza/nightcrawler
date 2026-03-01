@@ -21,6 +21,7 @@ PROJECT_PATH="${NIGHTCRAWLER_PROJECT_PATH:-/home/nightcrawler/projects/$PROJECT}
 CONTROL_DIR="/tmp/nightcrawler/${PROJECT}"
 SESSION_ID="$(date -u +%Y%m%d-%H%M%S)-${PROJECT}"
 SESSION_DIR="$STATE_DIR/sessions/$SESSION_ID"
+mkdir -p "$SESSION_DIR"
 LOCKFILE="/tmp/nightcrawler-${PROJECT}.lock"
 TOUCHED_FILES="$CONTROL_DIR/touched_files"
 
@@ -1218,9 +1219,8 @@ startup() {
     flock -n 200 || die "Another session running (lock held on $LOCKFILE)"
     echo "$$" >&200
 
-    # 2. Create control dir
+    # 2. Create control dir (SESSION_DIR already created at init)
     mkdir -p "$CONTROL_DIR"
-    mkdir -p "$SESSION_DIR"
 
     # 3. Discover recovery needs (read-only)
     discover_recovery_needs
