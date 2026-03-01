@@ -1,0 +1,1446 @@
+#!/usr/bin/env bash
+# nightcrawler.sh — Deterministic bash orchestrator for autonomous task execution.
+#
+# Usage: nightcrawler.sh <project> [--budget N] [--dry-run]
+#
+# LLMs are only called for creative work (planning, coding, reviewing).
+# All routing, sequencing, and error handling is deterministic bash.
+
+set -euo pipefail
+
+# =============================================================================
+# SEC 1: Environment + constants
+# =============================================================================
+
+PROJECT="${1:?Usage: nightcrawler.sh <project> [--budget N] [--dry-run]}"
+shift
+
+SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-/home/nightcrawler/nightcrawler}"
+PROJECT_PATH="${NIGHTCRAWLER_PROJECT_PATH:-/home/nightcrawler/projects/$PROJECT}"
+CONTROL_DIR="/tmp/nightcrawler/${PROJECT}"
+SESSION_ID="$(date -u +%Y%m%d-%H%M%S)-${PROJECT}"
+SESSION_DIR="$STATE_DIR/sessions/$SESSION_ID"
+LOCKFILE="/tmp/nightcrawler-${PROJECT}.lock"
+TOUCHED_FILES="$CONTROL_DIR/touched_files"
+
+BUDGET_CAP=20
+DRY_RUN=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --budget) BUDGET_CAP="$2"; shift 2 ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        *) echo "Unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
+
+# Timeouts (seconds)
+PLAN_WALL=300   PLAN_IDLE=120
+AUDIT_WALL=180  AUDIT_IDLE=60
+IMPL_WALL=600   IMPL_IDLE=180
+REVIEW_WALL=180 REVIEW_IDLE=60
+FORGE_BUILD_WALL=120 FORGE_BUILD_IDLE=60
+FORGE_TEST_WALL=300  FORGE_TEST_IDLE=120
+CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
+
+# =============================================================================
+# SEC 2: State flags
+# =============================================================================
+
+SESSION_INITIALIZED=false
+SESSION_ENDING=false
+ORDERLY_EXIT=false
+HEARTBEAT_STARTED=false
+RECOVERY_NEEDED=false
+RECOVERY_LAST_EVENT=""
+RECOVERY_TASK_ID=""
+RECOVERY_COMMIT=""
+RECOVERY_SESSION_ID=""
+TASK_COST=0
+TOTAL_COST=0
+
+# =============================================================================
+# SEC 3: Helpers
+# =============================================================================
+
+log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$SESSION_DIR/nightcrawler.log" 2>/dev/null || echo "[$(date -u +%FT%TZ)] $*"; }
+
+run_timed() {
+    local wall="$1" idle="$2"; shift 2
+    python3 "$SCRIPTS/run_with_timeout.py" "$wall" "$idle" "$@"
+}
+
+journal() {
+    local entry="$1"
+    mkdir -p "$SESSION_DIR"
+    echo "$entry" >> "$SESSION_DIR/journal.jsonl"
+    python3 -c "
+import os
+fd = os.open('$SESSION_DIR/journal.jsonl', os.O_RDONLY)
+os.fsync(fd)
+os.close(fd)
+" 2>/dev/null || true
+}
+
+html_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    echo "$s"
+}
+
+notify_normal() {
+    local msg="$1"
+    [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && return 0
+    [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
+    local escaped
+    escaped=$(html_escape "$msg")
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="$TELEGRAM_CHAT_ID" \
+        -d parse_mode=HTML \
+        -d text="$escaped" >/dev/null 2>&1 || true
+}
+
+escalate_urgent() {
+    local msg="$1"
+    [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && return 0
+    [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
+    local escaped
+    escaped=$(html_escape "$msg")
+    local attempt
+    for attempt in 1 2 3; do
+        if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d parse_mode=HTML \
+            -d text="$escaped" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 5
+    done
+}
+
+die() {
+    log "FATAL: $*"
+    escalate_urgent "FATAL ($PROJECT): $*"
+    exit 1
+}
+
+budget_check() {
+    python3 "$SCRIPTS/budget.py" check "$SESSION_ID" 2>/dev/null || echo '{"can_continue": false}'
+}
+
+budget_pre_check() {
+    local check
+    check=$(budget_check)
+    local can
+    can=$(echo "$check" | python3 -c "import sys,json;print(json.load(sys.stdin).get('can_continue',False))" 2>/dev/null || echo "False")
+    if [[ "$can" != "True" ]]; then
+        log "Budget exhausted"
+        return 1
+    fi
+    return 0
+}
+
+log_claude_cli_cost() {
+    local raw_output="$1" task_id="$2" phase="$3"
+    local cost_info
+    cost_info=$(echo "$raw_output" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    cost = data.get('cost_usd', data.get('cost', 0))
+    inp = data.get('input_tokens', 0)
+    out = data.get('output_tokens', 0)
+    model = data.get('model', 'unknown')
+    print(json.dumps({'cost_usd': cost, 'input_tokens': inp, 'output_tokens': out, 'model': model}))
+except:
+    print(json.dumps({'cost_usd': 0, 'input_tokens': 0, 'output_tokens': 0, 'model': 'unknown'}))
+" 2>/dev/null)
+
+    local cost
+    cost=$(echo "$cost_info" | python3 -c "import sys,json;print(json.load(sys.stdin).get('cost_usd',0))" 2>/dev/null || echo "0")
+
+    if [[ "$cost" != "0" ]]; then
+        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$cost_info" 2>/dev/null || true
+        TASK_COST=$(python3 -c "print(round($TASK_COST + $cost, 6))" 2>/dev/null || echo "$TASK_COST")
+        TOTAL_COST=$(python3 -c "print(round($TOTAL_COST + $cost, 6))" 2>/dev/null || echo "$TOTAL_COST")
+    fi
+}
+
+log_codex_cost() {
+    local raw_output="$1"
+    local cost
+    cost=$(echo "$raw_output" | python3 -c "import sys,json;print(json.load(sys.stdin).get('cost_usd',0))" 2>/dev/null || echo "0")
+    if [[ "$cost" != "0" ]]; then
+        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$raw_output" 2>/dev/null || true
+        TASK_COST=$(python3 -c "print(round($TASK_COST + $cost, 6))" 2>/dev/null || echo "$TASK_COST")
+        TOTAL_COST=$(python3 -c "print(round($TOTAL_COST + $cost, 6))" 2>/dev/null || echo "$TOTAL_COST")
+    fi
+}
+
+update_status() {
+    local status="$1"
+    echo "$status" > "/tmp/nightcrawler-${PROJECT}-status" 2>/dev/null || true
+}
+
+start_heartbeat() {
+    (
+        while true; do
+            echo "${SESSION_ID} $(date -u +%FT%TZ) $$" > "/tmp/nightcrawler-${PROJECT}-heartbeat"
+            sleep 600
+        done
+    ) &
+    HEARTBEAT_PID=$!
+    HEARTBEAT_STARTED=true
+    log "Heartbeat started (PID $HEARTBEAT_PID)"
+}
+
+stop_heartbeat() {
+    if [[ "$HEARTBEAT_STARTED" == "true" ]] && [[ -n "${HEARTBEAT_PID:-}" ]]; then
+        kill "$HEARTBEAT_PID" 2>/dev/null || true
+        wait "$HEARTBEAT_PID" 2>/dev/null || true
+        HEARTBEAT_STARTED=false
+        rm -f "/tmp/nightcrawler-${PROJECT}-heartbeat"
+    fi
+}
+
+# --- File ownership: content-based provenance ---
+
+record_touched_files() {
+    cd "$PROJECT_PATH"
+    local snap="$CONTROL_DIR/touched_snap"
+    : > "$snap"
+
+    _snap_file() {
+        local f="$1"
+        [[ -z "$f" ]] && return
+        if [[ -e "$f" ]]; then
+            printf '%s\t%s\n' "$f" "$(git hash-object "$f" 2>/dev/null)" >> "$snap"
+        else
+            printf '%s\tDELETED\n' "$f" >> "$snap"
+        fi
+    }
+
+    while IFS= read -r -d '' f; do _snap_file "$f"; done \
+        < <(git diff --name-only -z HEAD -- 2>/dev/null)
+    while IFS= read -r -d '' f; do _snap_file "$f"; done \
+        < <(git diff --name-only -z --cached HEAD -- 2>/dev/null)
+    while IFS= read -r -d '' f; do _snap_file "$f"; done \
+        < <(git ls-files --others --exclude-standard -z)
+
+    if [[ -s "$TOUCHED_FILES" ]]; then
+        awk -F'\t' '{data[$1]=$0} END {for(k in data) print data[k]}' \
+            "$TOUCHED_FILES" "$snap" | sort -t$'\t' -k1,1 > "$TOUCHED_FILES.tmp"
+        mv "$TOUCHED_FILES.tmp" "$TOUCHED_FILES"
+    else
+        sort -t$'\t' -k1,1 -u "$snap" > "$TOUCHED_FILES"
+    fi
+    rm -f "$snap"
+}
+
+revert_owned_files() {
+    [[ -f "$TOUCHED_FILES" ]] || return 0
+    cd "$PROJECT_PATH"
+    local reverted=0 skipped=0
+
+    while IFS=$'\t' read -r f recorded_hash; do
+        [[ -z "$f" ]] && continue
+
+        if [[ "$recorded_hash" == "DELETED" ]]; then
+            if [[ ! -e "$f" ]]; then
+                if git cat-file -e "HEAD:$f" 2>/dev/null; then
+                    git checkout HEAD -- "$f" 2>/dev/null || true
+                    reverted=$((reverted + 1))
+                fi
+            else
+                log "SKIP $f — restored since crash"
+                skipped=$((skipped + 1))
+            fi
+            continue
+        fi
+
+        if [[ ! -e "$f" ]]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        local current_hash
+        current_hash=$(git hash-object "$f" 2>/dev/null || echo "ERR")
+        if [[ "$current_hash" != "$recorded_hash" ]]; then
+            log "SKIP $f — modified since crash (${recorded_hash:0:8} -> ${current_hash:0:8})"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        if git cat-file -e "HEAD:$f" 2>/dev/null; then
+            git checkout HEAD -- "$f" 2>/dev/null || true
+        else
+            git rm -f --cached -- "$f" 2>/dev/null || true
+            case "$f" in ..|../*|/*|"") continue ;; esac
+            rm -rf -- "$f" 2>/dev/null || true
+        fi
+        reverted=$((reverted + 1))
+    done < "$TOUCHED_FILES"
+
+    [[ $skipped -gt 0 ]] && log "Skipped $skipped files (modified/removed since crash)"
+    log "Reverted $reverted Nightcrawler-owned files"
+}
+
+rotate_manifest() {
+    if [[ -f "$TOUCHED_FILES" ]]; then
+        mv "$TOUCHED_FILES" "$TOUCHED_FILES.prev-${SESSION_ID}"
+        log "Archived previous manifest"
+    fi
+    : > "$TOUCHED_FILES"
+}
+
+# --- Pre-switch worktree safety gate ---
+
+require_clean_worktree_for_switch() {
+    local current
+    current=$(git -C "$PROJECT_PATH" rev-parse --abbrev-ref HEAD)
+    if [[ "$current" == "nightcrawler/dev" ]]; then
+        return 0
+    fi
+
+    if [[ -z "$(git -C "$PROJECT_PATH" status --porcelain 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    if [[ "$RECOVERY_NEEDED" == "true" ]]; then
+        local prev_touched="$CONTROL_DIR/touched_files"
+        if [[ -f "$prev_touched" ]]; then
+            log "Dirty worktree on $current — cleaning Nightcrawler crash residue"
+            local saved="$TOUCHED_FILES"
+            TOUCHED_FILES="$prev_touched"
+            revert_owned_files
+            TOUCHED_FILES="$saved"
+
+            if [[ -z "$(git -C "$PROJECT_PATH" status --porcelain 2>/dev/null)" ]]; then
+                log "Crash residue cleaned on $current"
+                return 0
+            fi
+            die "Worktree dirty on '$current' after cleaning crash residue — manual cleanup needed"
+        fi
+    fi
+
+    die "Worktree dirty on '$current' — commit or stash before running Nightcrawler"
+}
+
+# --- Scope verification ---
+
+verify_impl_scope() {
+    cd "$PROJECT_PATH"
+    local violations=0
+
+    # Check tracked changes
+    while IFS= read -r -d '' f; do
+        case "$f" in
+            src/*|lib/*|test/*|script/*) ;;  # expected
+            TASK_QUEUE.md|PROGRESS.md|SESSION_PROGRESS.md|memory.md) ;;  # expected
+            foundry.toml|remappings.txt) ;;  # expected config
+            *)
+                log "SCOPE: Unexpected tracked change: $f"
+                git checkout HEAD -- "$f" 2>/dev/null || true
+                violations=$((violations + 1))
+                ;;
+        esac
+    done < <(git diff --name-only -z HEAD -- 2>/dev/null)
+
+    # Check untracked files
+    while IFS= read -r -d '' f; do
+        case "$f" in
+            src/*|lib/*|test/*|script/*) ;;
+            *)
+                log "SCOPE: Unexpected untracked file: $f"
+                case "$f" in ..|../*|/*|"") continue ;; esac
+                rm -rf -- "$f" 2>/dev/null || true
+                violations=$((violations + 1))
+                ;;
+        esac
+    done < <(git ls-files --others --exclude-standard -z)
+
+    if [[ $violations -gt 0 ]]; then
+        log "SCOPE: Cleaned $violations violations"
+        return 1
+    fi
+    return 0
+}
+
+# =============================================================================
+# SEC 4: Task queue
+# =============================================================================
+
+pick_next_task() {
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+    [[ -f "$queue" ]] || { echo ""; return; }
+
+    # Check skip list
+    local skip_file="$CONTROL_DIR/skip"
+
+    python3 -c "
+import re, sys
+
+queue_path = '$queue'
+skip_path = '$skip_file'
+
+skips = set()
+try:
+    with open(skip_path) as f:
+        skips = {l.strip() for l in f if l.strip()}
+except FileNotFoundError:
+    pass
+
+with open(queue_path) as f:
+    lines = f.readlines()
+
+# Find first [ ] task whose deps are all [x]
+done_ids = set()
+for line in lines:
+    m = re.match(r'- \[x\]\s+\*\*(NC-\d+)\*\*', line)
+    if m:
+        done_ids.add(m.group(1))
+
+for line in lines:
+    m = re.match(r'- \[ \]\s+\*\*(NC-\d+)\*\*', line)
+    if not m:
+        continue
+    task_id = m.group(1)
+    if task_id in skips:
+        continue
+    if 'MANUAL' in line:
+        continue
+
+    # Check dependencies
+    dep_match = re.search(r'deps?:\s*([\w,\s-]+)', line, re.IGNORECASE)
+    if dep_match:
+        deps = [d.strip() for d in dep_match.group(1).split(',') if d.strip()]
+        if not all(d in done_ids for d in deps):
+            continue
+
+    print(task_id)
+    sys.exit(0)
+
+print('')
+" 2>/dev/null
+}
+
+extract_task_context() {
+    local task_id="$1"
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+    python3 -c "
+import re
+
+with open('$queue') as f:
+    content = f.read()
+
+# Find task block
+pattern = r'- \[ \]\s+\*\*' + re.escape('$task_id') + r'\*\*[^\n]*\n((?:  [^\n]*\n)*)'
+m = re.search(pattern, content)
+if m:
+    header = m.group(0).split('\n')[0]
+    body = m.group(1) if m.group(1) else ''
+    print(header)
+    print(body)
+else:
+    print('Task $task_id')
+" 2>/dev/null
+}
+
+mark_task_done_in_queue() {
+    local task_id="$1"
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+    sed -i "s/- \[ \] \*\*${task_id}\*\*/- [x] **${task_id}**/" "$queue"
+}
+
+mark_task_in_progress() {
+    local task_id="$1"
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+    sed -i "s/- \[ \] \*\*${task_id}\*\*/- [~] **${task_id}**/" "$queue"
+}
+
+append_to_progress() {
+    local task_id="$1" degraded_note="${2:-}"
+    local progress="$PROJECT_PATH/PROGRESS.md"
+    local hash
+    hash=$(git -C "$PROJECT_PATH" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    local line="- **${task_id}** — $(date -u +%F) — \`${hash}\` — Session: ${SESSION_ID}"
+    if [[ -n "$degraded_note" ]]; then
+        line="${line} — ⚠ $(echo -e "$degraded_note" | head -1)"
+    fi
+    echo "$line" >> "$progress"
+}
+
+count_tasks() {
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+    [[ -f "$queue" ]] || { echo "0"; return; }
+    grep -c '^\- \[ \]' "$queue" 2>/dev/null || echo "0"
+}
+
+# =============================================================================
+# SEC 5: Phase A — Plan
+# =============================================================================
+
+plan_task() {
+    local task_file="$1" task_id="$2"
+    local plan_dir="$SESSION_DIR/tasks/$task_id"
+    mkdir -p "$plan_dir"
+
+    log "Planning $task_id"
+    update_status "planning $task_id"
+
+    local raw_output exit_code
+    set +e
+    raw_output=$(run_timed $PLAN_WALL $PLAN_IDLE \
+        python3 "$SCRIPTS/call_opus.py" plan \
+            --task-file "$task_file" \
+            --template "$STATE_DIR/templates/mini_plan.md" \
+            --session "$SESSION_ID" \
+            --task "$task_id")
+    exit_code=$?
+    set -e
+
+    log_claude_cli_cost "$raw_output" "$task_id" "planning"
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "Plan command failed (exit $exit_code)"
+        return 1
+    fi
+
+    # call_opus.py writes mini_plan.md to disk and prints metadata JSON to stdout.
+    # Extract the plan_file path from metadata.
+    local plan_file
+    plan_file=$(echo "$raw_output" | python3 -c "import sys,json;print(json.load(sys.stdin)['plan_file'])" 2>/dev/null)
+    if [[ -z "$plan_file" ]] || [[ ! -f "$plan_file" ]]; then
+        log "Plan metadata missing plan_file or file not found"
+        return 1
+    fi
+
+    echo "$plan_file"
+}
+
+revise_plan() {
+    local plan_file="$1" feedback="$2" iteration="$3" task_id="$4"
+
+    log "Revising plan (iteration $iteration)"
+    local raw_output exit_code
+    set +e
+    raw_output=$(run_timed $PLAN_WALL $PLAN_IDLE \
+        python3 "$SCRIPTS/call_opus.py" revise \
+            --plan "$plan_file" \
+            --feedback "$feedback" \
+            --iteration "$iteration")
+    exit_code=$?
+    set -e
+
+    log_claude_cli_cost "$raw_output" "$task_id" "plan-revision"
+
+    if [[ $exit_code -ne 0 ]]; then
+        return 1
+    fi
+
+    # call_opus.py already wrote the revised plan to $plan_file (line 197).
+    # stdout is metadata JSON only — nothing to extract for the file itself.
+
+    return 0
+}
+
+# Codex audit — uses timeout (not run_timed) to preserve stderr separation
+audit_plan_call() {
+    local plan_file="$1" task_file="$2"
+
+    local raw_output exit_code
+    set +e
+    raw_output=$(timeout "$CODEX_CALL_TIMEOUT" \
+        python3 "$SCRIPTS/call_codex.py" audit-plan \
+            --plan "$plan_file" \
+            --task-file "$task_file" \
+            --rules "$STATE_DIR/RULES.md" \
+            --project "$PROJECT_PATH")
+    exit_code=$?
+    set -e
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "Audit command failed (exit $exit_code)"
+        return 2
+    fi
+
+    if ! echo "$raw_output" | python3 -c "import sys,json;json.load(sys.stdin)" 2>/dev/null; then
+        log "Audit returned invalid JSON"
+        return 2
+    fi
+
+    log_codex_cost "$raw_output"
+    echo "$raw_output"
+    return 0
+}
+
+run_audit() {
+    local plan_file="$1" task_file="$2"
+    set +e
+    AUDIT_RAW=$(audit_plan_call "$plan_file" "$task_file")
+    local rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        die "Audit infrastructure failure (exit $rc) — Codex unavailable, stopping session"
+    fi
+    AUDIT_VERDICT=$(echo "$AUDIT_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verdict','REJECTED'))")
+    AUDIT_FEEDBACK=$(echo "$AUDIT_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('feedback',''))")
+}
+
+# Classify a review/audit rejection as hard_block or soft_reject.
+# Hard blocks are issues where proceeding risks correctness or safety.
+# Everything else is a soft reject (style, naming, minor structure).
+# Returns via global CLASSIFY_RESULT: approved | hard_block | soft_reject
+HARD_BLOCK_PATTERNS="security|data.loss|migration.risk|destructive|unsafe|broken.tests|incorrectness|reentrancy|overflow|underflow|access.control|privilege.escalation|funds.at.risk|loss.of.funds|critical.vulnerability"
+
+classify_rejection() {
+    local feedback="$1"
+    local lower
+    lower=$(echo "$feedback" | tr '[:upper:]' '[:lower:]')
+
+    if echo "$lower" | grep -qEi "$HARD_BLOCK_PATTERNS"; then
+        CLASSIFY_RESULT="hard_block"
+    else
+        CLASSIFY_RESULT="soft_reject"
+    fi
+}
+
+plan_loop() {
+    local task_file="$1" task_id="$2"
+    local plan_file iteration=0
+    local -a feedbacks=()
+    PLAN_AUDIT_MODE="approved"
+
+    plan_file=$(plan_task "$task_file" "$task_id") || return 1
+    [[ -z "$plan_file" ]] && return 1
+
+    while (( iteration < 3 )); do
+        iteration=$((iteration + 1))
+
+        run_audit "$plan_file" "$task_file"
+        journal '{"event":"plan_audited","task_id":"'"$task_id"'","verdict":"'"$AUDIT_VERDICT"'","iteration":'"$iteration"'}'
+
+        if [[ "$AUDIT_VERDICT" == "APPROVED" ]]; then
+            PLAN_AUDIT_MODE="approved"
+            journal '{"event":"plan_approved","task_id":"'"$task_id"'"}'
+            PLAN_FILE="$plan_file"
+            return 0
+        fi
+
+        # Classify rejection
+        classify_rejection "$AUDIT_FEEDBACK"
+
+        if [[ "$CLASSIFY_RESULT" == "hard_block" ]]; then
+            log "HARD BLOCK: Plan rejected with safety/correctness concern (iteration $iteration): ${AUDIT_FEEDBACK:0:200}"
+            PLAN_AUDIT_MODE="hard_block"
+            journal '{"event":"plan_hard_block","task_id":"'"$task_id"'","iteration":'"$iteration"'}'
+            return 1
+        fi
+
+        feedbacks+=("$AUDIT_FEEDBACK")
+        log "Plan soft-rejected (iteration $iteration): ${AUDIT_FEEDBACK:0:200}"
+
+        if (( iteration < 3 )); then
+            if ! revise_plan "$plan_file" "$AUDIT_FEEDBACK" "$iteration" "$task_id"; then
+                log "Plan revision failed"
+                feedbacks+=("Plan revision command failed")
+            fi
+        fi
+    done
+
+    # 3 soft rejections exhausted — proceed with warning
+    log "plan_loop: 3 soft rejections exhausted — proceeding with capped plan"
+    PLAN_AUDIT_MODE="capped_soft_reject"
+    PLAN_LAST_FEEDBACK="$AUDIT_FEEDBACK"
+    journal '{"event":"plan_capped_soft_reject","task_id":"'"$task_id"'","iteration":'"$iteration"',"last_feedback":"'"$(echo "$AUDIT_FEEDBACK" | head -c 500 | sed 's/"/\\"/g')"'"}'
+    PLAN_FILE="$plan_file"
+    return 0
+}
+
+# =============================================================================
+# SEC 6: Phase B — Implement
+# =============================================================================
+
+implement_task() {
+    local plan_file="$1" project_path="$2" task_id="$3"
+    local plan rules prompt
+
+    plan=$(cat "$plan_file")
+    rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
+
+    prompt="You are implementing a task for a Solidity/Foundry project.
+
+PLAN:
+${plan}
+
+RULES:
+${rules}
+
+Instructions:
+- Implement exactly what the plan says. No more, no less.
+- Write clean, tested Solidity code.
+- Run 'forge build' and 'forge test' to verify.
+- Do NOT modify files outside the plan's scope.
+- Do NOT create probe/test contracts.
+"
+
+    log "Implementing $task_id"
+    update_status "implementing $task_id"
+
+    local raw_output exit_code
+    set +e
+    raw_output=$(run_timed $IMPL_WALL $IMPL_IDLE \
+        claude -p "$prompt" \
+            --model claude-sonnet-4-6-20250514 \
+            --output-format json \
+            --max-turns 25 \
+            --cwd "$project_path")
+    exit_code=$?
+    set -e
+
+    record_touched_files
+    log_claude_cli_cost "$raw_output" "$task_id" "implementation"
+
+    return $exit_code
+}
+
+revise_impl() {
+    local plan_file="$1" feedback="$2" iteration="$3"
+    local plan rules prompt
+
+    plan=$(cat "$plan_file")
+    rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
+
+    prompt="You are revising an implementation that was rejected by the code reviewer.
+
+PLAN:
+${plan}
+
+REVIEWER FEEDBACK (iteration $iteration):
+${feedback}
+
+RULES:
+${rules}
+
+Instructions:
+- Address EVERY point in the reviewer's feedback.
+- Run 'forge build' and 'forge test' to verify your changes.
+- Do NOT modify files outside the plan's scope.
+"
+
+    log "Revising implementation (iteration $iteration)"
+    update_status "revising $TASK_ID (iteration $iteration)"
+
+    local raw_output exit_code
+    set +e
+    raw_output=$(run_timed $IMPL_WALL $IMPL_IDLE \
+        claude -p "$prompt" \
+            --model claude-sonnet-4-6-20250514 \
+            --output-format json \
+            --max-turns 25 \
+            --cwd "$PROJECT_PATH")
+    exit_code=$?
+    set -e
+
+    record_touched_files
+    log_claude_cli_cost "$raw_output" "$TASK_ID" "revision"
+
+    return $exit_code
+}
+
+# Codex review — uses timeout (not run_timed) to preserve stderr separation
+review_impl() {
+    local plan_file="$1"
+
+    local raw_output exit_code
+    set +e
+    raw_output=$(timeout "$CODEX_CALL_TIMEOUT" \
+        python3 "$SCRIPTS/call_codex.py" review-impl \
+            --project "$PROJECT_PATH" \
+            --plan "$plan_file" \
+            --rules "$STATE_DIR/RULES.md")
+    exit_code=$?
+    set -e
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "Review command failed (exit $exit_code)"
+        return 2
+    fi
+
+    if ! echo "$raw_output" | python3 -c "import sys,json;json.load(sys.stdin)" 2>/dev/null; then
+        log "Review returned invalid JSON"
+        return 2
+    fi
+
+    log_codex_cost "$raw_output"
+    echo "$raw_output"
+    return 0
+}
+
+run_review() {
+    local plan_file="$1"
+    set +e
+    REVIEW_RAW=$(review_impl "$plan_file")
+    local rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        die "Review infrastructure failure (exit $rc) — Codex unavailable, stopping session"
+    fi
+    REVIEW_VERDICT=$(echo "$REVIEW_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verdict','REJECTED'))")
+    REVIEW_FEEDBACK=$(echo "$REVIEW_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('feedback',''))")
+}
+
+check_impl_lock() {
+    local feedbacks_json
+    feedbacks_json=$(printf '%s\n' "$@" | python3 -c "import sys,json;print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))" 2>/dev/null)
+
+    local lock_result
+    set +e
+    lock_result=$(python3 "$SCRIPTS/lock_detect.py" check --feedbacks "$feedbacks_json" 2>/dev/null)
+    set -e
+
+    if echo "$lock_result" | grep -q '"locked": true' 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+impl_loop() {
+    local plan_file="$1" task_id="$2"
+    local -a feedbacks=()
+    local iteration=0
+    IMPL_REVIEW_MODE="approved"
+
+    while (( iteration < 3 )); do
+        iteration=$((iteration + 1))
+
+        if [[ $iteration -eq 1 ]]; then
+            if ! implement_task "$plan_file" "$PROJECT_PATH" "$task_id"; then
+                log "Implementation failed"
+                feedbacks+=("Implementation command failed")
+                continue
+            fi
+        else
+            if ! revise_impl "$plan_file" "${feedbacks[-1]}" "$iteration"; then
+                log "Revision failed"
+                feedbacks+=("Revision command failed")
+                continue
+            fi
+        fi
+
+        record_touched_files
+
+        run_review "$plan_file"
+        journal '{"event":"impl_reviewed","task_id":"'"$task_id"'","verdict":"'"$REVIEW_VERDICT"'","iteration":'"$iteration"'}'
+
+        if [[ "$REVIEW_VERDICT" != "APPROVED" ]]; then
+            # Classify rejection
+            classify_rejection "$REVIEW_FEEDBACK"
+
+            if [[ "$CLASSIFY_RESULT" == "hard_block" ]]; then
+                log "HARD BLOCK: Impl rejected with safety/correctness concern (iteration $iteration): ${REVIEW_FEEDBACK:0:200}"
+                IMPL_REVIEW_MODE="hard_block"
+                journal '{"event":"impl_hard_block","task_id":"'"$task_id"'","iteration":'"$iteration"'}'
+                return 1
+            fi
+
+            feedbacks+=("$REVIEW_FEEDBACK")
+            log "Impl soft-rejected (iteration $iteration): ${REVIEW_FEEDBACK:0:200}"
+            continue
+        fi
+
+        # APPROVED — check scope before accepting
+        if ! verify_impl_scope; then
+            log "Scope violations cleaned — re-testing and re-reviewing"
+
+            set +e
+            run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+            local build_ok=$?
+            run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test -v
+            local test_ok=$?
+            set -e
+
+            if [[ $build_ok -ne 0 ]] || [[ $test_ok -ne 0 ]]; then
+                feedbacks+=("Scope cleanup broke build/tests")
+                continue
+            fi
+
+            run_review "$plan_file"
+
+            if [[ "$REVIEW_VERDICT" != "APPROVED" ]]; then
+                feedbacks+=("Post-scope-cleanup re-review: $REVIEW_FEEDBACK")
+                continue
+            fi
+        fi
+
+        IMPL_REVIEW_MODE="approved"
+        journal '{"event":"impl_approved","task_id":"'"$task_id"'"}'
+        return 0
+    done
+
+    # 3 iterations exhausted — check if we can proceed with local verification
+    log "impl_loop: 3 iterations exhausted — checking local safety gates"
+
+    # Scope must be clean
+    if ! verify_impl_scope; then
+        log "Scope violations remain after cleanup — cannot proceed"
+    fi
+
+    # Build must pass
+    set +e
+    cd "$PROJECT_PATH"
+    run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+    local cap_build=$?
+    run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test -v
+    local cap_test=$?
+    set -e
+
+    if [[ $cap_build -ne 0 ]] || [[ $cap_test -ne 0 ]]; then
+        log "Local verification failed after 3 soft rejections — cannot proceed"
+        return 1
+    fi
+
+    # All local gates passed — proceed with warning
+    log "impl_loop: 3 soft rejections exhausted — local verification passed, proceeding"
+    IMPL_REVIEW_MODE="capped_soft_reject"
+    IMPL_LAST_FEEDBACK="$REVIEW_FEEDBACK"
+    journal '{"event":"impl_capped_soft_reject","task_id":"'"$task_id"'","iteration":'"$iteration"',"last_feedback":"'"$(echo "$REVIEW_FEEDBACK" | head -c 500 | sed 's/"/\\"/g')"'"}'
+    return 0
+}
+
+# =============================================================================
+# SEC 7: Phase C — Commit
+# =============================================================================
+
+commit_and_close_task() {
+    local task_id="$1" description="$2" degraded_note="${3:-}"
+    mark_task_done_in_queue "$task_id"
+    append_to_progress "$task_id" "$degraded_note"
+    cd "$PROJECT_PATH"
+    git add -A
+
+    local commit_msg="[nightcrawler] feat($task_id): $description
+
+Task: $task_id
+Session: $SESSION_ID
+Cost: \$${TASK_COST}"
+    if [[ -n "$degraded_note" ]]; then
+        commit_msg="${commit_msg}
+Note: $(echo -e "$degraded_note" | head -1)"
+    fi
+
+    git commit -m "$commit_msg"
+    local hash
+    hash=$(git rev-parse HEAD)
+    journal '{"event":"task_committed","task_id":"'"$task_id"'","commit":"'"$hash"'","ts":"'"$(date -u +%FT%TZ)"'"}'
+    echo "$hash"
+}
+
+verify_post_commit() {
+    local task_id="$1" commit_hash="$2"
+    cd "$PROJECT_PATH"
+
+    set +e
+    run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+    local b=$?
+    run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test -v
+    local t=$?
+    set -e
+
+    if [[ $b -ne 0 ]] || [[ $t -ne 0 ]]; then
+        return 1
+    fi
+
+    journal '{"event":"task_verified","task_id":"'"$task_id"'","commit":"'"$commit_hash"'"}'
+    return 0
+}
+
+handle_post_commit_failure() {
+    local task_id="$1" commit_hash="$2" revert_count="$3"
+
+    log "Post-commit verification failed for $task_id (revert $revert_count)"
+    cd "$PROJECT_PATH"
+    git revert --no-edit "$commit_hash"
+
+    if [[ $revert_count -ge 2 ]]; then
+        log "LOCKED: $task_id failed post-commit verification twice"
+        escalate_urgent "LOCKED ($PROJECT): $task_id failed post-commit verification 2x after revert"
+        return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
+# SEC 8: Recovery
+# =============================================================================
+
+discover_recovery_needs() {
+    local sessions_dir="$STATE_DIR/sessions"
+    RECOVERY_NEEDED=false
+
+    [[ -d "$sessions_dir" ]] || return 0
+
+    # Find most recent session journal for this project
+    local latest_journal="" latest_session=""
+    local d
+    for d in "$sessions_dir"/*-"$PROJECT"; do
+        if [[ -f "$d/journal.jsonl" ]]; then
+            latest_journal="$d/journal.jsonl"
+            latest_session=$(basename "$d")
+        fi
+    done
+
+    [[ -z "$latest_journal" ]] && return 0
+
+    # Check if last session completed cleanly
+    if grep -q '"event":"session_complete"' "$latest_journal" 2>/dev/null || \
+       grep -q '"event": "session_complete"' "$latest_journal" 2>/dev/null; then
+        return 0
+    fi
+
+    RECOVERY_NEEDED=true
+    RECOVERY_SESSION_ID="$latest_session"
+
+    # Parse last event
+    local last_line
+    last_line=$(tail -1 "$latest_journal" 2>/dev/null || echo "")
+
+    RECOVERY_LAST_EVENT=$(echo "$last_line" | python3 -c "
+import sys,json
+try:
+    print(json.load(sys.stdin).get('event','unknown'))
+except:
+    print('unknown')
+" 2>/dev/null)
+
+    RECOVERY_TASK_ID=$(echo "$last_line" | python3 -c "
+import sys,json
+try:
+    print(json.load(sys.stdin).get('task_id',''))
+except:
+    print('')
+" 2>/dev/null)
+
+    RECOVERY_COMMIT=$(echo "$last_line" | python3 -c "
+import sys,json
+try:
+    print(json.load(sys.stdin).get('commit',''))
+except:
+    print('')
+" 2>/dev/null)
+
+    log "RECOVERY: Previous session $RECOVERY_SESSION_ID did not complete (last event: $RECOVERY_LAST_EVENT)"
+}
+
+execute_recovery() {
+    [[ "$RECOVERY_NEEDED" != "true" ]] && return 0
+
+    local current_branch
+    current_branch=$(git -C "$PROJECT_PATH" rev-parse --abbrev-ref HEAD)
+    if [[ "$current_branch" != "nightcrawler/dev" ]]; then
+        die "Recovery needs nightcrawler/dev but on '$current_branch'"
+    fi
+
+    case "$RECOVERY_LAST_EVENT" in
+        task_committed)
+            if [[ -n "$RECOVERY_COMMIT" ]] && git -C "$PROJECT_PATH" cat-file -e "$RECOVERY_COMMIT" 2>/dev/null; then
+                log "RECOVERY: Found unverified commit $RECOVERY_COMMIT for $RECOVERY_TASK_ID"
+                cd "$PROJECT_PATH"
+                set +e
+                run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+                local b=$?
+                run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test
+                local t=$?
+                set -e
+                if [[ $b -eq 0 ]] && [[ $t -eq 0 ]]; then
+                    log "RECOVERY: Commit $RECOVERY_COMMIT passes verification"
+                    journal '{"event":"task_verified","task_id":"'"$RECOVERY_TASK_ID"'","commit":"'"$RECOVERY_COMMIT"'","recovery":true}'
+                else
+                    log "RECOVERY: Commit $RECOVERY_COMMIT failed verification, reverting"
+                    git -C "$PROJECT_PATH" revert --no-edit "$RECOVERY_COMMIT"
+                fi
+            else
+                log "RECOVERY: Commit ${RECOVERY_COMMIT:-empty} not found (hard crash before commit landed)"
+            fi
+            ;;
+        task_start|plan_approved|impl_approved)
+            log "RECOVERY: Task $RECOVERY_TASK_ID was in progress, resetting to queued"
+            ;;
+        *)
+            log "RECOVERY: Unknown last event '$RECOVERY_LAST_EVENT', proceeding cautiously"
+            ;;
+    esac
+
+    # Revert previous session's owned files using content-verified manifest
+    local prev_touched="$CONTROL_DIR/touched_files"
+    if [[ -f "$prev_touched" ]]; then
+        local saved="$TOUCHED_FILES"
+        TOUCHED_FILES="$prev_touched"
+        revert_owned_files
+        TOUCHED_FILES="$saved"
+    fi
+
+    # Reset stale [~] markers
+    local -a recovery_expected=()
+    if [[ -f "$PROJECT_PATH/TASK_QUEUE.md" ]]; then
+        if grep -q '\[~\]' "$PROJECT_PATH/TASK_QUEUE.md"; then
+            sed -i 's/\[~\]/[ ]/g' "$PROJECT_PATH/TASK_QUEUE.md"
+            recovery_expected+=("TASK_QUEUE.md")
+            log "RECOVERY: Reset stale [~] markers"
+        fi
+    fi
+
+    # Commit ONLY expected recovery mutations
+    cd "$PROJECT_PATH"
+    local unexpected=false
+    local dirty_files
+    dirty_files=$(git diff --name-only HEAD -- 2>/dev/null; git diff --name-only --cached HEAD -- 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
+
+    while IFS= read -r dirty_file; do
+        [[ -z "$dirty_file" ]] && continue
+        local is_expected=false
+        local exp
+        for exp in "${recovery_expected[@]+"${recovery_expected[@]}"}"; do
+            if [[ "$dirty_file" == "$exp" ]]; then
+                is_expected=true
+                break
+            fi
+        done
+        if [[ "$is_expected" != "true" ]]; then
+            log "RECOVERY: Unexpected dirty file: $dirty_file"
+            unexpected=true
+        fi
+    done <<< "$dirty_files"
+
+    if [[ "$unexpected" == "true" ]]; then
+        die "Recovery found unexpected dirty files — manual cleanup needed before Nightcrawler can run"
+    fi
+
+    if [[ ${#recovery_expected[@]} -gt 0 ]]; then
+        git add -- "${recovery_expected[@]}"
+        git commit -m "[nightcrawler] recovery: reconcile session $RECOVERY_SESSION_ID"
+        log "RECOVERY: Committed recovery mutations"
+    fi
+}
+
+# =============================================================================
+# SEC 9: Startup
+# =============================================================================
+
+switch_to_dev() {
+    local current
+    current=$(git -C "$PROJECT_PATH" rev-parse --abbrev-ref HEAD)
+
+    case "$current" in
+        "main")
+            if git -C "$PROJECT_PATH" rev-parse --verify nightcrawler/dev &>/dev/null; then
+                log "On main — switching to existing nightcrawler/dev"
+                git -C "$PROJECT_PATH" checkout nightcrawler/dev
+            else
+                log "First session — creating nightcrawler/dev from main"
+                git -C "$PROJECT_PATH" checkout -B nightcrawler/dev main
+            fi
+            ;;
+        "nightcrawler/dev")
+            log "Already on nightcrawler/dev"
+            ;;
+        *)
+            die "On unexpected branch '$current' — expected main or nightcrawler/dev"
+            ;;
+    esac
+}
+
+sync_with_main() {
+    log "Syncing nightcrawler/dev with main"
+    if ! git -C "$PROJECT_PATH" merge main --no-edit 2>/dev/null; then
+        git -C "$PROJECT_PATH" merge --abort 2>/dev/null || true
+        die "Cannot merge main into nightcrawler/dev (conflict) — manual reconciliation needed"
+    fi
+    log "nightcrawler/dev synced with main"
+}
+
+startup() {
+    # 1. flock
+    exec 200>"$LOCKFILE"
+    flock -n 200 || die "Another session running (lock held on $LOCKFILE)"
+    echo "$$" >&200
+
+    # 2. Create control dir
+    mkdir -p "$CONTROL_DIR"
+    mkdir -p "$SESSION_DIR"
+
+    # 3. Discover recovery needs (read-only)
+    discover_recovery_needs
+
+    # 4. Pre-switch worktree safety
+    require_clean_worktree_for_switch
+
+    # 5. Switch to dev
+    switch_to_dev
+
+    # 6. Execute recovery
+    execute_recovery
+
+    # 6b. Rotate manifest
+    rotate_manifest
+
+    # 7. Sync with main
+    sync_with_main
+
+    # 8. Check clean worktree
+    if [[ -n "$(git -C "$PROJECT_PATH" status --porcelain 2>/dev/null)" ]]; then
+        die "Worktree unexpectedly dirty after recovery and sync"
+    fi
+
+    # 9. Session dir already created
+
+    # 10. Heartbeat
+    start_heartbeat
+
+    # 11. Check .claude/ exists for Claude Code CLI
+    if [[ ! -d "$PROJECT_PATH/.claude" ]]; then
+        log "WARNING: No .claude/ directory in project — Claude Code CLI may not have project context"
+    fi
+
+    # 12. Codex connectivity test
+    log "Testing Codex connectivity"
+    set +e
+    local codex_test
+    codex_test=$(python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
+    local codex_rc=$?
+    set -e
+    if [[ $codex_rc -ne 0 ]]; then
+        die "Codex connectivity test failed — cannot proceed without auditor"
+    fi
+    local codex_ready
+    codex_ready=$(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('ready',False))" 2>/dev/null || echo "False")
+    if [[ "$codex_ready" != "True" ]]; then
+        die "Codex not ready — cannot proceed without auditor"
+    fi
+    log "Codex ready (primary: $(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('primary','unknown'))" 2>/dev/null))"
+
+    # 13. Baseline
+    cd "$PROJECT_PATH"
+    set +e
+    run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+    local baseline_build=$?
+    run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test
+    local baseline_test=$?
+    set -e
+    if [[ $baseline_build -ne 0 ]] || [[ $baseline_test -ne 0 ]]; then
+        die "Baseline build/test failed — repo is red, cannot proceed"
+    fi
+    BASELINE=$(git rev-parse HEAD)
+    log "Baseline: $BASELINE"
+
+    # 14. Budget init
+    python3 "$SCRIPTS/budget.py" init "$SESSION_ID" "$BUDGET_CAP" 2>/dev/null || \
+        die "Budget initialization failed"
+
+    SESSION_INITIALIZED=true
+
+    # 15. Notify
+    local remaining
+    remaining=$(count_tasks)
+    update_status "running — $remaining tasks remaining"
+    notify_normal "Session $SESSION_ID started. $remaining tasks. Budget: \$$BUDGET_CAP."
+    journal '{"event":"session_start","session_id":"'"$SESSION_ID"'","project":"'"$PROJECT"'","budget":'"$BUDGET_CAP"',"baseline":"'"$BASELINE"'"}'
+    log "Startup complete"
+}
+
+# =============================================================================
+# SEC 10: Main loop
+# =============================================================================
+
+main_loop() {
+    while true; do
+        # Pick next task
+        TASK_ID=$(pick_next_task)
+        if [[ -z "$TASK_ID" ]]; then
+            log "No eligible tasks remaining"
+            break
+        fi
+
+        # Budget gate
+        if ! budget_pre_check; then
+            log "Budget exhausted — ending session"
+            notify_normal "Budget exhausted. Ending session."
+            break
+        fi
+
+        # Kill switch
+        if [[ -f "/tmp/nightcrawler-budget-kill" ]]; then
+            log "Kill switch active — ending session"
+            break
+        fi
+
+        log "=== Starting task $TASK_ID ==="
+        TASK_COST=0
+        journal '{"event":"task_start","task_id":"'"$TASK_ID"'"}'
+        mark_task_in_progress "$TASK_ID"
+        update_status "working on $TASK_ID"
+
+        # Write task context
+        local task_file="$SESSION_DIR/tasks/$TASK_ID/task_context.md"
+        mkdir -p "$(dirname "$task_file")"
+        extract_task_context "$TASK_ID" > "$task_file"
+
+        # Phase A: Plan
+        if ! plan_loop "$task_file" "$TASK_ID"; then
+            if [[ "$PLAN_AUDIT_MODE" == "hard_block" ]]; then
+                log "HARD BLOCK: $TASK_ID plan blocked on safety/correctness"
+                escalate_urgent "HARD BLOCK ($PROJECT): $TASK_ID plan blocked — safety/correctness concern"
+            else
+                log "LOCKED: $TASK_ID plan locked"
+                escalate_urgent "LOCKED ($PROJECT): $TASK_ID plan failed"
+            fi
+            sed -i "s/- \[~\] \*\*${TASK_ID}\*\*/- [ ] **${TASK_ID}**/" "$PROJECT_PATH/TASK_QUEUE.md"
+            echo "$TASK_ID" >> "$CONTROL_DIR/skip"
+            continue
+        fi
+
+        # Dry run — stop after plan
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log "DRY RUN: Plan approved for $TASK_ID"
+            notify_normal "Dry run: $TASK_ID plan approved"
+            # Reset [~] marker since we're not implementing
+            sed -i "s/- \[~\] \*\*${TASK_ID}\*\*/- [ ] **${TASK_ID}**/" "$PROJECT_PATH/TASK_QUEUE.md"
+            break
+        fi
+
+        # Phase B: Implement
+        if ! impl_loop "$PLAN_FILE" "$TASK_ID"; then
+            if [[ "$IMPL_REVIEW_MODE" == "hard_block" ]]; then
+                log "HARD BLOCK: $TASK_ID impl blocked on safety/correctness"
+                escalate_urgent "HARD BLOCK ($PROJECT): $TASK_ID impl blocked — safety/correctness concern"
+            else
+                log "LOCKED: $TASK_ID implementation failed after 3 soft rejections + local verification failure"
+                escalate_urgent "LOCKED ($PROJECT): $TASK_ID impl failed (soft-reject cap + local verify fail)"
+            fi
+            sed -i "s/- \[~\] \*\*${TASK_ID}\*\*/- [ ] **${TASK_ID}**/" "$PROJECT_PATH/TASK_QUEUE.md"
+            echo "$TASK_ID" >> "$CONTROL_DIR/skip"
+            revert_owned_files
+            continue
+        fi
+
+        # Build degraded-approval note if either loop capped out
+        local degraded_note=""
+        if [[ "$PLAN_AUDIT_MODE" == "capped_soft_reject" ]] || [[ "$IMPL_REVIEW_MODE" == "capped_soft_reject" ]]; then
+            degraded_note="Committed after 3 soft review rejections; local verification passed."
+            if [[ "$PLAN_AUDIT_MODE" == "capped_soft_reject" ]]; then
+                degraded_note="${degraded_note}\nPlan audit last feedback: ${PLAN_LAST_FEEDBACK:0:300}"
+            fi
+            if [[ "$IMPL_REVIEW_MODE" == "capped_soft_reject" ]]; then
+                degraded_note="${degraded_note}\nImpl review last feedback: ${IMPL_LAST_FEEDBACK:0:300}"
+            fi
+            log "DEGRADED APPROVAL: $degraded_note"
+        fi
+
+        # Phase C: Commit
+        local description
+        description=$(head -1 "$task_file" | sed 's/^- \[.\] \*\*[^*]*\*\* *//' | head -c 72)
+        local commit_hash
+        commit_hash=$(commit_and_close_task "$TASK_ID" "$description" "$degraded_note")
+        log "Committed $TASK_ID as $commit_hash"
+
+        # Post-commit verification
+        local revert_count=0
+        if ! verify_post_commit "$TASK_ID" "$commit_hash"; then
+            revert_count=$((revert_count + 1))
+            if ! handle_post_commit_failure "$TASK_ID" "$commit_hash" "$revert_count"; then
+                escalate_urgent "LOCKED ($PROJECT): $TASK_ID post-commit verify failed 2x"
+                echo "$TASK_ID" >> "$CONTROL_DIR/skip"
+                continue
+            fi
+
+            # Re-enter Phase B
+            log "Re-entering Phase B after revert"
+            if ! impl_loop "$PLAN_FILE" "$TASK_ID"; then
+                escalate_urgent "LOCKED ($PROJECT): $TASK_ID impl failed after revert"
+                echo "$TASK_ID" >> "$CONTROL_DIR/skip"
+                continue
+            fi
+
+            # Re-commit
+            commit_hash=$(commit_and_close_task "$TASK_ID" "$description")
+            if ! verify_post_commit "$TASK_ID" "$commit_hash"; then
+                handle_post_commit_failure "$TASK_ID" "$commit_hash" 2
+                escalate_urgent "LOCKED ($PROJECT): $TASK_ID post-commit verify failed 2x after re-impl"
+                echo "$TASK_ID" >> "$CONTROL_DIR/skip"
+                continue
+            fi
+        fi
+
+        journal '{"event":"task_complete","task_id":"'"$TASK_ID"'","commit":"'"$commit_hash"'","cost":'"$TASK_COST"'}'
+        local remaining
+        remaining=$(count_tasks)
+        local notify_msg="Done: $TASK_ID ($commit_hash). Remaining: $remaining. Spent: \$$TASK_COST."
+        if [[ -n "$degraded_note" ]]; then
+            notify_msg="${notify_msg} ⚠ Capped soft-reject."
+        fi
+        notify_normal "$notify_msg"
+        update_status "completed $TASK_ID — $remaining remaining"
+
+        log "=== Completed $TASK_ID ==="
+
+        # Budget check for next iteration
+        if ! budget_pre_check; then
+            log "Budget exhausted after task — ending session"
+            break
+        fi
+    done
+}
+
+# =============================================================================
+# SEC 11: Session end + signals
+# =============================================================================
+
+session_end() {
+    [[ "$SESSION_ENDING" == "true" ]] && return
+    SESSION_ENDING=true
+    local reason="${1:-unknown}"
+
+    if [[ "$SESSION_INITIALIZED" == "true" ]]; then
+        local branch
+        branch=$(git -C "$PROJECT_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+        if [[ "$branch" == "nightcrawler/dev" ]]; then
+            revert_owned_files
+        fi
+    fi
+
+    if [[ "$SESSION_INITIALIZED" == "true" ]] && [[ "$ORDERLY_EXIT" != "true" ]]; then
+        journal '{"event":"session_aborted","reason":"'"$reason"'","ts":"'"$(date -u +%FT%TZ)"'"}'
+    fi
+
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && [[ "$SESSION_INITIALIZED" == "true" ]]; then
+        if [[ "$ORDERLY_EXIT" == "true" ]]; then
+            notify_normal "Session $SESSION_ID completed. Total cost: \$$TOTAL_COST."
+        else
+            notify_normal "Session $SESSION_ID aborted: $reason. Cost so far: \$$TOTAL_COST."
+        fi
+    fi
+
+    [[ "$HEARTBEAT_STARTED" == "true" ]] && stop_heartbeat
+    rm -f "/tmp/nightcrawler-${PROJECT}-status" 2>/dev/null || true
+    # Do NOT rm -rf CONTROL_DIR — manifest must survive for next session's recovery
+}
+
+trap 'session_end "signal"' INT TERM
+trap 'session_end "exit"' EXIT
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+    startup
+    main_loop
+    ORDERLY_EXIT=true
+    journal '{"event":"session_complete","ts":"'"$(date -u +%FT%TZ)"'","total_cost":'"$TOTAL_COST"'}'
+    session_end "completed"
+}
+
+main

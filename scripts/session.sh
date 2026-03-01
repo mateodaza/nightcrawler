@@ -3,13 +3,12 @@
 # Usage: session.sh <command> [args...]
 #
 # Commands:
-#   acquire <project> <session-id>  — Acquire project lock
-#   release <project>               — Release project lock
-#   check-lock <project>            — Check if lock is held (exit 0=free, 1=locked)
 #   recover <project>               — Check for crash recovery needs
 #   heartbeat-start <session-id>    — Start heartbeat (runs in background)
 #   heartbeat-stop                  — Stop heartbeat
 #   journal <session-id> <json>     — Append to session journal with fsync
+#
+# NOTE: Locking is handled by nightcrawler.sh via flock (acquire/check-lock/release removed).
 
 set -euo pipefail
 
@@ -21,58 +20,6 @@ cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
-
-  acquire)
-    PROJECT="${1:?project required}"
-    SESSION_ID="${2:?session-id required}"
-    LOCKFILE="$LOCK_DIR/nightcrawler-${PROJECT}.lock"
-
-    if [ -f "$LOCKFILE" ]; then
-      LOCK_PID=$(head -1 "$LOCKFILE" 2>/dev/null || echo "")
-      if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-        echo "ERROR: Lock held by PID $LOCK_PID"
-        exit 1
-      fi
-      echo "WARN: Stale lock found (PID $LOCK_PID dead), cleaning up"
-      rm -f "$LOCKFILE"
-    fi
-
-    # Write lock atomically
-    cat > "$LOCKFILE" <<EOF
-$$
-$SESSION_ID
-$(date -u +%FT%TZ)
-EOF
-    echo "ACQUIRED: $LOCKFILE (PID $$, session $SESSION_ID)"
-    ;;
-
-  release)
-    PROJECT="${1:?project required}"
-    LOCKFILE="$LOCK_DIR/nightcrawler-${PROJECT}.lock"
-    rm -f "$LOCKFILE"
-    echo "RELEASED: $LOCKFILE"
-    ;;
-
-  check-lock)
-    PROJECT="${1:?project required}"
-    LOCKFILE="$LOCK_DIR/nightcrawler-${PROJECT}.lock"
-
-    if [ ! -f "$LOCKFILE" ]; then
-      echo "CLEAN: No lock"
-      exit 0
-    fi
-
-    LOCK_PID=$(head -1 "$LOCKFILE" 2>/dev/null || echo "")
-    if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-      LOCK_SESSION=$(sed -n '2p' "$LOCKFILE" 2>/dev/null || echo "unknown")
-      echo "LOCKED: PID $LOCK_PID, session $LOCK_SESSION"
-      exit 1
-    fi
-
-    echo "STALE: Lock exists but PID $LOCK_PID is dead"
-    rm -f "$LOCKFILE"
-    exit 0
-    ;;
 
   recover)
     PROJECT="${1:?project required}"
