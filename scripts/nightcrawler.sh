@@ -63,7 +63,7 @@ TOTAL_COST=0
 # SEC 3: Helpers
 # =============================================================================
 
-log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$SESSION_DIR/nightcrawler.log" 2>/dev/null || echo "[$(date -u +%FT%TZ)] $*"; }
+log() { local msg="[$(date -u +%FT%TZ)] $*"; echo "$msg" >> "$SESSION_DIR/nightcrawler.log" 2>/dev/null; echo "$msg" >&2; }
 
 run_timed() {
     local wall="$1" idle="$2"; shift 2
