@@ -18,15 +18,8 @@ for f in "$SRC"/*.md; do
   echo "  copied $(basename "$f")"
 done
 
-# Remove files in DST that no longer exist in SRC
-for f in "$DST"/*.md; do
-  [ -f "$f" ] || continue
-  base=$(basename "$f")
-  if [ ! -f "$SRC/$base" ]; then
-    rm "$f"
-    echo "  removed $base (not in repo)"
-  fi
-done
+# Note: we only overwrite files that exist in SRC.
+# OpenClaw's own files (AGENTS.md, TOOLS.md, etc.) are left untouched.
 
 echo "Restarting gateway..."
 openclaw gateway restart
