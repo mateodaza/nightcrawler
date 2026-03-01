@@ -90,6 +90,12 @@
   - Can it reliably follow GLOBAL_PLAN.md constraints without Opus-level reasoning?
   - How to pass the full task spec + rules as context to `claude -p`
   - Test with one task (NC-002) before switching the full pipeline
+- **Claude Max tier decision:**
+  - Currently on Max x5 ($100/mo). Consider upgrading to Max x20 ($200/mo)
+  - x5 may handle ~5-8 heavy Claude Code sessions per night before throttling
+  - x20 comfortably covers 15+ tasks unattended overnight
+  - At current API rates, 15 tasks/day = ~$3-5/day in credits ($90-150/mo). x20 at $200/mo flat is cheaper and predictable
+  - **Decision:** Check how many tasks Nightcrawler completed overnight with current x5 limits. If it hit the ceiling, upgrade to x20. If not, stay on x5 until we switch to Claude Code direct pipeline
 
 ### Keep Opus for complex tasks only
 - Some tasks (security-critical, architecture) may still benefit from Opus-level planning
