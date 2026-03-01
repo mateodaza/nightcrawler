@@ -59,7 +59,7 @@ bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID \
   --rules /home/nightcrawler/projects/clout/GLOBAL_PLAN.md \
   --project /home/nightcrawler/projects/clout
 ```
-- If REJECTED: revise plan (max 3 iterations), then lock and skip
+- If REJECTED: revise plan (max 3 iterations). If still rejected, skip task and move to next (see Autonomy Rules)
 - If APPROVED: proceed to implement
 
 **C) Implement** — use `coding-agent` pattern to spawn Claude Code:
@@ -87,7 +87,7 @@ bash ~/nightcrawler/scripts/budget_gate.sh $SESSION_ID \
   --rules /home/nightcrawler/projects/clout/GLOBAL_PLAN.md \
   --project /home/nightcrawler/projects/clout
 ```
-- If REJECTED: revise (max 3 iterations), then lock and skip
+- If REJECTED: revise (max 3 iterations). If still rejected, skip task and move to next (see Autonomy Rules)
 - If APPROVED: commit and continue
 
 **E) Commit and push** (ONLY to the session branch):
@@ -134,12 +134,58 @@ When the kill file exists, budget_gate.sh exits 99 on every call. Nothing runs.
 
 **OpenClaw itself:** OpenClaw's own API spend (running this agent) is NOT tracked by budget.py. Mateo monitors this via `openclaw gateway usage-cost`. If Nightcrawler is burning too much on orchestration overhead, Mateo will say `stop` — at which point, finish current task and end session.
 
+## Autonomy Rules
+
+When Mateo is offline, you can self-resolve issues instead of blocking. Follow these tiers:
+
+### Tier 1 — Auto-approve (no escalation needed)
+- Codex returns APPROVED on first pass → proceed immediately
+- Scaffolding tasks (project init, config, tooling setup) → lower audit bar
+- Compiler version mismatches → always use the latest stable solc that supports the target EVM version
+- Test-only changes (adding/fixing tests without touching prod contracts) → proceed if forge test passes
+
+### Tier 2 — Self-resolve with documentation (log decision, don't block)
+- Codex REJECTED but findings are about style/preference, not correctness → apply reasonable fix, document why, proceed
+- Dependency version choices → OZ v5.x is pre-approved for all contracts. Use latest stable patch.
+- Probe/throwaway contracts → never commit them. Use forge test for import validation instead.
+- Solidity pragma → use `pragma solidity ^0.8.24;` unless task spec says otherwise
+- EVM version → `cancun` for all Avalanche contracts unless task spec says otherwise
+- Import paths → follow remappings.txt, prefer `@openzeppelin/` prefix
+
+### Tier 3 — Skip and continue (don't block the queue)
+- If stuck after 3 iterations on ANY phase → log the issue, skip the task, move to next
+- If a task has an unresolvable dependency → skip it, note why in PROGRESS.md
+- If forge build fails on a skipped task's code → revert and move on
+
+### Tier 4 — Escalate to Mateo (block only for these)
+- Security-critical decisions (access control patterns, reentrancy guards, signature schemes)
+- Architecture changes not in GLOBAL_PLAN.md
+- Any task that would modify GLOBAL_PLAN.md or RESEARCH.md
+- Budget warnings (>80% of session cap consumed)
+- Consecutive task failures (3+ tasks skipped in a row)
+
+When you skip a task, always:
+1. Log the reason in `~/nightcrawler/sessions/$SESSION_ID/tasks/NC-XXX/skip_reason.md`
+2. Update PROGRESS.md with status "⏭️ SKIPPED — <reason>"
+3. Notify Mateo in the session-end summary
+
+## Pre-approved Project Decisions (Clout)
+
+These are Mateo's standing decisions — do not re-ask or re-audit these:
+- **Solidity compiler:** solc 0.8.24
+- **EVM version:** cancun
+- **OpenZeppelin:** v5.x (latest stable patch), approved for all contracts
+- **Target chain:** Avalanche C-Chain
+- **Foundry:** optimizer 200 runs
+- **No probe contracts** — validate imports via forge build/test on real contracts
+- **Branch:** all work on `nightcrawler/session-001`, PR to `main` is Mateo's job
+
 ## Critical Rules
 
 1. NEVER write project code yourself — delegate via scripts
 2. NEVER skip the Codex audit
 3. ONLY push to `nightcrawler/session-001` — NEVER push to `main` or any other branch
-4. NEVER exceed 3 iterations per phase before locking
+4. After 3 iterations per phase — skip the task, log the reason, move to next (don't block)
 5. NEVER modify GLOBAL_PLAN.md or RESEARCH.md
 6. ALWAYS skip MANUAL tasks (marked 🚧)
 7. ALWAYS check dependencies before starting a task
