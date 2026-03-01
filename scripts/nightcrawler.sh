@@ -729,14 +729,14 @@ Instructions:
 
     # Use timeout (not run_timed) — Claude Code CLI in JSON mode produces no
     # intermediate output, so idle timeout would kill it prematurely.
+    # cd into project dir instead of --cwd (not supported on all CLI versions).
     local raw_output exit_code
     set +e
-    raw_output=$(timeout "$CLAUDE_CLI_TIMEOUT" \
+    raw_output=$(cd "$project_path" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
             --model claude-sonnet-4-6-20250514 \
             --output-format json \
-            --max-turns 25 \
-            --cwd "$project_path")
+            --max-turns 25)
     exit_code=$?
     set -e
 
@@ -776,12 +776,11 @@ Instructions:
     # Use timeout (not run_timed) — same reason as implement_task
     local raw_output exit_code
     set +e
-    raw_output=$(timeout "$CLAUDE_CLI_TIMEOUT" \
+    raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
             --model claude-sonnet-4-6-20250514 \
             --output-format json \
-            --max-turns 25 \
-            --cwd "$PROJECT_PATH")
+            --max-turns 25)
     exit_code=$?
     set -e
 
