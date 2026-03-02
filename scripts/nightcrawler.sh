@@ -408,16 +408,23 @@ verify_impl_scope() {
 
 pick_next_task() {
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
-    [[ -f "$queue" ]] || { echo ""; return; }
+    if [[ ! -f "$queue" ]]; then
+        log "pick_next_task: TASK_QUEUE.md not found at $queue"
+        echo ""
+        return
+    fi
 
     # Check skip list
     local skip_file="$CONTROL_DIR/skip"
 
-    python3 -c "
+    local debug_file="/tmp/nightcrawler-pick-debug.$$"
+    local task_id
+    task_id=$(python3 -c "
 import re, sys
 
 queue_path = '$queue'
 skip_path = '$skip_file'
+dbg = open('$debug_file', 'w')
 
 skips = set()
 try:
@@ -430,35 +437,41 @@ with open(queue_path) as f:
     content = f.read()
     lines = content.splitlines()
 
-# Collect all task lines and their full blocks for dependency parsing
-# Format: #### NC-XXX [x] Title  OR  #### NC-XXX [ ] Title
-# Dependencies appear in later lines as '- **Dependencies:** NC-001, NC-002'
-task_header_re = re.compile(r'^#{1,6}\s+(NC-\d+)\s+\[(.)\]')
-dep_line_re = re.compile(r'^\-\s+\*\*Dependencies?:\*\*\s*(.*)', re.IGNORECASE)
+# Match NC-\d+, NC-\d+[A-Z] (sub-tasks), NC-G\d+ (gates)
+task_header_re = re.compile(r'^#{1,6}\s+(NC-(?:\d+[A-Z]?|G\d+))\s+\[(.)\]')
+dep_line_re = re.compile(r'^-\s+\*\*Dependencies?:\*\*\s*(.*)', re.IGNORECASE)
 
 # First pass: find all done task IDs
 done_ids = set()
+all_tasks = []
 for line in lines:
     m = task_header_re.match(line)
-    if m and m.group(2) == 'x':
-        done_ids.add(m.group(1))
+    if m:
+        tid, status = m.group(1), m.group(2)
+        all_tasks.append((tid, status))
+        if status == 'x':
+            done_ids.add(tid)
+
+dbg.write(f'{len(all_tasks)} tasks found, {len(done_ids)} done: {sorted(done_ids)}\n')
+for tid, st in all_tasks:
+    dbg.write(f'  {tid} [{st}]\n')
 
 # Second pass: find first eligible [ ] task
 current_task = None
-current_task_line = None
 for line in lines:
     m = task_header_re.match(line)
     if m:
         if current_task:
-            # Previous task had no deps line — eligible if not skipped/manual
+            dbg.write(f'PICK: {current_task} (no deps line)\n')
+            dbg.close()
             print(current_task)
             sys.exit(0)
-        if m.group(2) == ' ':
-            tid = m.group(1)
+        tid, status = m.group(1), m.group(2)
+        if status == ' ':
             if tid not in skips and 'MANUAL' not in line:
                 current_task = tid
-                current_task_line = line
             else:
+                dbg.write(f'SKIP: {tid} (skip-list or MANUAL)\n')
                 current_task = None
         else:
             current_task = None
@@ -469,22 +482,44 @@ for line in lines:
         if dm:
             dep_str = dm.group(1).strip()
             if dep_str.lower() == 'none' or not dep_str:
+                dbg.write(f'PICK: {current_task} (deps: none)\n')
+                dbg.close()
                 print(current_task)
                 sys.exit(0)
             deps = [d.strip() for d in dep_str.split(',') if d.strip()]
             if all(d in done_ids for d in deps):
+                dbg.write(f'PICK: {current_task} (deps met: {deps})\n')
+                dbg.close()
                 print(current_task)
                 sys.exit(0)
             else:
+                missing = [d for d in deps if d not in done_ids]
+                dbg.write(f'BLOCKED: {current_task} waiting on {missing}\n')
                 current_task = None
 
 # Last task in file with no deps line
 if current_task:
+    dbg.write(f'PICK: {current_task} (last, no deps line)\n')
+    dbg.close()
     print(current_task)
     sys.exit(0)
 
+dbg.write('NO ELIGIBLE TASK\n')
+dbg.close()
 print('')
-" 2>/dev/null
+" 2>/tmp/nightcrawler-pick-error.$$)
+
+    # Log debug info and any python errors
+    if [[ -f "$debug_file" ]]; then
+        log "pick_next_task: $(cat "$debug_file")"
+        rm -f "$debug_file"
+    fi
+    if [[ -s "/tmp/nightcrawler-pick-error.$$" ]]; then
+        log "pick_next_task ERROR: $(cat /tmp/nightcrawler-pick-error.$$)"
+    fi
+    rm -f "/tmp/nightcrawler-pick-error.$$"
+
+    echo "$task_id"
 }
 
 extract_task_context() {
@@ -544,7 +579,7 @@ append_to_progress() {
 count_tasks() {
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
     [[ -f "$queue" ]] || { echo "0"; return; }
-    grep -cE '^#{1,6}\s+NC-\d+\s+\[ \]' "$queue" 2>/dev/null || echo "0"
+    grep -c '^####* NC-[0-9]* \[ \]' "$queue" 2>/dev/null || echo "0"
 }
 
 # =============================================================================
@@ -1375,14 +1410,21 @@ switch_to_dev() {
 sync_with_main() {
     log "Fetching latest from origin"
     git -C "$PROJECT_PATH" fetch origin main 2>/dev/null || log "WARN: fetch failed (offline?)"
-    git -C "$PROJECT_PATH" merge origin/main --no-edit 2>/dev/null || true  # update local main ref
 
-    log "Syncing nightcrawler/dev with main"
-    if ! git -C "$PROJECT_PATH" merge main --no-edit 2>/dev/null; then
-        git -C "$PROJECT_PATH" merge --abort 2>/dev/null || true
-        die "Cannot merge main into nightcrawler/dev (conflict) — manual reconciliation needed"
+    # Merge origin/main into nightcrawler/dev (single merge, not two)
+    log "Merging origin/main into nightcrawler/dev"
+    if ! git -C "$PROJECT_PATH" merge origin/main --no-edit 2>/dev/null; then
+        # Conflict — try auto-resolving by preferring our (nightcrawler/dev) version for TASK_QUEUE.md
+        log "WARN: merge conflict with origin/main — attempting auto-resolve"
+        git -C "$PROJECT_PATH" checkout --ours -- TASK_QUEUE.md 2>/dev/null || true
+        git -C "$PROJECT_PATH" add TASK_QUEUE.md 2>/dev/null || true
+        if ! git -C "$PROJECT_PATH" -c core.editor=true merge --continue 2>/dev/null; then
+            git -C "$PROJECT_PATH" merge --abort 2>/dev/null || true
+            die "Cannot merge origin/main into nightcrawler/dev — manual reconciliation needed"
+        fi
+        log "Auto-resolved merge conflict (kept nightcrawler/dev TASK_QUEUE.md)"
     fi
-    log "nightcrawler/dev synced with main"
+    log "nightcrawler/dev synced with origin/main"
 }
 
 startup() {
