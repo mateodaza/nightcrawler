@@ -263,6 +263,8 @@ SEVERITY GUIDE — only REJECT for issues that would cause bugs or security flaw
 - REJECT for: missing struct fields that exist in the spec, wrong types, missing security checks (reentrancy, access control, overflow), missing critical test cases, logic that contradicts the spec
 - Do NOT reject for: style preferences, naming conventions, test verbosity, documentation completeness, minor organizational choices, theoretical edge cases the spec doesn't mention, gas optimization
 
+UNCERTAINTY: The planner may flag [AMBIGUOUS: ...] or [INTERPRETED: ...] tags. Evaluate whether their interpretation is reasonable — do not reject for ambiguity itself, only if the interpretation would cause bugs.
+
 If the plan covers all acceptance criteria and struct definitions correctly, APPROVE it even if you'd organize it differently.
 
 Start your response with APPROVED or REJECTED.

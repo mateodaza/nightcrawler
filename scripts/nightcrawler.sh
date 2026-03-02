@@ -548,24 +548,30 @@ plan_task() {
 TASK:
 ${task_content}
 
-RULES:
+RULES (coding standards — reference during planning, not primary context):
 ${rules}
 
 MANDATORY READS — you MUST read ALL of these before writing any plan:
-1. RESEARCH.md — the canonical protocol spec. Every struct, enum, constant, and state machine lives here. Your plan must match these EXACTLY, field-by-field, type-by-type. Do not invent fields, omit fields, or rename anything.
-2. TASK_QUEUE.md — read the FULL entry for this task including ALL acceptance criteria and sub-items. Every acceptance criterion must be addressed in your plan.
+1. RESEARCH.md — the CANONICAL protocol spec. This is your primary source of truth. Every struct, enum, constant, and state machine lives here.
+2. TASK_QUEUE.md — read the FULL entry for this task including ALL acceptance criteria and sub-items.
 3. All existing source files in src/ — understand what's already built so you don't duplicate or conflict.
 4. All existing test files in test/ — understand existing test patterns and helpers.
 5. foundry.toml — understand compiler settings and project config.
 6. Any other .sol files in the project root or script/ directories.
 
+DONE CRITERIA — your plan is complete when ALL of these are true:
+- Every struct/enum lists EXACT fields copied from RESEARCH.md (field name, type, and description — do not paraphrase or omit)
+- Every acceptance criterion from TASK_QUEUE.md maps to at least one plan item AND one test case
+- Every function has a full signature (name, parameters with types, return types, visibility, modifiers)
+- Every function references which RESEARCH.md section it implements
+- Test cases cover: happy path, reverts for each require, access control, edge cases from acceptance criteria
+
+UNCERTAINTY PROTOCOL:
+- If RESEARCH.md is ambiguous or contradictory on a detail, flag it as [AMBIGUOUS: description] in your plan. Do NOT guess — the auditor will assess your interpretation.
+- If a TASK_QUEUE.md acceptance criterion is unclear, note your interpretation with [INTERPRETED: criterion → your reading].
+
 Instructions:
 - You have limited turns. Read all files FIRST, then output the plan in ONE response. Do not explore incrementally.
-- After reading all the above, output a detailed implementation plan in markdown.
-- For every struct/enum in your plan, list the EXACT fields from RESEARCH.md (copy them, do not paraphrase).
-- For every function, specify the full signature, parameters, return types, and which RESEARCH.md section it implements.
-- Map each acceptance criterion from TASK_QUEUE.md to specific plan items.
-- Include comprehensive test cases covering: happy path, edge cases, reverts, access control, and any scenarios mentioned in acceptance criteria.
 - Do NOT implement the code — only plan.
 - Do NOT create or modify any source files.
 "
@@ -629,18 +635,22 @@ ${current_plan}
 AUDITOR FEEDBACK (iteration $iteration):
 ${feedback}
 
-RULES:
+RULES (coding standards):
 ${rules}
 
-MANDATORY READS — re-read these to fix the auditor's concerns:
-1. RESEARCH.md — re-verify EVERY struct, enum, constant, and state transition field-by-field. The auditor often catches mismatches here.
-2. TASK_QUEUE.md — re-read the FULL task entry and ALL acceptance criteria. Ensure nothing is missing.
+MANDATORY READS — re-read to fix the auditor's concerns:
+1. RESEARCH.md — re-verify EVERY struct, enum, constant, and state transition field-by-field.
+2. TASK_QUEUE.md — re-read the FULL task entry and ALL acceptance criteria.
 3. Existing src/ and test/ files — check for conflicts or patterns you need to follow.
 
+DONE CRITERIA — the revised plan is complete when:
+- Every auditor feedback point is explicitly addressed (state what changed and why)
+- Every struct/enum field matches RESEARCH.md EXACTLY (copy definitions, do not paraphrase)
+- Every acceptance criterion maps to plan items AND test cases
+- No ambiguities are left unresolved — use [AMBIGUOUS: ...] or [INTERPRETED: ...] tags if spec is unclear
+
 Instructions:
-- Address EVERY point in the auditor's feedback explicitly. For each feedback item, state what you changed and why.
-- If the auditor says a struct field is missing, copy the EXACT definition from RESEARCH.md into your plan.
-- Output the complete revised plan in markdown (not just the diff — the full plan).
+- Output the COMPLETE revised plan in markdown (not just the diff).
 - Do NOT implement the code — only revise the plan.
 - Do NOT create or modify any source files.
 "
@@ -820,18 +830,27 @@ implement_task() {
 
     prompt="You are implementing a task for a Solidity/Foundry project.
 
-PLAN:
+PLAN (your primary source of truth — implement exactly this):
 ${plan}
 
-RULES:
+RULES (coding standards — follow these for style and patterns):
 ${rules}
+
+DONE CRITERIA — implementation is complete when ALL of these are true:
+- Every file, struct, function, and test from the plan exists
+- 'forge build' compiles with zero errors
+- 'forge test' passes with zero failures
+- No files outside the plan's scope are modified
+- No extra contracts, files, or features beyond the plan
+
+UNCERTAINTY PROTOCOL:
+- If the plan is unclear on a specific behavior, implement the safest/simplest interpretation and add a comment: // TODO: spec ambiguity — [description]
+- If you hit a compiler error from the plan's design, fix it minimally and note the deviation
 
 Instructions:
 - Implement exactly what the plan says. No more, no less.
-- Write clean, tested Solidity code.
-- Run 'forge build' and 'forge test' to verify.
-- Do NOT modify files outside the plan's scope.
-- Do NOT create probe/test contracts.
+- Run 'forge build' and 'forge test' to verify before finishing.
+- Do NOT create probe/test/scratch contracts.
 "
 
     log "Implementing $task_id"
@@ -871,18 +890,24 @@ revise_impl() {
 
     prompt="You are revising an implementation that was rejected by the code reviewer.
 
-PLAN:
+PLAN (the approved design — your changes must still match this):
 ${plan}
 
 REVIEWER FEEDBACK (iteration $iteration):
 ${feedback}
 
-RULES:
+RULES (coding standards):
 ${rules}
+
+DONE CRITERIA — revision is complete when:
+- Every reviewer feedback point is addressed
+- 'forge build' compiles with zero errors
+- 'forge test' passes with zero failures
+- Changes stay within the plan's scope
 
 Instructions:
 - Address EVERY point in the reviewer's feedback.
-- Run 'forge build' and 'forge test' to verify your changes.
+- Run 'forge build' and 'forge test' to verify.
 - Do NOT modify files outside the plan's scope.
 "
 
