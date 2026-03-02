@@ -109,6 +109,12 @@ for line in queue_content.splitlines():
         if m.group(3) == 'x':
             done_ids.add(m.group(2))
 
+# Also read done status from backlog (completed section)
+for line in backlog_content.splitlines():
+    m = header_re.match(line)
+    if m and m.group(3) == 'x':
+        done_ids.add(m.group(2))
+
 # Parse backlog for tasks not yet queued
 dep_re = re.compile(r'^\-\s+\*\*Dependencies?:\*\*\s*(.*)', re.IGNORECASE)
 backlog_lines = backlog_content.splitlines()
