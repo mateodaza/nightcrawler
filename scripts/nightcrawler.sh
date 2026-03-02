@@ -1412,9 +1412,14 @@ startup() {
     # 7. Sync with main
     sync_with_main
 
-    # 8. Check clean worktree
+    # 8. Clean worktree — auto-commit stray changes from sync/recovery/manual fixes
     if [[ -n "$(git -C "$PROJECT_PATH" status --porcelain 2>/dev/null)" ]]; then
-        die "Worktree unexpectedly dirty after recovery and sync"
+        log "Worktree dirty after sync — auto-committing stray changes"
+        git -C "$PROJECT_PATH" add -A
+        git -C "$PROJECT_PATH" commit -m "[nightcrawler] chore: auto-commit stray changes before session" 2>/dev/null || true
+        if [[ -n "$(git -C "$PROJECT_PATH" status --porcelain 2>/dev/null)" ]]; then
+            die "Worktree still dirty after auto-commit — manual fix needed"
+        fi
     fi
 
     # 9. Session dir already created
