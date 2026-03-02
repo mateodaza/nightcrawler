@@ -208,13 +208,42 @@ def parse_verdict(content: str) -> dict:
 # Main commands
 # =============================================================================
 
+def _read_project_context(project_path: str) -> str:
+    """Read project documentation to give the auditor full context."""
+    context_parts = []
+    if not project_path:
+        return ""
+
+    p = Path(project_path)
+    # Read key documentation files
+    for doc in ["RESEARCH.md", "PROGRESS.md", "TASK_QUEUE.md", "README.md"]:
+        doc_path = p / doc
+        if doc_path.exists():
+            content = doc_path.read_text()
+            # Truncate large files to keep prompt manageable
+            if len(content) > 8000:
+                content = content[:8000] + "\n\n... [TRUNCATED]"
+            context_parts.append(f"--- {doc} ---\n{content}")
+
+    # List existing source files so auditor knows what's already built
+    src_dir = p / "src"
+    if src_dir.exists():
+        sol_files = sorted(src_dir.rglob("*.sol"))
+        if sol_files:
+            listing = "\n".join(f"  {f.relative_to(p)}" for f in sol_files)
+            context_parts.append(f"--- Existing source files ---\n{listing}")
+
+    return "\n\n".join(context_parts)
+
+
 def audit_plan(plan_file: str, task_file: str, rules_file: str, project_path: str = None):
     """Audit a mini-plan. Tries Codex CLI exec first, falls back to API."""
     plan = Path(plan_file).read_text()
     task = Path(task_file).read_text()
     rules = Path(rules_file).read_text()
+    project_context = _read_project_context(project_path)
 
-    audit_prompt = f"""You are an independent code auditor. Review this implementation plan.
+    audit_prompt = f"""You are an independent code auditor for a Solidity/Foundry project. Review this implementation plan.
 
 TASK REQUIREMENTS:
 {task}
@@ -222,11 +251,22 @@ TASK REQUIREMENTS:
 PROJECT RULES:
 {rules}
 
+PROJECT CONTEXT (spec, progress, existing code — use these to validate the plan):
+{project_context}
+
 MINI-PLAN TO AUDIT:
 {plan}
 
-Check: correctness, completeness, security, edge cases, test coverage, scope creep.
-Start your response with APPROVED or REJECTED, then provide specific feedback."""
+PHILOSOPHY: The goal is fast iteration — get working code with sufficient quality. Humans handle hardening later. Your job is to catch things that would waste implementation cycles, not to polish the plan.
+
+SEVERITY GUIDE — only REJECT for issues that would cause bugs or security flaws in the implementation:
+- REJECT for: missing struct fields that exist in the spec, wrong types, missing security checks (reentrancy, access control, overflow), missing critical test cases, logic that contradicts the spec
+- Do NOT reject for: style preferences, naming conventions, test verbosity, documentation completeness, minor organizational choices, theoretical edge cases the spec doesn't mention, gas optimization
+
+If the plan covers all acceptance criteria and struct definitions correctly, APPROVE it even if you'd organize it differently.
+
+Start your response with APPROVED or REJECTED.
+If REJECTED, list ONLY the concrete issues with specific references to what's wrong and what the spec says. No vague concerns."""
 
     # Try CLI first
     if codex_cli_available():
@@ -245,20 +285,28 @@ Start your response with APPROVED or REJECTED, then provide specific feedback.""
         print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
 
     # Fallback to API
-    system_prompt = """You are an independent code auditor (Codex). You review implementation plans created by another AI model.
+    system_prompt = """You are an independent code auditor (Codex) for a Solidity/Foundry project.
 
 YOUR ROLE:
-- You are NOT the planner. You audit the planner's work.
-- Provide genuine, critical feedback. Do not rubber-stamp.
-- Check: correctness, completeness, security, edge cases, test coverage, scope creep.
-- You have NO allegiance to the planner. Your job is to catch what they missed.
+- You audit implementation plans created by another AI model.
+- Catch real bugs and security issues. Do not nitpick style or organization.
+- The goal is fast iteration — get working code with sufficient quality. Humans handle hardening later.
+
+WHAT WARRANTS REJECTION:
+- Missing struct fields that exist in the spec, wrong types
+- Missing security checks: reentrancy guards, access control, overflow protection
+- Logic that contradicts the task requirements or spec
+- Missing critical test cases for security-sensitive paths
+
+WHAT DOES NOT WARRANT REJECTION:
+- Style, naming, or organizational preferences
+- Theoretical edge cases the spec doesn't mention
+- Test verbosity or documentation completeness
+- Minor structural choices that don't affect correctness
 
 RESPONSE FORMAT:
-Start your response with exactly one of:
-  APPROVED — if the plan is ready for implementation
-  REJECTED — if the plan has issues that must be fixed
-
-Then provide specific, actionable feedback. If REJECTED, list every issue that must be addressed.
+Start with APPROVED or REJECTED.
+If REJECTED, list ONLY concrete issues with spec references. No vague concerns.
 Keep your response under 500 words."""
 
     user_prompt = f"""Audit this mini-plan against the task requirements and project rules.
@@ -268,6 +316,9 @@ TASK REQUIREMENTS:
 
 PROJECT RULES:
 {rules}
+
+PROJECT CONTEXT (spec, progress, existing code — use these to validate the plan):
+{project_context}
 
 MINI-PLAN TO AUDIT:
 {plan}
@@ -319,14 +370,20 @@ def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch:
         test_output = Path(test_output_file).read_text()
 
     review_prompt = (
-        f"You are an independent code reviewer. Review this implementation.\n\n"
+        f"You are an independent code reviewer for a Solidity/Foundry project. Review this implementation.\n\n"
         f"APPROVED PLAN:\n{plan[:3000]}\n\n"
         f"KEY RULES:\n{rules[:2000]}\n\n"
         f"GIT DIFF:\n```diff\n{diff[:30000]}\n```\n\n"
         f"TEST OUTPUT:\n```\n{test_output[:5000]}\n```\n\n"
-        f"Check: does code match the plan? Tests comprehensive? "
-        f"Bugs, security issues (reentrancy, overflow, access control), rule violations?\n"
-        f"Start your response with APPROVED or REJECTED, then specific feedback."
+        f"PHILOSOPHY: The goal is fast iteration — get working code with sufficient quality. Humans handle hardening later. "
+        f"Your job is to catch real bugs, not suggest improvements.\n\n"
+        f"SEVERITY GUIDE — only REJECT for issues that would cause real bugs or security flaws:\n"
+        f"- REJECT for: reentrancy vulnerabilities, missing access control, integer overflow/underflow, "
+        f"wrong state transitions, missing require checks the plan specified, tests that don't actually test what they claim, compilation errors\n"
+        f"- Do NOT reject for: gas optimization, style/naming preferences, missing comments, "
+        f"test organization, theoretical concerns not in the plan's scope\n\n"
+        f"If the code implements the plan correctly, tests pass, and no security issues exist, APPROVE it.\n"
+        f"Start your response with APPROVED or REJECTED. If REJECTED, list ONLY concrete bugs with file/line references."
     )
 
     # Try CLI first
@@ -346,21 +403,28 @@ def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch:
         print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
 
     # Fallback to API (diff, test_output already fetched above)
-    system_prompt = """You are an independent code reviewer (Codex). You review implementations created by another AI model.
+    system_prompt = """You are an independent code reviewer (Codex) for a Solidity/Foundry project.
 
 YOUR ROLE:
-- You are NOT the implementer. You review their work.
-- Check: does the code match the approved plan? Are tests comprehensive? Any bugs, security issues, or rule violations?
-- Verify test output shows all tests passing.
-- Check for: reentrancy issues, integer overflow, unchecked returns, missing access control.
-- You have NO allegiance to the implementer.
+- You review implementations created by another AI model against the approved plan.
+- The goal is fast iteration — get working code with sufficient quality. Humans handle hardening later.
+
+WHAT WARRANTS REJECTION:
+- Reentrancy vulnerabilities, missing access control, integer overflow/underflow
+- Wrong state transitions or logic that contradicts the plan
+- Missing require/revert checks the plan specified
+- Tests that don't actually test what they claim, or compilation errors
+- Code that deviates from the plan in ways that affect correctness
+
+WHAT DOES NOT WARRANT REJECTION:
+- Gas optimization suggestions
+- Style, naming, or comment preferences
+- Test organization or verbosity
+- Theoretical concerns not in the plan's scope
 
 RESPONSE FORMAT:
-Start your response with exactly one of:
-  APPROVED — if the implementation is correct and complete
-  REJECTED — if there are issues that must be fixed
-
-Then provide specific, actionable feedback. If REJECTED, list every issue with file/line references where possible.
+Start with APPROVED or REJECTED.
+If REJECTED, list ONLY concrete bugs with file/line references. No style suggestions.
 Keep your response under 500 words."""
 
     user_prompt = f"""Review this implementation against the approved plan and project rules.
