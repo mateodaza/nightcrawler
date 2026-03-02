@@ -533,6 +533,8 @@ plan_task() {
     local rules
     rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
 
+    # Claude outputs plan as text (not file write) — we extract from JSON .result
+    # This avoids sandbox issues (SESSION_DIR is outside PROJECT_PATH)
     local prompt="You are planning a task for a Solidity/Foundry project.
 
 TASK:
@@ -544,10 +546,10 @@ ${rules}
 Instructions:
 - Read RESEARCH.md to understand the canonical struct definitions, state machine, and protocol spec.
 - Read any existing source files in src/ and test/ to understand what's already built.
-- Write a detailed implementation plan to: ${plan_file}
+- Output a detailed implementation plan in markdown format as your final response.
 - The plan must include: files to create/modify, structs/enums (matching RESEARCH.md exactly), functions with signatures, events, test cases.
-- Do NOT implement the code — only write the plan.
-- Do NOT modify any source files.
+- Do NOT implement the code — only plan.
+- Do NOT create or modify any source files.
 "
 
     log "Planning $task_id"
@@ -568,14 +570,29 @@ Instructions:
 
     if [[ $exit_code -ne 0 ]]; then
         log "Plan command failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        log "Claude CLI stdout (first 500): ${raw_output:0:500}"
         return 1
     fi
 
-    if [[ ! -f "$plan_file" ]]; then
-        log "Plan file not created at $plan_file"
+    # Extract plan from Claude's JSON output .result field
+    local plan_content
+    plan_content=$(echo "$raw_output" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('result', ''))
+except:
+    print('')
+" 2>/dev/null)
+
+    if [[ -z "$plan_content" || ${#plan_content} -lt 50 ]]; then
+        log "Plan output too short or empty (${#plan_content} chars)"
+        log "Raw output (first 500): ${raw_output:0:500}"
         return 1
     fi
 
+    echo "$plan_content" > "$plan_file"
+    log "Plan written to $plan_file (${#plan_content} chars)"
     echo "$plan_file"
 }
 
@@ -583,11 +600,13 @@ revise_plan() {
     local plan_file="$1" feedback="$2" iteration="$3" task_id="$4"
     local rules
     rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
+    local current_plan
+    current_plan=$(cat "$plan_file")
 
     local prompt="You are revising an implementation plan that was rejected by the auditor.
 
-CURRENT PLAN (at ${plan_file}):
-$(cat "$plan_file")
+CURRENT PLAN:
+${current_plan}
 
 AUDITOR FEEDBACK (iteration $iteration):
 ${feedback}
@@ -598,9 +617,9 @@ ${rules}
 Instructions:
 - Read RESEARCH.md to verify struct definitions and protocol spec.
 - Address EVERY point in the auditor's feedback.
-- Rewrite the plan file at: ${plan_file}
+- Output the complete revised plan in markdown format as your final response.
 - Do NOT implement the code — only revise the plan.
-- Do NOT modify any source files.
+- Do NOT create or modify any source files.
 "
 
     log "Revising plan (iteration $iteration)"
@@ -622,6 +641,24 @@ Instructions:
         return 1
     fi
 
+    # Extract revised plan from JSON .result and overwrite plan file
+    local plan_content
+    plan_content=$(echo "$raw_output" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('result', ''))
+except:
+    print('')
+" 2>/dev/null)
+
+    if [[ -z "$plan_content" || ${#plan_content} -lt 50 ]]; then
+        log "Revised plan too short or empty (${#plan_content} chars)"
+        return 1
+    fi
+
+    echo "$plan_content" > "$plan_file"
+    log "Revised plan written (${#plan_content} chars)"
     return 0
 }
 
