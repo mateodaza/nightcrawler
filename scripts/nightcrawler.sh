@@ -414,111 +414,97 @@ pick_next_task() {
         return
     fi
 
-    # Check skip list
+    # Build skip list context
     local skip_file="$CONTROL_DIR/skip"
+    local skip_context=""
+    if [[ -f "$skip_file" ]] && [[ -s "$skip_file" ]]; then
+        skip_context="
+SKIP LIST (do NOT pick these — they failed earlier this session):
+$(cat "$skip_file")
+"
+    fi
 
-    local debug_file="/tmp/nightcrawler-pick-debug.$$"
-    local task_id
-    task_id=$(python3 -c "
-import re, sys
+    local prompt
+    prompt=$(cat <<'PROMPT_END'
+You are a task scheduler. Read the TASK_QUEUE.md below and pick the next task to execute.
 
-queue_path = '$queue'
-skip_path = '$skip_file'
-dbg = open('$debug_file', 'w')
+RULES:
+- [x] = completed (done)
+- [ ] = queued (eligible candidate)
+- [~] = in progress from a crashed session (treat as NOT done — do not pick, do not count as completed dependency)
+- [🚧] or MANUAL = skip (human-only task)
+- Any other status marker = skip
 
-skips = set()
+A task is ELIGIBLE if ALL of these are true:
+1. Its status is [ ] (queued)
+2. ALL of its dependencies are [x] (completed)
+3. It is NOT in the skip list
+4. It is NOT marked MANUAL or 🚧
+
+Pick the FIRST eligible task in file order. If no task is eligible, say NONE.
+
+RESPOND WITH EXACTLY ONE LINE: just the task ID (e.g. NC-004) or NONE. No explanation.
+PROMPT_END
+)
+
+    # Append skip list and queue file
+    prompt="${prompt}
+${skip_context}
+TASK_QUEUE.md:
+$(cat "$queue")"
+
+    log "pick_next_task: asking Sonnet to pick from queue"
+
+    local raw_output claude_stderr="/tmp/nightcrawler-pick-stderr.$$"
+    set +e
+    raw_output=$(cd "$PROJECT_PATH" && timeout 60 \
+        claude -p "$prompt" \
+            --model sonnet \
+            --output-format json \
+            --max-turns 1 2>"$claude_stderr")
+    local exit_code=$?
+    set -e
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "pick_next_task: Claude call failed (exit $exit_code). stderr: $(head -3 "$claude_stderr" 2>/dev/null)"
+        rm -f "$claude_stderr"
+        echo ""
+        return
+    fi
+    rm -f "$claude_stderr"
+
+    # Log cost (small but track it)
+    log_claude_cli_cost "$raw_output" "pick_task" "task-pick"
+
+    # Extract .result from JSON
+    local answer
+    answer=$(echo "$raw_output" | python3 -c "
+import sys, json
 try:
-    with open(skip_path) as f:
-        skips = {l.strip() for l in f if l.strip()}
-except FileNotFoundError:
-    pass
+    data = json.load(sys.stdin)
+    print(data.get('result', '').strip())
+except:
+    print('')
+" 2>/dev/null)
 
-with open(queue_path) as f:
-    content = f.read()
-    lines = content.splitlines()
-
-# Match NC-\d+, NC-\d+[A-Z] (sub-tasks), NC-G\d+ (gates)
-task_header_re = re.compile(r'^#{1,6}\s+(NC-(?:\d+[A-Z]?|G\d+))\s+\[(.)\]')
-dep_line_re = re.compile(r'^-\s+\*\*Dependencies?:\*\*\s*(.*)', re.IGNORECASE)
-
-# First pass: find all done task IDs
-done_ids = set()
-all_tasks = []
-for line in lines:
-    m = task_header_re.match(line)
-    if m:
-        tid, status = m.group(1), m.group(2)
-        all_tasks.append((tid, status))
-        if status == 'x':
-            done_ids.add(tid)
-
-dbg.write(f'{len(all_tasks)} tasks found, {len(done_ids)} done: {sorted(done_ids)}\n')
-for tid, st in all_tasks:
-    dbg.write(f'  {tid} [{st}]\n')
-
-# Second pass: find first eligible [ ] task
-current_task = None
-for line in lines:
-    m = task_header_re.match(line)
-    if m:
-        if current_task:
-            dbg.write(f'PICK: {current_task} (no deps line)\n')
-            dbg.close()
-            print(current_task)
-            sys.exit(0)
-        tid, status = m.group(1), m.group(2)
-        if status == ' ':
-            if tid not in skips and 'MANUAL' not in line:
-                current_task = tid
-            else:
-                dbg.write(f'SKIP: {tid} (skip-list or MANUAL)\n')
-                current_task = None
-        else:
-            current_task = None
-        continue
-
-    if current_task:
-        dm = dep_line_re.match(line.strip())
-        if dm:
-            dep_str = dm.group(1).strip()
-            if dep_str.lower() == 'none' or not dep_str:
-                dbg.write(f'PICK: {current_task} (deps: none)\n')
-                dbg.close()
-                print(current_task)
-                sys.exit(0)
-            deps = [d.strip() for d in dep_str.split(',') if d.strip()]
-            if all(d in done_ids for d in deps):
-                dbg.write(f'PICK: {current_task} (deps met: {deps})\n')
-                dbg.close()
-                print(current_task)
-                sys.exit(0)
-            else:
-                missing = [d for d in deps if d not in done_ids]
-                dbg.write(f'BLOCKED: {current_task} waiting on {missing}\n')
-                current_task = None
-
-# Last task in file with no deps line
-if current_task:
-    dbg.write(f'PICK: {current_task} (last, no deps line)\n')
-    dbg.close()
-    print(current_task)
-    sys.exit(0)
-
-dbg.write('NO ELIGIBLE TASK\n')
-dbg.close()
-print('')
-" 2>/tmp/nightcrawler-pick-error.$$)
-
-    # Log debug info and any python errors
-    if [[ -f "$debug_file" ]]; then
-        log "pick_next_task: $(cat "$debug_file")"
-        rm -f "$debug_file"
+    # Validate: must look like a task ID (NC-XXX) or NONE
+    if [[ "$answer" == "NONE" ]] || [[ -z "$answer" ]]; then
+        log "pick_next_task: no eligible task (model said: ${answer:-empty})"
+        echo ""
+        return
     fi
-    if [[ -s "/tmp/nightcrawler-pick-error.$$" ]]; then
-        log "pick_next_task ERROR: $(cat /tmp/nightcrawler-pick-error.$$)"
-    fi
-    rm -f "/tmp/nightcrawler-pick-error.$$"
 
+    # Strip any extra text — model should return just the ID but be safe
+    local task_id
+    task_id=$(echo "$answer" | grep -oE 'NC-[0-9A-Z]+' | head -1)
+
+    if [[ -z "$task_id" ]]; then
+        log "pick_next_task: could not parse task ID from model response: $answer"
+        echo ""
+        return
+    fi
+
+    log "pick_next_task: selected $task_id"
     echo "$task_id"
 }
 
@@ -579,7 +565,8 @@ append_to_progress() {
 count_tasks() {
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
     [[ -f "$queue" ]] || { echo "0"; return; }
-    grep -c '^####* NC-[0-9]* \[ \]' "$queue" 2>/dev/null || echo "0"
+    # Count [ ] tasks excluding MANUAL — approximate, just for notifications
+    grep '\[ \]' "$queue" | grep -v MANUAL | grep -c 'NC-' 2>/dev/null || echo "0"
 }
 
 # =============================================================================
