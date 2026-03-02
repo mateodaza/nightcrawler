@@ -19,11 +19,12 @@ These rules apply to TWO layers separately:
 - If a task requires a secret (e.g., RPC endpoint), log it as a BLOCKER and skip
 
 ### Git & Repository
-- NEVER run `git push`, `git push --force`, or any push variant
+- Project code NEVER runs `git push` — only the orchestrator pushes (to nightcrawler/dev only)
+- NEVER run `git push --force` or any force push variant
 - NEVER run `git reset --hard`, `git checkout .`, `git clean -f`
 - NEVER modify `.gitignore` to exclude Nightcrawler state files
 - NEVER amend previous commits — always create new commits
-- All commits are local only. Mateo pushes manually after review.
+- Orchestrator auto-pushes to nightcrawler/dev after each verified task. Mateo merges to main.
 - Session MUST start on a clean worktree (`git status --porcelain` must be empty)
 - Session MUST operate on the dev branch: `nightcrawler/dev`
 - Session MUST acquire lockfile (`/tmp/nightcrawler-<project>.lock`) before any mutation — lockfile lives OUTSIDE repo to avoid contaminating git clean status
@@ -129,8 +130,8 @@ Orchestrator MUST kill child process, release temp files, and clean up before mo
 
 ### Budget
 - Check budget BEFORE every model call. If projected cost of next call would exceed cap, stop
-- Reserve $2.00 from session cap for mandatory end-of-session work (report generation, final notifications, potential revert). Never spend the reserve on tasks
-- Effective task budget = session_cap - reserve - spent_so_far
+- Full budget is available for tasks (no reserve)
+- Effective task budget = session_cap - spent_so_far
 - Alert at 80% of effective budget
 - If a single task exceeds $5, pause and investigate
 - Log every API call cost in session cost.jsonl (append-only JSONL, one object per line)
@@ -146,3 +147,7 @@ These are loaded from the project's CLAUDE.md and may vary. Examples for Clout:
 - All amounts use 6 decimals (stablecoin native)
 - State machine transitions must be explicit and tested
 - Every public function needs NatSpec documentation
+- ALWAYS use named imports (e.g., `import {ERC20} from "..."`) — never wildcard imports
+- Fix any wildcard imports in files you touch, even if you didn't introduce them
+- Never duplicate entries in .gitignore — check before adding
+- Build artifacts (out/, cache/) must be in .gitignore and never tracked in git

@@ -519,7 +519,8 @@ if not found:
 mark_task_done_in_queue() {
     local task_id="$1"
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
-    sed -i "s/${task_id} \[ \]/${task_id} [x]/" "$queue"
+    # Match both [ ] (queued) and [~] (in progress)
+    sed -i -E "s/${task_id} \[[ ~]\]/${task_id} [x]/" "$queue"
 }
 
 mark_task_in_progress() {
@@ -1372,6 +1373,10 @@ switch_to_dev() {
 }
 
 sync_with_main() {
+    log "Fetching latest from origin"
+    git -C "$PROJECT_PATH" fetch origin main 2>/dev/null || log "WARN: fetch failed (offline?)"
+    git -C "$PROJECT_PATH" merge origin/main --no-edit 2>/dev/null || true  # update local main ref
+
     log "Syncing nightcrawler/dev with main"
     if ! git -C "$PROJECT_PATH" merge main --no-edit 2>/dev/null; then
         git -C "$PROJECT_PATH" merge --abort 2>/dev/null || true
@@ -1439,8 +1444,16 @@ startup() {
     fi
     log "Codex ready (primary: $(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('primary','unknown'))" 2>/dev/null))"
 
-    # 13. Baseline — check, repair if red, re-check
+    # 13. Baseline — clean tracked artifacts, check, repair if red, re-check
     cd "$PROJECT_PATH"
+
+    # Remove build artifacts from git tracking (they should be in .gitignore)
+    if git ls-files --error-unmatch out/ cache/ 2>/dev/null | head -1 | grep -q .; then
+        git rm -r --cached out/ cache/ 2>/dev/null || true
+        git commit -m "[nightcrawler] chore: stop tracking build artifacts (out/, cache/)" 2>/dev/null || true
+        log "Cleaned tracked build artifacts from git"
+    fi
+
     set +e
     run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
     local baseline_build=$?
@@ -1622,7 +1635,7 @@ main_loop() {
 
         # Phase C: Commit
         local description
-        description=$(head -1 "$task_file" | sed 's/^- \[.\] \*\*[^*]*\*\* *//' | head -c 72)
+        description=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+NC-[0-9]+\s+\[.\]\s*//' | head -c 72)
         local commit_hash
         commit_hash=$(commit_and_close_task "$TASK_ID" "$description" "$degraded_note")
         log "Committed $TASK_ID as $commit_hash"
