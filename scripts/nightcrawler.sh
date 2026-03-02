@@ -1433,7 +1433,7 @@ startup() {
     fi
     log "Codex ready (primary: $(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('primary','unknown'))" 2>/dev/null))"
 
-    # 13. Baseline
+    # 13. Baseline — check, repair if red, re-check
     cd "$PROJECT_PATH"
     set +e
     run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
@@ -1441,9 +1441,73 @@ startup() {
     run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test
     local baseline_test=$?
     set -e
+
     if [[ $baseline_build -ne 0 ]] || [[ $baseline_test -ne 0 ]]; then
-        die "Baseline build/test failed — repo is red, cannot proceed"
+        log "Baseline red — attempting auto-repair"
+        update_status "repairing baseline"
+
+        # Capture the errors for the repair prompt
+        local build_errors test_errors
+        set +e
+        build_errors=$(cd "$PROJECT_PATH" && forge build 2>&1 | tail -40)
+        test_errors=$(cd "$PROJECT_PATH" && forge test 2>&1 | tail -60)
+        set -e
+
+        local repair_prompt="The repo has build/test failures. Fix them. Nothing else.
+
+BUILD OUTPUT:
+${build_errors}
+
+TEST OUTPUT:
+${test_errors}
+
+RULES:
+- Fix ONLY the errors shown above. Do not add features, refactor, or change anything else.
+- Run 'forge build' and 'forge test' to verify your fix before finishing.
+- If a test is fundamentally wrong (tests something that doesn't exist yet), delete that test file.
+- Do NOT create new contracts or features. Only fix what's broken."
+
+        local repair_stderr="$SESSION_DIR/claude_repair_stderr.log"
+        local repair_output repair_exit
+        set +e
+        repair_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
+            claude -p "$repair_prompt" \
+                --model sonnet \
+                --output-format json \
+                --max-turns 15 2>"$repair_stderr")
+        repair_exit=$?
+        set -e
+
+        if [[ $repair_exit -ne 0 ]]; then
+            log "Repair CLI failed (exit $repair_exit): $(head -5 "$repair_stderr" 2>/dev/null)"
+        fi
+
+        record_touched_files
+        log_claude_cli_cost "$repair_output" "baseline-repair" "repair"
+
+        # Re-check after repair
+        set +e
+        run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+        baseline_build=$?
+        run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test
+        baseline_test=$?
+        set -e
+
+        if [[ $baseline_build -ne 0 ]] || [[ $baseline_test -ne 0 ]]; then
+            die "Baseline still red after repair attempt — manual fix needed"
+        fi
+
+        # Repair succeeded — commit the fix
+        cd "$PROJECT_PATH"
+        git add -A
+        git commit -m "[nightcrawler] fix: auto-repair baseline build/test failures
+
+Session: $SESSION_ID"
+        local repair_hash=$(git rev-parse HEAD)
+        journal '{"event":"baseline_repaired","commit":"'"$repair_hash"'","session":"'"$SESSION_ID"'"}'
+        log "Baseline repaired (commit $repair_hash)"
     fi
+
     BASELINE=$(git rev-parse HEAD)
     log "Baseline: $BASELINE"
 

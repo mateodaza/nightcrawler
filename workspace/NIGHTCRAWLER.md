@@ -36,6 +36,10 @@ When Mateo sends a message:
 - `queue` → exec: `grep -E '^#{1,6}\s+NC-' /home/nightcrawler/projects/clout/TASK_QUEUE.md 2>/dev/null || echo "No queue"`
 - `alive` → exec: `flock -n /tmp/nightcrawler-clout.lock true 2>/dev/null && echo "No session running" || echo "Session is alive (lock held)"`
 
+### Diagnostics
+- `diagnose` → exec: `cd /home/nightcrawler/projects/clout && echo "=== BRANCH ===" && git rev-parse --abbrev-ref HEAD && echo "=== BUILD ===" && forge build 2>&1 | tail -20 && echo "=== TESTS ===" && forge test 2>&1 | tail -30`
+- `branch` → exec: `cd /home/nightcrawler/projects/clout && git rev-parse --abbrev-ref HEAD && git log --oneline -5`
+
 ### Notes
 - `note <text>` → exec: `mkdir -p /tmp/nightcrawler/clout && echo "[$(date -u +%FT%TZ)] <text>" >> /tmp/nightcrawler/clout/notes && echo "Noted"`
 - Any unrecognized message → exec: same as note
