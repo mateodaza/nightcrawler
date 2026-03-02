@@ -45,6 +45,12 @@ FORGE_TEST_WALL=300  FORGE_TEST_IDLE=120
 CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
 CLAUDE_CLI_TIMEOUT=1200 # wall-clock safety net for Claude Code CLI (no idle — JSON mode has no output)
 
+# Strip API keys — force both CLIs to use subscription auth.
+# Claude CLI uses `claude login` session; Codex CLI uses ~/.codex/config.json.
+# If CLI fails, API fallback also fails (no key) → session stops. That's intentional.
+unset ANTHROPIC_API_KEY 2>/dev/null || true
+unset OPENAI_API_KEY 2>/dev/null || true
+
 # =============================================================================
 # SEC 2: State flags
 # =============================================================================
@@ -545,11 +551,20 @@ ${task_content}
 RULES:
 ${rules}
 
+MANDATORY READS — you MUST read ALL of these before writing any plan:
+1. RESEARCH.md — the canonical protocol spec. Every struct, enum, constant, and state machine lives here. Your plan must match these EXACTLY, field-by-field, type-by-type. Do not invent fields, omit fields, or rename anything.
+2. TASK_QUEUE.md — read the FULL entry for this task including ALL acceptance criteria and sub-items. Every acceptance criterion must be addressed in your plan.
+3. All existing source files in src/ — understand what's already built so you don't duplicate or conflict.
+4. All existing test files in test/ — understand existing test patterns and helpers.
+5. foundry.toml — understand compiler settings and project config.
+6. Any other .sol files in the project root or script/ directories.
+
 Instructions:
-- Read RESEARCH.md to understand the canonical struct definitions, state machine, and protocol spec.
-- Read any existing source files in src/ and test/ to understand what's already built.
-- Output a detailed implementation plan in markdown format as your final response.
-- The plan must include: files to create/modify, structs/enums (matching RESEARCH.md exactly), functions with signatures, events, test cases.
+- After reading all the above, output a detailed implementation plan in markdown.
+- For every struct/enum in your plan, list the EXACT fields from RESEARCH.md (copy them, do not paraphrase).
+- For every function, specify the full signature, parameters, return types, and which RESEARCH.md section it implements.
+- Map each acceptance criterion from TASK_QUEUE.md to specific plan items.
+- Include comprehensive test cases covering: happy path, edge cases, reverts, access control, and any scenarios mentioned in acceptance criteria.
 - Do NOT implement the code — only plan.
 - Do NOT create or modify any source files.
 "
@@ -616,10 +631,15 @@ ${feedback}
 RULES:
 ${rules}
 
+MANDATORY READS — re-read these to fix the auditor's concerns:
+1. RESEARCH.md — re-verify EVERY struct, enum, constant, and state transition field-by-field. The auditor often catches mismatches here.
+2. TASK_QUEUE.md — re-read the FULL task entry and ALL acceptance criteria. Ensure nothing is missing.
+3. Existing src/ and test/ files — check for conflicts or patterns you need to follow.
+
 Instructions:
-- Read RESEARCH.md to verify struct definitions and protocol spec.
-- Address EVERY point in the auditor's feedback.
-- Output the complete revised plan in markdown format as your final response.
+- Address EVERY point in the auditor's feedback explicitly. For each feedback item, state what you changed and why.
+- If the auditor says a struct field is missing, copy the EXACT definition from RESEARCH.md into your plan.
+- Output the complete revised plan in markdown (not just the diff — the full plan).
 - Do NOT implement the code — only revise the plan.
 - Do NOT create or modify any source files.
 "
@@ -670,7 +690,7 @@ audit_plan_call() {
 
     local raw_output exit_code
     set +e
-    raw_output=$(timeout "$CODEX_CALL_TIMEOUT" \
+    raw_output=$(OPENAI_API_KEY="" timeout "$CODEX_CALL_TIMEOUT" \
         python3 "$SCRIPTS/call_codex.py" audit-plan \
             --plan "$plan_file" \
             --task-file "$task_file" \
@@ -888,7 +908,7 @@ review_impl() {
 
     local raw_output exit_code
     set +e
-    raw_output=$(timeout "$CODEX_CALL_TIMEOUT" \
+    raw_output=$(OPENAI_API_KEY="" timeout "$CODEX_CALL_TIMEOUT" \
         python3 "$SCRIPTS/call_codex.py" review-impl \
             --project "$PROJECT_PATH" \
             --plan "$plan_file" \
@@ -1351,7 +1371,7 @@ startup() {
     log "Testing Codex connectivity"
     set +e
     local codex_test
-    codex_test=$(python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
+    codex_test=$(OPENAI_API_KEY="" python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
     local codex_rc=$?
     set -e
     if [[ $codex_rc -ne 0 ]]; then
