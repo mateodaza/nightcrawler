@@ -151,10 +151,12 @@ log_claude_cli_cost() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    cost = data.get('cost_usd', data.get('cost', 0))
-    inp = data.get('input_tokens', 0)
-    out = data.get('output_tokens', 0)
-    model = data.get('model', 'unknown')
+    # Claude Code CLI uses total_cost_usd; call_opus.py uses cost_usd
+    cost = data.get('total_cost_usd', data.get('cost_usd', data.get('cost', 0)))
+    usage = data.get('usage', {})
+    inp = usage.get('input_tokens', data.get('input_tokens', 0))
+    out = usage.get('output_tokens', data.get('output_tokens', 0))
+    model = list(data.get('modelUsage', {}).keys())[0] if data.get('modelUsage') else data.get('model', 'unknown')
     print(json.dumps({'cost_usd': cost, 'input_tokens': inp, 'output_tokens': out, 'model': model}))
 except:
     print(json.dumps({'cost_usd': 0, 'input_tokens': 0, 'output_tokens': 0, 'model': 'unknown'}))
@@ -524,34 +526,53 @@ plan_task() {
     local task_file="$1" task_id="$2"
     local plan_dir="$SESSION_DIR/tasks/$task_id"
     mkdir -p "$plan_dir"
+    local plan_file="$plan_dir/mini_plan.md"
+
+    local task_content
+    task_content=$(cat "$task_file")
+    local rules
+    rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
+
+    local prompt="You are planning a task for a Solidity/Foundry project.
+
+TASK:
+${task_content}
+
+RULES:
+${rules}
+
+Instructions:
+- Read RESEARCH.md to understand the canonical struct definitions, state machine, and protocol spec.
+- Read any existing source files in src/ and test/ to understand what's already built.
+- Write a detailed implementation plan to: ${plan_file}
+- The plan must include: files to create/modify, structs/enums (matching RESEARCH.md exactly), functions with signatures, events, test cases.
+- Do NOT implement the code — only write the plan.
+- Do NOT modify any source files.
+"
 
     log "Planning $task_id"
     update_status "planning $task_id"
 
     local raw_output exit_code
+    local claude_stderr="$SESSION_DIR/claude_plan_${task_id}_stderr.log"
     set +e
-    raw_output=$(run_timed $PLAN_WALL $PLAN_IDLE \
-        python3 "$SCRIPTS/call_opus.py" plan \
-            --task-file "$task_file" \
-            --template "$STATE_DIR/templates/mini_plan.md" \
-            --session "$SESSION_ID" \
-            --task "$task_id")
+    raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
+        claude -p "$prompt" \
+            --model sonnet \
+            --output-format json \
+            --max-turns 10 2>"$claude_stderr")
     exit_code=$?
     set -e
 
     log_claude_cli_cost "$raw_output" "$task_id" "planning"
 
     if [[ $exit_code -ne 0 ]]; then
-        log "Plan command failed (exit $exit_code)"
+        log "Plan command failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
         return 1
     fi
 
-    # call_opus.py writes mini_plan.md to disk and prints metadata JSON to stdout.
-    # Extract the plan_file path from metadata.
-    local plan_file
-    plan_file=$(echo "$raw_output" | python3 -c "import sys,json;print(json.load(sys.stdin)['plan_file'])" 2>/dev/null)
-    if [[ -z "$plan_file" ]] || [[ ! -f "$plan_file" ]]; then
-        log "Plan metadata missing plan_file or file not found"
+    if [[ ! -f "$plan_file" ]]; then
+        log "Plan file not created at $plan_file"
         return 1
     fi
 
@@ -560,26 +581,46 @@ plan_task() {
 
 revise_plan() {
     local plan_file="$1" feedback="$2" iteration="$3" task_id="$4"
+    local rules
+    rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
+
+    local prompt="You are revising an implementation plan that was rejected by the auditor.
+
+CURRENT PLAN (at ${plan_file}):
+$(cat "$plan_file")
+
+AUDITOR FEEDBACK (iteration $iteration):
+${feedback}
+
+RULES:
+${rules}
+
+Instructions:
+- Read RESEARCH.md to verify struct definitions and protocol spec.
+- Address EVERY point in the auditor's feedback.
+- Rewrite the plan file at: ${plan_file}
+- Do NOT implement the code — only revise the plan.
+- Do NOT modify any source files.
+"
 
     log "Revising plan (iteration $iteration)"
     local raw_output exit_code
+    local claude_stderr="$SESSION_DIR/claude_planrev_${task_id}_${iteration}_stderr.log"
     set +e
-    raw_output=$(run_timed $PLAN_WALL $PLAN_IDLE \
-        python3 "$SCRIPTS/call_opus.py" revise \
-            --plan "$plan_file" \
-            --feedback "$feedback" \
-            --iteration "$iteration")
+    raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
+        claude -p "$prompt" \
+            --model sonnet \
+            --output-format json \
+            --max-turns 10 2>"$claude_stderr")
     exit_code=$?
     set -e
 
     log_claude_cli_cost "$raw_output" "$task_id" "plan-revision"
 
     if [[ $exit_code -ne 0 ]]; then
+        log "Plan revision failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
         return 1
     fi
-
-    # call_opus.py already wrote the revised plan to $plan_file (line 197).
-    # stdout is metadata JSON only — nothing to extract for the file itself.
 
     return 0
 }
