@@ -1656,6 +1656,15 @@ main_loop() {
         fi
 
         journal '{"event":"task_complete","task_id":"'"$TASK_ID"'","commit":"'"$commit_hash"'","cost":'"$TASK_COST"'}'
+
+        # Push to nightcrawler/dev after each verified task
+        cd "$PROJECT_PATH"
+        if git push origin HEAD:nightcrawler/dev 2>/dev/null; then
+            log "Pushed to nightcrawler/dev"
+        else
+            log "WARN: push to nightcrawler/dev failed (non-fatal)"
+        fi
+
         local remaining
         remaining=$(count_tasks)
         local notify_msg="Done: $TASK_ID ($commit_hash). Remaining: $remaining. Spent: \$$TASK_COST."
