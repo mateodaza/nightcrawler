@@ -61,42 +61,13 @@ def codex_cli_available() -> bool:
         return False
 
 
-def codex_cli_review(project_path: str, base_branch: str = None, instructions: str = None) -> dict:
-    """Run `codex review` on uncommitted changes in the project.
+def codex_cli_review(project_path: str, review_prompt: str) -> dict:
+    """Run codex exec with a review prompt including the diff.
 
-    Returns {content, method, model}.
+    codex review --uncommitted does not accept custom prompts, so we use
+    codex exec with full context (plan + rules + diff) instead.
     """
-    cmd = ["codex", "review", "--uncommitted"]
-
-    if base_branch:
-        cmd = ["codex", "review", "--base", base_branch]
-
-    if instructions:
-        cmd.append(instructions)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True, text=True, timeout=CLI_TIMEOUT,
-            cwd=project_path,
-        )
-
-        output = result.stdout.strip()
-        if not output:
-            output = result.stderr.strip()
-
-        if not output:
-            return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "empty output"}
-
-        return {
-            "content": output,
-            "method": "cli",
-            "model": "gpt-5.3-codex",
-        }
-    except subprocess.TimeoutExpired:
-        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "timeout"}
-    except Exception as e:
-        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": str(e)}
+    return codex_cli_exec(review_prompt, project_path)
 
 
 def codex_cli_exec(prompt: str, project_path: str = None) -> dict:
@@ -319,43 +290,14 @@ Is this plan ready for implementation? Reply APPROVED or REJECTED with specific 
 
 def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch: str = None,
                 diff_source: str = None, test_output_file: str = None):
-    """Review implementation. Tries `codex review` CLI first, falls back to API."""
+    """Review implementation. Tries codex exec CLI first, falls back to API."""
     plan = Path(plan_file).read_text()
     rules = Path(rules_file).read_text()
 
-    instructions = (
-        f"Review this code against the approved plan. Check: does it match the plan? "
-        f"Are tests comprehensive? Any bugs, security issues (reentrancy, overflow, access control), or rule violations? "
-        f"Start your response with APPROVED or REJECTED.\n\n"
-        f"APPROVED PLAN:\n{plan[:3000]}\n\n"
-        f"KEY RULES:\n{rules[:2000]}"
-    )
-
-    # Try CLI first
-    if codex_cli_available():
-        result = codex_cli_review(
-            project_path=project_path,
-            base_branch=base_branch,
-            instructions=instructions,
-        )
-        if result.get("content") and not result.get("error"):
-            verdict = parse_verdict(result["content"])
-            output = {
-                **verdict,
-                "method": "cli",
-                "model": result["model"],
-                "cost_usd": 0,  # CLI cost tracked by OpenAI account
-            }
-            print(json.dumps(output))
-            return
-
-        print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
-
-    # Fallback to API
+    # Get diff for both CLI and API paths
     if diff_source:
         diff = Path(diff_source).read_text() if os.path.isfile(diff_source) else diff_source
     else:
-        # Get diff from git
         try:
             result_git = subprocess.run(
                 ["git", "diff"], capture_output=True, text=True, cwd=project_path
@@ -369,13 +311,41 @@ def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch:
         except Exception:
             diff = "(could not read git diff)"
 
+    if len(diff) > 80000:
+        diff = diff[:40000] + "\n\n... [TRUNCATED] ...\n\n" + diff[-40000:]
+
     test_output = ""
     if test_output_file and os.path.isfile(test_output_file):
         test_output = Path(test_output_file).read_text()
 
-    if len(diff) > 80000:
-        diff = diff[:40000] + "\n\n... [TRUNCATED] ...\n\n" + diff[-40000:]
+    review_prompt = (
+        f"You are an independent code reviewer. Review this implementation.\n\n"
+        f"APPROVED PLAN:\n{plan[:3000]}\n\n"
+        f"KEY RULES:\n{rules[:2000]}\n\n"
+        f"GIT DIFF:\n```diff\n{diff[:30000]}\n```\n\n"
+        f"TEST OUTPUT:\n```\n{test_output[:5000]}\n```\n\n"
+        f"Check: does code match the plan? Tests comprehensive? "
+        f"Bugs, security issues (reentrancy, overflow, access control), rule violations?\n"
+        f"Start your response with APPROVED or REJECTED, then specific feedback."
+    )
 
+    # Try CLI first
+    if codex_cli_available():
+        result = codex_cli_review(project_path, review_prompt)
+        if result.get("content") and not result.get("error"):
+            verdict = parse_verdict(result["content"])
+            output = {
+                **verdict,
+                "method": "cli",
+                "model": result["model"],
+                "cost_usd": 0,
+            }
+            print(json.dumps(output))
+            return
+
+        print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
+
+    # Fallback to API (diff, test_output already fetched above)
     system_prompt = """You are an independent code reviewer (Codex). You review implementations created by another AI model.
 
 YOUR ROLE:
