@@ -151,11 +151,13 @@ log_claude_cli_cost() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    # Claude Code CLI uses total_cost_usd; call_opus.py uses cost_usd
     cost = data.get('total_cost_usd', data.get('cost_usd', data.get('cost', 0)))
     usage = data.get('usage', {})
-    inp = usage.get('input_tokens', data.get('input_tokens', 0))
-    out = usage.get('output_tokens', data.get('output_tokens', 0))
+    # Claude CLI splits input across cached/non-cached — sum all three
+    inp = usage.get('input_tokens', 0) \
+        + usage.get('cache_creation_input_tokens', 0) \
+        + usage.get('cache_read_input_tokens', 0)
+    out = usage.get('output_tokens', 0)
     model = list(data.get('modelUsage', {}).keys())[0] if data.get('modelUsage') else data.get('model', 'unknown')
     print(json.dumps({'cost_usd': cost, 'input_tokens': inp, 'output_tokens': out, 'model': model}))
 except:
