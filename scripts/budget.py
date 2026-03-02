@@ -115,7 +115,7 @@ def check_budget(session_id: str):
 
     # Status flags
     budget["can_continue"] = (
-        budget["effective_remaining"] > 1.00
+        budget["effective_remaining"] > 0
         and budget["daily_remaining"] > 0
         and budget["monthly_remaining"] > 0
     )
