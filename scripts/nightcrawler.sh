@@ -15,6 +15,12 @@ set -euo pipefail
 PROJECT="${1:?Usage: nightcrawler.sh <project> [--budget N] [--dry-run]}"
 shift
 
+# Ensure tool paths are available (nohup/systemd don't source shell profiles)
+for p in "$HOME/.foundry/bin" "$HOME/.cargo/bin" "/usr/local/bin" "$HOME/.local/bin"; do
+    [[ -d "$p" ]] && PATH="$p:$PATH"
+done
+export PATH
+
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-/home/nightcrawler/nightcrawler}"
 PROJECT_PATH="${NIGHTCRAWLER_PROJECT_PATH:-/home/nightcrawler/projects/$PROJECT}"
