@@ -560,6 +560,7 @@ MANDATORY READS — you MUST read ALL of these before writing any plan:
 6. Any other .sol files in the project root or script/ directories.
 
 Instructions:
+- You have limited turns. Read all files FIRST, then output the plan in ONE response. Do not explore incrementally.
 - After reading all the above, output a detailed implementation plan in markdown.
 - For every struct/enum in your plan, list the EXACT fields from RESEARCH.md (copy them, do not paraphrase).
 - For every function, specify the full signature, parameters, return types, and which RESEARCH.md section it implements.
@@ -731,14 +732,23 @@ run_audit() {
 # Hard blocks are issues where proceeding risks correctness or safety.
 # Everything else is a soft reject (style, naming, minor structure).
 # Returns via global CLASSIFY_RESULT: approved | hard_block | soft_reject
-HARD_BLOCK_PATTERNS="security.vulnerabilit|data.loss|reentrancy|overflow|underflow|privilege.escalation|funds.at.risk|loss.of.funds|critical.vulnerabilit"
+#
+# IMPORTANT: Pattern must match "missing X" or "no X" or "lacks X" or "vulnerable to X"
+# to avoid false positives from phrases like "correctly handles reentrancy."
+# Each pattern is: (negative context word).{0,30}(security keyword)
+HARD_BLOCK_PATTERNS="(missing|lacks?|no|without|absent|vulnerable to|exposed to|susceptible to).{0,30}(reentrancy guard|reentrancy protection|access control|overflow protection|underflow protection|authorization)"
+HARD_BLOCK_PATTERNS_DIRECT="funds.at.risk|loss.of.funds|privilege.escalation|critical.vulnerabilit|data.loss|steal.funds|drain.funds"
 
 classify_rejection() {
     local feedback="$1"
     local lower
     lower=$(echo "$feedback" | tr '[:upper:]' '[:lower:]')
 
-    if echo "$lower" | grep -qEi "$HARD_BLOCK_PATTERNS"; then
+    # Direct patterns — always hard block
+    if echo "$lower" | grep -qEi "$HARD_BLOCK_PATTERNS_DIRECT"; then
+        CLASSIFY_RESULT="hard_block"
+    # Contextual patterns — only hard block when paired with negative framing
+    elif echo "$lower" | grep -qEi "$HARD_BLOCK_PATTERNS"; then
         CLASSIFY_RESULT="hard_block"
     else
         CLASSIFY_RESULT="soft_reject"
