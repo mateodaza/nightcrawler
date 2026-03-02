@@ -51,6 +51,20 @@ CLAUDE_CLI_TIMEOUT=1200 # wall-clock safety net for Claude Code CLI (no idle —
 unset ANTHROPIC_API_KEY 2>/dev/null || true
 unset OPENAI_API_KEY 2>/dev/null || true
 
+# Load Telegram credentials from ~/.env (systemd doesn't inherit shell env vars).
+# Only loads TELEGRAM_* — API keys were intentionally stripped above.
+if [[ -f "$HOME/.env" ]]; then
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" =~ ^# ]] && continue
+        case "$key" in
+            TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID)
+                value="${value%\"}" ; value="${value#\"}"  # strip quotes
+                export "$key=$value"
+                ;;
+        esac
+    done < "$HOME/.env"
+fi
+
 # =============================================================================
 # SEC 2: State flags
 # =============================================================================
