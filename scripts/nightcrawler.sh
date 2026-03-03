@@ -915,6 +915,69 @@ classify_rejection() {
     fi
 }
 
+# Dynamic convergence check — asks LLM if iterations are making progress or going in circles.
+# Uses Haiku (cheapest) since this is a simple classification.
+# Returns 0 = keep going, 1 = stop (stuck)
+check_convergence() {
+    local phase="$1"  # "plan" or "implementation"
+    shift
+    local feedbacks=("$@")
+    local count=${#feedbacks[@]}
+
+    # Always continue if fewer than 2 feedbacks — not enough signal yet
+    (( count < 2 )) && return 0
+
+    # Build feedback history
+    local history=""
+    local i=1
+    for fb in "${feedbacks[@]}"; do
+        history+="Round $i: ${fb:0:300}
+"
+        i=$((i + 1))
+    done
+
+    local prompt="You are evaluating whether a code review loop is converging or stuck.
+
+Phase: ${phase}
+Rounds so far: ${count}
+
+Feedback history:
+${history}
+
+DECIDE:
+- CONTINUE if each round is making real progress (new issues found, previous issues resolved)
+- STOP if the same core issues keep repeating, feedback is circular, or the reviewer and implementer are talking past each other
+
+RESPOND WITH EXACTLY ONE WORD: CONTINUE or STOP"
+
+    local raw_output
+    raw_output=$(cd "$PROJECT_PATH" && timeout 30 \
+        claude -p "$prompt" \
+            --model haiku \
+            --output-format json \
+            --max-turns 1 2>/dev/null) || { return 0; }  # on error, default to continue
+
+    local answer
+    answer=$(echo "$raw_output" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    r = data.get('result', '').strip().upper()
+    print('STOP' if 'STOP' in r else 'CONTINUE')
+except:
+    print('CONTINUE')
+" 2>/dev/null)
+
+    if [[ "$answer" == "STOP" ]]; then
+        log "Convergence check: STOP after $count rounds (stuck/circular)"
+        notify_normal "⚠️ ${phase} stuck after ${count} rounds — capping iterations"
+        return 1
+    fi
+
+    log "Convergence check: CONTINUE (round $count making progress)"
+    return 0
+}
+
 plan_loop() {
     local task_file="$1" task_id="$2"
     local plan_file iteration=0
@@ -950,16 +1013,19 @@ plan_loop() {
         feedbacks+=("$AUDIT_FEEDBACK")
         log "Plan soft-rejected (iteration $iteration): ${AUDIT_FEEDBACK:0:200}"
 
-        if (( iteration < MAX_PLAN_ITERATIONS )); then
-            if ! revise_plan "$plan_file" "$AUDIT_FEEDBACK" "$iteration" "$task_id"; then
-                log "Plan revision failed"
-                feedbacks+=("Plan revision command failed")
-            fi
+        # Dynamic convergence check — stop early if stuck, keep going if progressing
+        if (( iteration >= MAX_PLAN_ITERATIONS )) || ! check_convergence "plan audit" "${feedbacks[@]}"; then
+            break
+        fi
+
+        if ! revise_plan "$plan_file" "$AUDIT_FEEDBACK" "$iteration" "$task_id"; then
+            log "Plan revision failed"
+            feedbacks+=("Plan revision command failed")
         fi
     done
 
-    # Soft rejections exhausted — proceed with warning
-    log "plan_loop: $MAX_PLAN_ITERATIONS soft rejections exhausted — proceeding with capped plan"
+    # Iterations exhausted or convergence check said stop — proceed with warning
+    log "plan_loop: capped after $iteration iterations — proceeding with best plan"
     PLAN_AUDIT_MODE="capped_soft_reject"
     PLAN_LAST_FEEDBACK="$AUDIT_FEEDBACK"
     journal '{"event":"plan_capped_soft_reject","task_id":"'"$task_id"'","iteration":'"$iteration"',"last_feedback":"'"$(echo "$AUDIT_FEEDBACK" | head -c 500 | sed 's/"/\\"/g')"'"}'
@@ -1194,6 +1260,14 @@ impl_loop() {
 
             feedbacks+=("$REVIEW_FEEDBACK")
             log "Impl soft-rejected (iteration $iteration): ${REVIEW_FEEDBACK:0:200}"
+
+            # Dynamic convergence — ask Haiku if we're making progress
+            if ! check_convergence "implementation review" "${feedbacks[@]}"; then
+                log "Convergence check: implementation loop is stuck — stopping"
+                IMPL_REVIEW_MODE="capped"
+                journal '{"event":"impl_convergence_stop","task_id":"'"$task_id"'","iteration":'"$iteration"'}'
+                break
+            fi
             continue
         fi
 
@@ -1210,6 +1284,11 @@ impl_loop() {
 
             if [[ $build_ok -ne 0 ]] || [[ $test_ok -ne 0 ]]; then
                 feedbacks+=("Scope cleanup broke build/tests")
+                if ! check_convergence "implementation review" "${feedbacks[@]}"; then
+                    log "Convergence check: stuck after scope cleanup failures — stopping"
+                    IMPL_REVIEW_MODE="capped"
+                    break
+                fi
                 continue
             fi
 
@@ -1217,6 +1296,11 @@ impl_loop() {
 
             if [[ "$REVIEW_VERDICT" != "APPROVED" ]]; then
                 feedbacks+=("Post-scope-cleanup re-review: $REVIEW_FEEDBACK")
+                if ! check_convergence "implementation review" "${feedbacks[@]}"; then
+                    log "Convergence check: stuck after scope re-review — stopping"
+                    IMPL_REVIEW_MODE="capped"
+                    break
+                fi
                 continue
             fi
         fi
