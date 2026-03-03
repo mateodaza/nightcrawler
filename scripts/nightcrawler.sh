@@ -47,6 +47,8 @@ BUILD_CMD="make build"
 TEST_CMD="make test"
 BUILD_WALL=120 BUILD_IDLE=60
 TEST_WALL=300  TEST_IDLE=120
+MAX_PLAN_ITERATIONS=3           # plan audit soft-reject cap
+MAX_IMPL_ITERATIONS=5           # impl review soft-reject cap (more room — code is harder)
 VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
 
 # Load project config if it exists (can override BUILD_CMD, TEST_CMD, etc.)
@@ -429,7 +431,7 @@ pick_next_task() {
         return
     fi
 
-    # Build skip list context
+    # Build context for the LLM
     local skip_file="$CONTROL_DIR/skip"
     local skip_context=""
     if [[ -f "$skip_file" ]] && [[ -s "$skip_file" ]]; then
@@ -439,32 +441,55 @@ $(cat "$skip_file")
 "
     fi
 
+    # Recent git history — helps LLM see what's actually been done
+    local git_context=""
+    git_context=$(git -C "$PROJECT_PATH" log --oneline -15 2>/dev/null || echo "(no git history)")
+
+    # Quick build/test status
+    local build_status=""
+    if cd "$PROJECT_PATH" && $BUILD_CMD >/dev/null 2>&1; then
+        build_status="BUILD: passing"
+    else
+        build_status="BUILD: FAILING — consider if this blocks anything"
+    fi
+
     local prompt
     prompt=$(cat <<'PROMPT_END'
-You are a task scheduler. Read the TASK_QUEUE.md below and pick the next task to execute.
+You are a smart task scheduler for an autonomous coding agent. Your job: maximize productive work.
 
-RULES:
-- [x] = completed (done)
+Read the TASK_QUEUE.md and pick the next task to execute. Be pragmatic, not bureaucratic.
+
+STATUS MARKERS:
+- [x] = completed
 - [ ] = queued (eligible candidate)
-- [~] = in progress from a crashed session (treat as NOT done — do not pick, do not count as completed dependency)
-- [🚧] or MANUAL = skip (human-only task)
-- Any other status marker = skip
+- [~] = was in progress, session crashed — treat as incomplete but recoverable
+- [🚧] or MANUAL = human-only, always skip
+- Any other marker = skip
 
-A task is ELIGIBLE if ALL of these are true:
-1. Its status is [ ] (queued)
-2. ALL of its dependencies are [x] (completed)
-3. It is NOT in the skip list
-4. It is NOT marked MANUAL or 🚧
+PICKING LOGIC (in priority order):
 
-Pick the FIRST eligible task in file order. If no task is eligible, say NONE.
+1. STANDARD PICK: Find the first [ ] task whose dependencies are ALL [x], not in skip list, not MANUAL. This is the normal case.
 
-RESPOND WITH EXACTLY ONE LINE: just the task ID (e.g. NC-004) or NONE. No explanation.
+2. SMART RECOVERY: If a task is marked [~] (crashed in-progress) and its deps are [x], it's a BETTER pick than a fresh [ ] task — the work is partially done. Pick it.
+
+3. VERIFY STATUS: Cross-check the git log. If a task is marked [ ] but the git log shows it was already implemented (commit message mentions the task ID), it might be stale. Still pick it — the orchestrator will verify and skip if truly done.
+
+4. NEVER RETURN NONE IF WORK EXISTS: If strict dependency checking blocks everything but you can see tasks that are practically unblocked (e.g., dep is [~] but git log shows the dep's code was committed), pick the task anyway. Bias toward action.
+
+5. TRULY NOTHING: Only say NONE if every non-manual task is either [x], in the skip list, or genuinely blocked on incomplete dependencies with no evidence of completion.
+
+RESPOND WITH EXACTLY ONE LINE: just the task ID (e.g. NC-004) or NONE.
 PROMPT_END
 )
 
-    # Append skip list and queue file
+    # Append all context
     prompt="${prompt}
 ${skip_context}
+RECENT GIT LOG:
+${git_context}
+
+${build_status}
+
 TASK_QUEUE.md:
 $(cat "$queue")"
 
@@ -581,7 +606,9 @@ count_tasks() {
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
     [[ -f "$queue" ]] || { echo "0"; return; }
     # Count [ ] tasks excluding MANUAL — approximate, just for notifications
-    grep '\[ \]' "$queue" | grep -v MANUAL | grep -c 'NC-' 2>/dev/null || echo "0"
+    local n
+    n=$(grep '\[ \]' "$queue" | grep -v MANUAL | grep -c 'NC-' 2>/dev/null) || true
+    echo "${n:-0}"
 }
 
 # Session memory — learnings accumulate across tasks within a session.
@@ -897,7 +924,7 @@ plan_loop() {
     plan_file=$(plan_task "$task_file" "$task_id") || return 1
     [[ -z "$plan_file" ]] && return 1
 
-    while (( iteration < 3 )); do
+    while (( iteration < MAX_PLAN_ITERATIONS )); do
         iteration=$((iteration + 1))
 
         run_audit "$plan_file" "$task_file"
@@ -923,7 +950,7 @@ plan_loop() {
         feedbacks+=("$AUDIT_FEEDBACK")
         log "Plan soft-rejected (iteration $iteration): ${AUDIT_FEEDBACK:0:200}"
 
-        if (( iteration < 3 )); then
+        if (( iteration < MAX_PLAN_ITERATIONS )); then
             if ! revise_plan "$plan_file" "$AUDIT_FEEDBACK" "$iteration" "$task_id"; then
                 log "Plan revision failed"
                 feedbacks+=("Plan revision command failed")
@@ -931,8 +958,8 @@ plan_loop() {
         fi
     done
 
-    # 3 soft rejections exhausted — proceed with warning
-    log "plan_loop: 3 soft rejections exhausted — proceeding with capped plan"
+    # Soft rejections exhausted — proceed with warning
+    log "plan_loop: $MAX_PLAN_ITERATIONS soft rejections exhausted — proceeding with capped plan"
     PLAN_AUDIT_MODE="capped_soft_reject"
     PLAN_LAST_FEEDBACK="$AUDIT_FEEDBACK"
     journal '{"event":"plan_capped_soft_reject","task_id":"'"$task_id"'","iteration":'"$iteration"',"last_feedback":"'"$(echo "$AUDIT_FEEDBACK" | head -c 500 | sed 's/"/\\"/g')"'"}'
@@ -1131,7 +1158,7 @@ impl_loop() {
     IMPL_REVIEW_MODE="approved"
     REVIEW_FEEDBACK=""
 
-    while (( iteration < 3 )); do
+    while (( iteration < MAX_IMPL_ITERATIONS )); do
         iteration=$((iteration + 1))
 
         if [[ $iteration -eq 1 ]]; then
@@ -1199,7 +1226,7 @@ impl_loop() {
         return 0
     done
 
-    # 3 iterations exhausted — distinguish implementation failures from soft rejections
+    # Iterations exhausted — distinguish implementation failures from soft rejections
     if [[ $reviews_reached -eq 0 ]]; then
         log "impl_loop: all $iteration iterations failed before reaching review — implementation broken"
         IMPL_REVIEW_MODE="hard_block"
