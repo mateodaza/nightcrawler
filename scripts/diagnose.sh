@@ -6,7 +6,8 @@
 set -euo pipefail
 
 # Ensure tool paths are available
-for p in "$HOME/.foundry/bin" "$HOME/.cargo/bin" "/usr/local/bin" "$HOME/.local/bin"; do
+NVM_BIN=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)
+for p in "$HOME/.foundry/bin" "$HOME/.cargo/bin" "/usr/local/bin" "$HOME/.local/bin" "$NVM_BIN"; do
     [[ -d "$p" ]] && PATH="$p:$PATH"
 done
 export PATH
