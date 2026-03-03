@@ -1974,6 +1974,9 @@ Session: $SESSION_ID"
     update_status "running — $remaining tasks remaining"
     notify_normal "Session $SESSION_ID started. $remaining tasks. Budget: $budget_label."
     journal '{"event":"session_start","session_id":"'"$SESSION_ID"'","project":"'"$PROJECT"'","prompt_cap":'"$PROMPT_CAP"',"codex_cap":'"$CODEX_DOLLAR_CAP"',"baseline":"'"$BASELINE"'"}'
+
+    # Write active project marker (used by dispatcher for live-state detection)
+    echo "$PROJECT" > /tmp/nightcrawler-active-project
     log "Startup complete"
 }
 
@@ -2347,6 +2350,7 @@ ${prompt_label} | API ref: \$${TOTAL_COST} | Codex: \$${CODEX_COST}${degraded_la
 
     [[ "$HEARTBEAT_STARTED" == "true" ]] && stop_heartbeat
     rm -f "/tmp/nightcrawler-${PROJECT}-status" 2>/dev/null || true
+    rm -f /tmp/nightcrawler-active-project 2>/dev/null || true
     # Do NOT rm -rf CONTROL_DIR — manifest must survive for next session's recovery
 }
 
