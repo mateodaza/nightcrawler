@@ -63,9 +63,30 @@ else
     cd "$PROJECT_PATH"
 fi
 
+# --- Git submodules (always from repo root, where .gitmodules lives) ---
+fix_submodules() {
+    if [[ -f "$PROJECT_PATH/.gitmodules" ]]; then
+        # Check if any submodule dir is empty/missing
+        local needs_init=false
+        while IFS= read -r sm_path; do
+            if [[ ! -f "$PROJECT_PATH/$sm_path/.git" && ! -d "$PROJECT_PATH/$sm_path/.git" ]]; then
+                needs_init=true
+                break
+            fi
+        done < <(git -C "$PROJECT_PATH" config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
+
+        if [[ "$needs_init" == true ]]; then
+            echo "Initializing git submodules..."
+            git -C "$PROJECT_PATH" submodule update --init --recursive 2>&1 | tail -10
+            echo "Submodules initialized"
+        fi
+    fi
+}
+
 # --- Install mode ---
 if [[ "$INSTALL_MODE" == true ]]; then
     echo "=== INSTALLING: $PROJECT ==="
+    fix_submodules
     if [[ -n "$INSTALL_CMD" ]]; then
         eval "$INSTALL_CMD" 2>&1 | tail -30
     elif [[ -f pnpm-lock.yaml ]]; then
@@ -88,6 +109,29 @@ echo ""
 echo "=== BRANCH ==="
 git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "Not a git repo"
 git log --oneline -3 2>/dev/null || true
+
+echo ""
+echo "=== SUBMODULES ==="
+if [[ -f "$PROJECT_PATH/.gitmodules" ]]; then
+    SM_TOTAL=0; SM_OK=0; SM_MISSING=0
+    while IFS= read -r sm_path; do
+        SM_TOTAL=$((SM_TOTAL + 1))
+        if [[ -f "$PROJECT_PATH/$sm_path/.git" || -d "$PROJECT_PATH/$sm_path/.git" ]]; then
+            SM_OK=$((SM_OK + 1))
+        else
+            SM_MISSING=$((SM_MISSING + 1))
+            echo "  MISSING: $sm_path"
+        fi
+    done < <(git -C "$PROJECT_PATH" config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
+    if [[ $SM_MISSING -gt 0 ]]; then
+        echo "Submodules: $SM_MISSING/$SM_TOTAL missing — auto-fixing..."
+        fix_submodules
+    else
+        echo "Submodules: $SM_OK/$SM_TOTAL OK"
+    fi
+else
+    echo "No .gitmodules (no submodules)"
+fi
 
 echo ""
 echo "=== DEPS ==="

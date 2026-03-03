@@ -52,7 +52,21 @@ if [[ -f "$PROJECT_PATH/.nightcrawler/config.sh" ]]; then
     source "$PROJECT_PATH/.nightcrawler/config.sh"
 fi
 
-# 5. Install dependencies if node_modules is missing
+# 5. Initialize git submodules if any are missing
+if [[ -f "$PROJECT_PATH/.gitmodules" ]]; then
+    NEED_SM=false
+    while IFS= read -r sm_path; do
+        if [[ ! -f "$PROJECT_PATH/$sm_path/.git" && ! -d "$PROJECT_PATH/$sm_path/.git" ]]; then
+            NEED_SM=true; break
+        fi
+    done < <(git -C "$PROJECT_PATH" config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
+    if [[ "$NEED_SM" == true ]]; then
+        echo "Initializing git submodules..."
+        git -C "$PROJECT_PATH" submodule update --init --recursive 2>&1 | tail -5
+    fi
+fi
+
+# 6. Install dependencies if node_modules is missing
 INSTALL_DIR="$PROJECT_PATH"
 [[ -n "$WORKDIR" ]] && INSTALL_DIR="$PROJECT_PATH/$WORKDIR"
 
@@ -69,7 +83,7 @@ elif [[ -f "$INSTALL_DIR/package-lock.json" ]] && [[ ! -d "$INSTALL_DIR/node_mod
     (cd "$INSTALL_DIR" && npm install 2>&1 | tail -5)
 fi
 
-# 6. Refresh .claude/CLAUDE.md from repo-owned .nightcrawler/CLAUDE.md
+# 7. Refresh .claude/CLAUDE.md from repo-owned .nightcrawler/CLAUDE.md
 mkdir -p "$PROJECT_PATH/.claude"
 if [[ -f "$PROJECT_PATH/.nightcrawler/CLAUDE.md" ]]; then
     cp "$PROJECT_PATH/.nightcrawler/CLAUDE.md" "$PROJECT_PATH/.claude/CLAUDE.md"
@@ -90,7 +104,7 @@ CLAUDEEOF
     echo "Created generic .claude/CLAUDE.md (no .nightcrawler/CLAUDE.md found)"
 fi
 
-# 7. Refresh .claude/skills/ from repo-owned .nightcrawler/skills/ (atomic replace)
+# 8. Refresh .claude/skills/ from repo-owned .nightcrawler/skills/ (atomic replace)
 if [[ -d "$PROJECT_PATH/.nightcrawler/skills" ]]; then
     # Atomic replace: copy to temp, swap in
     SKILLS_TMP="$PROJECT_PATH/.claude/skills.tmp.$$"
@@ -104,7 +118,7 @@ else
     rm -rf "$PROJECT_PATH/.claude/skills"
 fi
 
-# 8. Ensure .claude/settings.json exists for Claude Code CLI permissions
+# 9. Ensure .claude/settings.json exists for Claude Code CLI permissions
 if [[ ! -f "$PROJECT_PATH/.claude/settings.json" ]]; then
     echo "Creating .claude/settings.json for tool permissions"
     cat > "$PROJECT_PATH/.claude/settings.json" << 'SETTINGSEOF'
@@ -156,7 +170,7 @@ if [[ ! -f "$PROJECT_PATH/.claude/settings.json" ]]; then
 SETTINGSEOF
 fi
 
-# 9. Kill budget-kill flag from previous stop command
+# 10. Kill budget-kill flag from previous stop command
 rm -f /tmp/nightcrawler-budget-kill
 
 # --- Launch ---
