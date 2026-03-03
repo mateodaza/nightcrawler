@@ -41,13 +41,28 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Project-configurable settings (defaults — overridden by .nightcrawler/config.sh)
+PROJECT_DESC="software"         # e.g. "Solidity/Foundry", "Next.js/TypeScript"
+BUILD_CMD="make build"
+TEST_CMD="make test"
+BUILD_WALL=120 BUILD_IDLE=60
+TEST_WALL=300  TEST_IDLE=120
+VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
+
+# Load project config if it exists (can override BUILD_CMD, TEST_CMD, etc.)
+PROJECT_CONFIG="$PROJECT_PATH/.nightcrawler/config.sh"
+if [[ -f "$PROJECT_CONFIG" ]]; then
+    # shellcheck source=/dev/null
+    source "$PROJECT_CONFIG"
+    # Refresh verify instructions after config override
+    VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
+fi
+
 # Timeouts (seconds)
 PLAN_WALL=300   PLAN_IDLE=120
 AUDIT_WALL=180  AUDIT_IDLE=60
 IMPL_WALL=600   IMPL_IDLE=180
 REVIEW_WALL=180 REVIEW_IDLE=60
-FORGE_BUILD_WALL=120 FORGE_BUILD_IDLE=60
-FORGE_TEST_WALL=300  FORGE_TEST_IDLE=120
 CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
 CLAUDE_CLI_TIMEOUT=1200 # wall-clock safety net for Claude Code CLI (no idle — JSON mode has no output)
 
@@ -569,6 +584,67 @@ count_tasks() {
     grep '\[ \]' "$queue" | grep -v MANUAL | grep -c 'NC-' 2>/dev/null || echo "0"
 }
 
+# Session memory — learnings accumulate across tasks within a session.
+# Each completed task contributes a 1-line insight that feeds into subsequent task prompts.
+LEARNINGS_FILE=""  # set in startup
+
+capture_task_learning() {
+    local task_id="$1" commit_hash="$2"
+    [[ -z "$LEARNINGS_FILE" ]] && return
+
+    # Get the diff summary for this task
+    local diff_stat
+    diff_stat=$(git -C "$PROJECT_PATH" diff --stat "${commit_hash}^..${commit_hash}" 2>/dev/null | tail -5)
+
+    local learning_prompt="You just completed task $task_id for project $PROJECT.
+
+Diff summary:
+$diff_stat
+
+Write ONE line (max 120 chars) capturing the most useful technical insight for someone implementing the NEXT task in this codebase. Focus on patterns, gotchas, or conventions discovered — not what you did.
+
+Examples of good learnings:
+- SafeERC20 wrapper required for all token transfers — raw transfer() silently fails
+- vm.warp(block.timestamp + N) needs +1 for strict > checks in timeout tests
+- WalletRecord struct fields must be updated in the mutating function, not in a separate call
+
+RESPOND WITH EXACTLY ONE LINE. No prefix, no quotes."
+
+    local raw_output
+    raw_output=$(cd "$PROJECT_PATH" && timeout 30 \
+        claude -p "$learning_prompt" \
+            --model haiku \
+            --output-format json \
+            --max-turns 1 2>/dev/null) || return 0
+
+    local learning
+    learning=$(echo "$raw_output" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('result', '').strip().split('\n')[0][:150])
+except:
+    print('')
+" 2>/dev/null)
+
+    if [[ -n "$learning" ]]; then
+        echo "- [$task_id] $learning" >> "$LEARNINGS_FILE"
+        log "Learning captured: $learning"
+    fi
+}
+
+get_session_learnings() {
+    [[ -z "$LEARNINGS_FILE" ]] && return
+    [[ -f "$LEARNINGS_FILE" ]] || return
+    local content
+    content=$(cat "$LEARNINGS_FILE" 2>/dev/null)
+    [[ -z "$content" ]] && return
+    echo "
+SESSION LEARNINGS (from earlier tasks this session — use these insights):
+$content
+"
+}
+
 # =============================================================================
 # SEC 5: Phase A — Plan
 # =============================================================================
@@ -586,11 +662,14 @@ plan_task() {
 
     # Claude outputs plan as text (not file write) — we extract from JSON .result
     # This avoids sandbox issues (SESSION_DIR is outside PROJECT_PATH)
-    local prompt="You are planning a task for a Solidity/Foundry project.
+    local learnings
+    learnings=$(get_session_learnings 2>/dev/null || true)
+
+    local prompt="You are planning a task for a ${PROJECT_DESC} project.
 
 TASK:
 ${task_content}
-
+${learnings}
 RULES (coding standards — reference during planning, not primary context):
 ${rules}
 
@@ -621,6 +700,7 @@ Instructions:
 
     log "Planning $task_id"
     update_status "planning $task_id"
+    notify_normal "📋 Planning $task_id..."
 
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_plan_${task_id}_stderr.log"
@@ -870,19 +950,21 @@ implement_task() {
 
     plan=$(cat "$plan_file")
     rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
+    local learnings
+    learnings=$(get_session_learnings 2>/dev/null || true)
 
-    prompt="You are implementing a task for a Solidity/Foundry project.
+    prompt="You are implementing a task for a ${PROJECT_DESC} project.
 
 PLAN (your primary source of truth — implement exactly this):
 ${plan}
-
+${learnings}
 RULES (coding standards — follow these for style and patterns):
 ${rules}
 
 DONE CRITERIA — implementation is complete when ALL of these are true:
 - Every file, struct, function, and test from the plan exists
-- 'forge build' compiles with zero errors
-- 'forge test' passes with zero failures
+- '$BUILD_CMD' compiles with zero errors
+- '$TEST_CMD' passes with zero failures
 - No files outside the plan's scope are modified
 - No extra contracts, files, or features beyond the plan
 
@@ -892,12 +974,13 @@ UNCERTAINTY PROTOCOL:
 
 Instructions:
 - Implement exactly what the plan says. No more, no less.
-- Run 'forge build' and 'forge test' to verify before finishing.
+- $VERIFY_INSTRUCTIONS
 - Do NOT create probe/test/scratch contracts.
 "
 
     log "Implementing $task_id"
     update_status "implementing $task_id"
+    notify_normal "🔨 Implementing $task_id..."
 
     # Use timeout (not run_timed) — Claude Code CLI in JSON mode produces no
     # intermediate output, so idle timeout would kill it prematurely.
@@ -930,6 +1013,8 @@ revise_impl() {
 
     plan=$(cat "$plan_file")
     rules=$(cat "$STATE_DIR/RULES.md" 2>/dev/null || echo "No rules file found")
+    local learnings
+    learnings=$(get_session_learnings 2>/dev/null || true)
 
     prompt="You are revising an implementation that was rejected by the code reviewer.
 
@@ -938,24 +1023,25 @@ ${plan}
 
 REVIEWER FEEDBACK (iteration $iteration):
 ${feedback}
-
+${learnings}
 RULES (coding standards):
 ${rules}
 
 DONE CRITERIA — revision is complete when:
 - Every reviewer feedback point is addressed
-- 'forge build' compiles with zero errors
-- 'forge test' passes with zero failures
+- '$BUILD_CMD' compiles with zero errors
+- '$TEST_CMD' passes with zero failures
 - Changes stay within the plan's scope
 
 Instructions:
 - Address EVERY point in the reviewer's feedback.
-- Run 'forge build' and 'forge test' to verify.
+- $VERIFY_INSTRUCTIONS
 - Do NOT modify files outside the plan's scope.
 "
 
     log "Revising implementation (iteration $iteration)"
     update_status "revising $TASK_ID (iteration $iteration)"
+    notify_normal "🔄 Revising $TASK_ID (round $iteration)..."
 
     # Use timeout (not run_timed) — same reason as implement_task
     local raw_output exit_code
@@ -1089,9 +1175,9 @@ impl_loop() {
             log "Scope violations cleaned — re-testing and re-reviewing"
 
             set +e
-            run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+            run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD
             local build_ok=$?
-            run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test -v
+            run_timed $TEST_WALL $TEST_IDLE $TEST_CMD
             local test_ok=$?
             set -e
 
@@ -1130,9 +1216,9 @@ impl_loop() {
     # Build must pass
     set +e
     cd "$PROJECT_PATH"
-    run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+    run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD
     local cap_build=$?
-    run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test -v
+    run_timed $TEST_WALL $TEST_IDLE $TEST_CMD
     local cap_test=$?
     set -e
 
@@ -1184,9 +1270,9 @@ verify_post_commit() {
     cd "$PROJECT_PATH"
 
     set +e
-    run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+    run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD
     local b=$?
-    run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test -v
+    run_timed $TEST_WALL $TEST_IDLE $TEST_CMD
     local t=$?
     set -e
 
@@ -1291,9 +1377,9 @@ execute_recovery() {
                 log "RECOVERY: Found unverified commit $RECOVERY_COMMIT for $RECOVERY_TASK_ID"
                 cd "$PROJECT_PATH"
                 set +e
-                run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+                run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD
                 local b=$?
-                run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test
+                run_timed $TEST_WALL $TEST_IDLE $TEST_CMD
                 local t=$?
                 set -e
                 if [[ $b -eq 0 ]] && [[ $t -eq 0 ]]; then
@@ -1453,7 +1539,10 @@ startup() {
 
     # 9. Session dir already created
 
-    # 10. Heartbeat
+    # 10. Session memory
+    LEARNINGS_FILE="$SESSION_DIR/learnings.md"
+
+    # 11. Heartbeat
     start_heartbeat
 
     # 11. Check .claude/ exists for Claude Code CLI
@@ -1489,21 +1578,22 @@ startup() {
     fi
 
     set +e
-    run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+    run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD
     local baseline_build=$?
-    run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test
+    run_timed $TEST_WALL $TEST_IDLE $TEST_CMD
     local baseline_test=$?
     set -e
 
     if [[ $baseline_build -ne 0 ]] || [[ $baseline_test -ne 0 ]]; then
         log "Baseline red — attempting auto-repair"
         update_status "repairing baseline"
+        notify_normal "🩹 Baseline broken — auto-repairing before starting tasks..."
 
         # Capture the errors for the repair prompt
         local build_errors test_errors
         set +e
-        build_errors=$(cd "$PROJECT_PATH" && forge build 2>&1 | tail -40)
-        test_errors=$(cd "$PROJECT_PATH" && forge test 2>&1 | tail -60)
+        build_errors=$(cd "$PROJECT_PATH" && $BUILD_CMD 2>&1 | tail -40)
+        test_errors=$(cd "$PROJECT_PATH" && $TEST_CMD 2>&1 | tail -60)
         set -e
 
         local repair_prompt="The repo has build/test failures. Fix them. Nothing else.
@@ -1516,7 +1606,7 @@ ${test_errors}
 
 RULES:
 - Fix ONLY the errors shown above. Do not add features, refactor, or change anything else.
-- Run 'forge build' and 'forge test' to verify your fix before finishing.
+- $VERIFY_INSTRUCTIONS
 - If a test is fundamentally wrong (tests something that doesn't exist yet), delete that test file.
 - Do NOT create new contracts or features. Only fix what's broken."
 
@@ -1540,9 +1630,9 @@ RULES:
 
         # Re-check after repair
         set +e
-        run_timed $FORGE_BUILD_WALL $FORGE_BUILD_IDLE forge build
+        run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD
         baseline_build=$?
-        run_timed $FORGE_TEST_WALL $FORGE_TEST_IDLE forge test
+        run_timed $TEST_WALL $TEST_IDLE $TEST_CMD
         baseline_test=$?
         set -e
 
@@ -1668,6 +1758,7 @@ main_loop() {
         fi
 
         # Phase C: Commit
+        notify_normal "✅ $TASK_ID passed review — committing..."
         local description
         description=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+NC-[0-9]+\s+\[.\]\s*//' | head -c 72)
         local commit_hash
@@ -1703,6 +1794,9 @@ main_loop() {
         fi
 
         journal '{"event":"task_complete","task_id":"'"$TASK_ID"'","commit":"'"$commit_hash"'","cost":'"$TASK_COST"'}'
+
+        # Capture session memory — 1-line learning from this task (async, non-blocking)
+        capture_task_learning "$TASK_ID" "$commit_hash" &
 
         # Push to nightcrawler/dev after each verified task
         cd "$PROJECT_PATH"
