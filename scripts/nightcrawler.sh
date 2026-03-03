@@ -68,21 +68,24 @@ REVIEW_WALL=180 REVIEW_IDLE=60
 CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
 CLAUDE_CLI_TIMEOUT=1200 # wall-clock safety net for Claude Code CLI (no idle — JSON mode has no output)
 
-# Strip API keys — force both CLIs to use subscription auth.
+# Strip API keys from environment — force both CLIs to use subscription auth.
 # Claude CLI uses `claude login` session; Codex CLI uses ~/.codex/config.json.
-# If CLI fails, API fallback also fails (no key) → session stops. That's intentional.
 unset ANTHROPIC_API_KEY 2>/dev/null || true
 unset OPENAI_API_KEY 2>/dev/null || true
 
-# Load Telegram credentials from ~/.env (systemd doesn't inherit shell env vars).
-# Only loads TELEGRAM_* — API keys were intentionally stripped above.
+# Load credentials from ~/.env (systemd doesn't inherit shell env vars).
+# OPENAI_API_KEY stored in _OPENAI_KEY (not exported) — passed only to Codex API fallback.
+_OPENAI_KEY=""
 if [[ -f "$HOME/.env" ]]; then
     while IFS='=' read -r key value; do
         [[ -z "$key" || "$key" =~ ^# ]] && continue
+        value="${value%\"}" ; value="${value#\"}"  # strip quotes
         case "$key" in
             TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID)
-                value="${value%\"}" ; value="${value#\"}"  # strip quotes
                 export "$key=$value"
+                ;;
+            OPENAI_API_KEY)
+                _OPENAI_KEY="$value"
                 ;;
         esac
     done < "$HOME/.env"
@@ -851,7 +854,7 @@ audit_plan_call() {
 
     local raw_output exit_code
     set +e
-    raw_output=$(OPENAI_API_KEY="" timeout "$CODEX_CALL_TIMEOUT" \
+    raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" timeout "$CODEX_CALL_TIMEOUT" \
         python3 "$SCRIPTS/call_codex.py" audit-plan \
             --plan "$plan_file" \
             --task-file "$task_file" \
@@ -1165,7 +1168,7 @@ review_impl() {
 
     local raw_output exit_code
     set +e
-    raw_output=$(OPENAI_API_KEY="" timeout "$CODEX_CALL_TIMEOUT" \
+    raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" timeout "$CODEX_CALL_TIMEOUT" \
         python3 "$SCRIPTS/call_codex.py" review-impl \
             --project "$PROJECT_PATH" \
             --plan "$plan_file" \
@@ -1665,7 +1668,7 @@ startup() {
     log "Testing Codex connectivity"
     set +e
     local codex_test
-    codex_test=$(OPENAI_API_KEY="" python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
+    codex_test=$(OPENAI_API_KEY="$_OPENAI_KEY" python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
     local codex_rc=$?
     set -e
     if [[ $codex_rc -ne 0 ]]; then
