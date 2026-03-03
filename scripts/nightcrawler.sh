@@ -69,12 +69,20 @@ AUDIT_WALL=180  AUDIT_IDLE=60
 IMPL_WALL=600   IMPL_IDLE=180
 REVIEW_WALL=180 REVIEW_IDLE=60
 CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
-CLAUDE_CLI_TIMEOUT=1200 # wall-clock safety net for Claude Code CLI (no idle — JSON mode has no output)
+CLAUDE_CLI_TIMEOUT=1800 # wall-clock safety net for Claude Code CLI (30min — 25 turns × ~60s each, with margin)
 
 # Strip API keys from environment — force both CLIs to use subscription auth.
 # Claude CLI uses `claude login` session; Codex CLI uses ~/.codex/config.json.
 unset ANTHROPIC_API_KEY 2>/dev/null || true
 unset OPENAI_API_KEY 2>/dev/null || true
+
+# Claude Code auto-compaction control.
+# Each `claude -p` call is a fresh session, but within a 20-25 turn call,
+# reading many source files can fill context and trigger auto-compaction.
+# Compaction summarizes away the original prompt (plan, task details, rules).
+# Setting threshold to 95% delays compaction, preserving more context.
+# Critical instructions survive via .claude/CLAUDE.md (reloaded after compaction).
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=95
 
 # Load credentials from ~/.env (systemd doesn't inherit shell env vars).
 # OPENAI_API_KEY stored in _OPENAI_KEY (not exported) — passed only to Codex API fallback.
@@ -502,18 +510,34 @@ $(cat "$queue")"
 
     log "pick_next_task: asking Sonnet to pick from queue"
 
-    local raw_output claude_stderr="/tmp/nightcrawler-pick-stderr.$$"
-    set +e
-    raw_output=$(cd "$PROJECT_PATH" && timeout 60 \
-        claude -p "$prompt" \
-            --model sonnet \
-            --output-format json \
-            --max-turns 1 2>"$claude_stderr")
-    local exit_code=$?
-    set -e
+    # Retry up to 3x — a rate limit or transient failure here would silently end the session
+    local raw_output exit_code=1
+    local claude_stderr="/tmp/nightcrawler-pick-stderr.$$"
+    local pick_attempt
+    for pick_attempt in 1 2 3; do
+        set +e
+        raw_output=$(cd "$PROJECT_PATH" && timeout 60 \
+            claude -p "$prompt" \
+                --model sonnet \
+                --output-format json \
+                --max-turns 1 2>"$claude_stderr")
+        exit_code=$?
+        set -e
+        if [[ $exit_code -eq 0 ]]; then
+            break
+        fi
+        log "pick_next_task: attempt $pick_attempt/3 failed (exit $exit_code). stderr: $(head -3 "$claude_stderr" 2>/dev/null)"
+        if [[ $pick_attempt -lt 3 ]]; then
+            # Exponential backoff — rate limits need time to clear
+            local wait_secs=$((30 * pick_attempt))
+            log "pick_next_task: waiting ${wait_secs}s before retry (possible rate limit)"
+            sleep "$wait_secs"
+        fi
+    done
 
     if [[ $exit_code -ne 0 ]]; then
-        log "pick_next_task: Claude call failed (exit $exit_code). stderr: $(head -3 "$claude_stderr" 2>/dev/null)"
+        log "pick_next_task: all 3 attempts failed — returning empty (session will end)"
+        escalate_urgent "WARNING ($PROJECT): Task picker failed 3x (possible rate limit) — session ending"
         rm -f "$claude_stderr"
         echo ""
         return
@@ -1114,6 +1138,7 @@ UNCERTAINTY PROTOCOL:
 
 Instructions:
 - Implement exactly what the plan says. No more, no less.
+- Be context-efficient: read only the files you need, avoid re-reading files you've already seen. Context is limited.
 - $VERIFY_INSTRUCTIONS
 - Do NOT create probe/test/scratch contracts.
 "
@@ -1442,7 +1467,7 @@ Cost: \$${TASK_COST}"
 Note: $(echo -e "$degraded_note" | head -1)"
     fi
 
-    git commit -m "$commit_msg"
+    git commit -m "$commit_msg" >/dev/null
     local hash
     hash=$(git rev-parse HEAD)
     journal '{"event":"task_committed","task_id":"'"$task_id"'","commit":"'"$hash"'","ts":"'"$(date -u +%FT%TZ)"'"}'
