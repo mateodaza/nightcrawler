@@ -891,7 +891,7 @@ run_audit() {
     fi
 
     # Retry up to 3 times before degrading
-    local attempt rc
+    local attempt rc=1
     AUDIT_RAW=""
     for attempt in 1 2 3; do
         set +e
@@ -902,7 +902,7 @@ run_audit() {
             break
         fi
         log "RETRY: audit attempt $attempt/3 failed (exit $rc)"
-        (( attempt < 3 )) && sleep 10
+        [[ $attempt -lt 3 ]] && sleep 10
     done
 
     if [[ $rc -ne 0 ]]; then
@@ -1244,7 +1244,7 @@ run_review() {
     fi
 
     # Retry up to 3 times before degrading
-    local attempt rc
+    local attempt rc=1
     REVIEW_RAW=""
     for attempt in 1 2 3; do
         set +e
@@ -1255,7 +1255,7 @@ run_review() {
             break
         fi
         log "RETRY: review attempt $attempt/3 failed (exit $rc)"
-        (( attempt < 3 )) && sleep 10
+        [[ $attempt -lt 3 ]] && sleep 10
     done
 
     if [[ $rc -ne 0 ]]; then
@@ -1745,7 +1745,7 @@ startup() {
             break
         fi
         log "RETRY: Codex connectivity test attempt $codex_attempt/3 failed (exit $codex_rc)"
-        (( codex_attempt < 3 )) && sleep 10
+        [[ $codex_attempt -lt 3 ]] && sleep 10
     done
 
     if [[ $codex_rc -ne 0 ]]; then
