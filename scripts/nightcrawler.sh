@@ -49,6 +49,9 @@ BUILD_WALL=120 BUILD_IDLE=60
 TEST_WALL=300  TEST_IDLE=120
 MAX_PLAN_ITERATIONS=3           # plan audit soft-reject cap
 MAX_IMPL_ITERATIONS=5           # impl review soft-reject cap (more room — code is harder)
+PLAN_MAX_TURNS=20               # Claude CLI --max-turns for planning (scale up for larger codebases)
+IMPL_MAX_TURNS=25               # Claude CLI --max-turns for implementation
+REPAIR_MAX_TURNS=15             # Claude CLI --max-turns for baseline repair
 VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
 
 # Load project config if it exists (can override BUILD_CMD, TEST_CMD, etc.)
@@ -740,7 +743,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns 10 2>"$claude_stderr")
+            --max-turns $PLAN_MAX_TURNS 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -817,7 +820,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns 10 2>"$claude_stderr")
+            --max-turns $PLAN_MAX_TURNS 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -1129,7 +1132,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns 25 2>"$claude_stderr")
+            --max-turns $IMPL_MAX_TURNS 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -1188,7 +1191,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns 25 2>"$claude_stderr")
+            --max-turns $IMPL_MAX_TURNS 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -1814,7 +1817,7 @@ RULES:
             claude -p "$repair_prompt" \
                 --model sonnet \
                 --output-format json \
-                --max-turns 15 2>"$repair_stderr")
+                --max-turns $REPAIR_MAX_TURNS 2>"$repair_stderr")
         repair_exit=$?
         set -e
 
