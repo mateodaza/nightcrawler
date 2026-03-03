@@ -139,7 +139,7 @@ log() { local msg="[$(date -u +%FT%TZ)] $*"; echo "$msg" >> "$SESSION_DIR/nightc
 
 run_timed() {
     local wall="$1" idle="$2"; shift 2
-    python3 "$SCRIPTS/run_with_timeout.py" "$wall" "$idle" "$@"
+    python3 "$SCRIPTS/run_with_timeout.py" "$wall" "$idle" bash -c "$*"
 }
 
 journal() {
@@ -525,7 +525,7 @@ $(cat "$skip_file")
 
     # Quick build/test status
     local build_status=""
-    if cd "$PROJECT_PATH" && $BUILD_CMD >/dev/null 2>&1; then
+    if cd "$PROJECT_PATH" && eval "$BUILD_CMD" >/dev/null 2>&1; then
         build_status="BUILD: passing"
     else
         build_status="BUILD: FAILING — consider if this blocks anything"
@@ -1883,8 +1883,8 @@ startup() {
         # Capture the errors for the repair prompt
         local build_errors test_errors
         set +e
-        build_errors=$(cd "$PROJECT_PATH" && $BUILD_CMD 2>&1 | tail -40)
-        test_errors=$(cd "$PROJECT_PATH" && $TEST_CMD 2>&1 | tail -60)
+        build_errors=$(cd "$PROJECT_PATH" && eval "$BUILD_CMD" 2>&1 | tail -40)
+        test_errors=$(cd "$PROJECT_PATH" && eval "$TEST_CMD" 2>&1 | tail -60)
         set -e
 
         local repair_prompt="The repo has build/test failures. Fix them. Nothing else.
