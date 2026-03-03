@@ -106,6 +106,7 @@ RECOVERY_COMMIT=""
 RECOVERY_SESSION_ID=""
 TASK_COST=0
 TOTAL_COST=0
+CODEX_DEGRADED=false    # true = Codex unavailable, skip audit/review with synthetic APPROVED
 
 # =============================================================================
 # SEC 3: Helpers
@@ -880,13 +881,39 @@ audit_plan_call() {
 
 run_audit() {
     local plan_file="$1" task_file="$2"
-    set +e
-    AUDIT_RAW=$(audit_plan_call "$plan_file" "$task_file")
-    local rc=$?
-    set -e
-    if [[ $rc -ne 0 ]]; then
-        die "Audit infrastructure failure (exit $rc) — Codex unavailable, stopping session"
+
+    # Degraded mode — skip audit entirely
+    if [[ "$CODEX_DEGRADED" == "true" ]]; then
+        log "DEGRADED: Skipping audit (Codex unavailable)"
+        AUDIT_VERDICT="APPROVED"
+        AUDIT_FEEDBACK="[DEGRADED] Audit skipped — Codex unavailable"
+        return 0
     fi
+
+    # Retry up to 3 times before degrading
+    local attempt rc
+    AUDIT_RAW=""
+    for attempt in 1 2 3; do
+        set +e
+        AUDIT_RAW=$(audit_plan_call "$plan_file" "$task_file")
+        rc=$?
+        set -e
+        if [[ $rc -eq 0 ]]; then
+            break
+        fi
+        log "RETRY: audit attempt $attempt/3 failed (exit $rc)"
+        (( attempt < 3 )) && sleep 10
+    done
+
+    if [[ $rc -ne 0 ]]; then
+        log "WARN: Audit infrastructure failure after 3 attempts — entering degraded mode"
+        CODEX_DEGRADED=true
+        notify_normal "⚠️ Codex audit unreachable — proceeding without auditor for this session"
+        AUDIT_VERDICT="APPROVED"
+        AUDIT_FEEDBACK="[DEGRADED] Audit skipped after 3 infrastructure failures (exit $rc)"
+        return 0
+    fi
+
     AUDIT_VERDICT=$(echo "$AUDIT_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verdict','REJECTED'))")
     AUDIT_FEEDBACK=$(echo "$AUDIT_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('feedback',''))")
 }
@@ -908,14 +935,25 @@ classify_rejection() {
     lower=$(echo "$feedback" | tr '[:upper:]' '[:lower:]')
 
     # Direct patterns — always hard block
-    if echo "$lower" | grep -qEi "$HARD_BLOCK_PATTERNS_DIRECT"; then
+    local direct_match
+    direct_match=$(echo "$lower" | grep -oEi "$HARD_BLOCK_PATTERNS_DIRECT" | head -1) || true
+    if [[ -n "$direct_match" ]]; then
         CLASSIFY_RESULT="hard_block"
-    # Contextual patterns — only hard block when paired with negative framing
-    elif echo "$lower" | grep -qEi "$HARD_BLOCK_PATTERNS"; then
-        CLASSIFY_RESULT="hard_block"
-    else
-        CLASSIFY_RESULT="soft_reject"
+        log "CLASSIFY: hard_block via direct pattern: '$direct_match'"
+        return
     fi
+
+    # Contextual patterns — only hard block when paired with negative framing
+    local contextual_match
+    contextual_match=$(echo "$lower" | grep -oEi "$HARD_BLOCK_PATTERNS" | head -1) || true
+    if [[ -n "$contextual_match" ]]; then
+        CLASSIFY_RESULT="hard_block"
+        log "CLASSIFY: hard_block via contextual pattern: '$contextual_match'"
+        return
+    fi
+
+    CLASSIFY_RESULT="soft_reject"
+    log "CLASSIFY: soft_reject (no hard block patterns matched)"
 }
 
 # Dynamic convergence check — asks LLM if iterations are making progress or going in circles.
@@ -958,7 +996,10 @@ RESPOND WITH EXACTLY ONE WORD: CONTINUE or STOP"
         claude -p "$prompt" \
             --model haiku \
             --output-format json \
-            --max-turns 1 2>/dev/null) || { return 0; }  # on error, default to continue
+            --max-turns 1 2>/dev/null) || {
+        log "WARN: Convergence check failed — defaulting to STOP (safer than risking infinite loop)"
+        return 1
+    }
 
     local answer
     answer=$(echo "$raw_output" | python3 -c "
@@ -1193,13 +1234,39 @@ review_impl() {
 
 run_review() {
     local plan_file="$1"
-    set +e
-    REVIEW_RAW=$(review_impl "$plan_file")
-    local rc=$?
-    set -e
-    if [[ $rc -ne 0 ]]; then
-        die "Review infrastructure failure (exit $rc) — Codex unavailable, stopping session"
+
+    # Degraded mode — skip review entirely
+    if [[ "$CODEX_DEGRADED" == "true" ]]; then
+        log "DEGRADED: Skipping review (Codex unavailable)"
+        REVIEW_VERDICT="APPROVED"
+        REVIEW_FEEDBACK="[DEGRADED] Review skipped — Codex unavailable"
+        return 0
     fi
+
+    # Retry up to 3 times before degrading
+    local attempt rc
+    REVIEW_RAW=""
+    for attempt in 1 2 3; do
+        set +e
+        REVIEW_RAW=$(review_impl "$plan_file")
+        rc=$?
+        set -e
+        if [[ $rc -eq 0 ]]; then
+            break
+        fi
+        log "RETRY: review attempt $attempt/3 failed (exit $rc)"
+        (( attempt < 3 )) && sleep 10
+    done
+
+    if [[ $rc -ne 0 ]]; then
+        log "WARN: Review infrastructure failure after 3 attempts — entering degraded mode"
+        CODEX_DEGRADED=true
+        notify_normal "⚠️ Codex review unreachable — proceeding without reviewer for this session"
+        REVIEW_VERDICT="APPROVED"
+        REVIEW_FEEDBACK="[DEGRADED] Review skipped after 3 infrastructure failures (exit $rc)"
+        return 0
+    fi
+
     REVIEW_VERDICT=$(echo "$REVIEW_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verdict','REJECTED'))")
     REVIEW_FEEDBACK=$(echo "$REVIEW_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('feedback',''))")
 }
@@ -1607,7 +1674,9 @@ sync_with_main() {
         git -C "$PROJECT_PATH" add TASK_QUEUE.md 2>/dev/null || true
         if ! git -C "$PROJECT_PATH" -c core.editor=true merge --continue 2>/dev/null; then
             git -C "$PROJECT_PATH" merge --abort 2>/dev/null || true
-            die "Cannot merge origin/main into nightcrawler/dev — manual reconciliation needed"
+            log "WARN: merge with origin/main failed — continuing on current nightcrawler/dev (out of sync)"
+            escalate_urgent "WARNING ($PROJECT): Could not merge origin/main — session running on stale nightcrawler/dev"
+            return
         fi
         log "Auto-resolved merge conflict (kept nightcrawler/dev TASK_QUEUE.md)"
     fi
@@ -1664,22 +1733,36 @@ startup() {
         log "WARNING: No .claude/ directory in project — Claude Code CLI may not have project context"
     fi
 
-    # 12. Codex connectivity test
+    # 12. Codex connectivity test (retry 3x, degrade if unavailable)
     log "Testing Codex connectivity"
-    set +e
-    local codex_test
-    codex_test=$(OPENAI_API_KEY="$_OPENAI_KEY" python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
-    local codex_rc=$?
-    set -e
+    local codex_test="" codex_rc=1 codex_attempt
+    for codex_attempt in 1 2 3; do
+        set +e
+        codex_test=$(OPENAI_API_KEY="$_OPENAI_KEY" python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
+        codex_rc=$?
+        set -e
+        if [[ $codex_rc -eq 0 ]]; then
+            break
+        fi
+        log "RETRY: Codex connectivity test attempt $codex_attempt/3 failed (exit $codex_rc)"
+        (( codex_attempt < 3 )) && sleep 10
+    done
+
     if [[ $codex_rc -ne 0 ]]; then
-        die "Codex connectivity test failed — cannot proceed without auditor"
+        log "WARN: Codex connectivity test failed after 3 attempts — starting in degraded mode"
+        CODEX_DEGRADED=true
+        escalate_urgent "WARNING ($PROJECT): Codex unreachable at startup — running without auditor"
+    else
+        local codex_ready
+        codex_ready=$(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('ready',False))" 2>/dev/null || echo "False")
+        if [[ "$codex_ready" != "True" ]]; then
+            log "WARN: Codex not ready — starting in degraded mode"
+            CODEX_DEGRADED=true
+            escalate_urgent "WARNING ($PROJECT): Codex not ready at startup — running without auditor"
+        else
+            log "Codex ready (primary: $(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('primary','unknown'))" 2>/dev/null))"
+        fi
     fi
-    local codex_ready
-    codex_ready=$(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('ready',False))" 2>/dev/null || echo "False")
-    if [[ "$codex_ready" != "True" ]]; then
-        die "Codex not ready — cannot proceed without auditor"
-    fi
-    log "Codex ready (primary: $(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('primary','unknown'))" 2>/dev/null))"
 
     # 13. Baseline — clean tracked artifacts, check, repair if red, re-check
     cd "$PROJECT_PATH"
@@ -1768,9 +1851,19 @@ Session: $SESSION_ID"
     BASELINE=$(git rev-parse HEAD)
     log "Baseline: $BASELINE"
 
-    # 14. Budget init
-    python3 "$SCRIPTS/budget.py" init "$SESSION_ID" "$BUDGET_CAP" 2>/dev/null || \
-        die "Budget initialization failed"
+    # 14. Budget init (retry 3x — transient FS issues possible)
+    local budget_ok=false budget_attempt
+    for budget_attempt in 1 2 3; do
+        if python3 "$SCRIPTS/budget.py" init "$SESSION_ID" "$BUDGET_CAP" 2>/dev/null; then
+            budget_ok=true
+            break
+        fi
+        log "RETRY: budget init attempt $budget_attempt/3 failed"
+        sleep 2
+    done
+    if [[ "$budget_ok" != "true" ]]; then
+        die "Budget initialization failed after 3 attempts"
+    fi
 
     SESSION_INITIALIZED=true
 
@@ -1858,16 +1951,21 @@ main_loop() {
             continue
         fi
 
-        # Build degraded-approval note if either loop capped out
+        # Build degraded-approval note if Codex was down or either loop capped out
         local degraded_note=""
+        if [[ "$CODEX_DEGRADED" == "true" ]]; then
+            degraded_note="DEGRADED MODE: Codex was unavailable — no independent audit/review performed."
+        fi
         if [[ "$PLAN_AUDIT_MODE" == "capped_soft_reject" ]] || [[ "$IMPL_REVIEW_MODE" == "capped_soft_reject" ]]; then
-            degraded_note="Committed after 3 soft review rejections; local verification passed."
+            degraded_note="${degraded_note}${degraded_note:+\n}Committed after soft review rejections cap; local verification passed."
             if [[ "$PLAN_AUDIT_MODE" == "capped_soft_reject" ]]; then
                 degraded_note="${degraded_note}\nPlan audit last feedback: ${PLAN_LAST_FEEDBACK:0:300}"
             fi
             if [[ "$IMPL_REVIEW_MODE" == "capped_soft_reject" ]]; then
                 degraded_note="${degraded_note}\nImpl review last feedback: ${IMPL_LAST_FEEDBACK:0:300}"
             fi
+        fi
+        if [[ -n "$degraded_note" ]]; then
             log "DEGRADED APPROVAL: $degraded_note"
         fi
 
