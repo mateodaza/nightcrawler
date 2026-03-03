@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # nightcrawler.sh — Deterministic bash orchestrator for autonomous task execution.
 #
-# Usage: nightcrawler.sh <project> [--budget N] [--dry-run]
+# Usage: nightcrawler.sh <project> [--budget N] [--codex-cap N] [--dry-run]
+#        --budget N     Max Claude prompts (0 = unlimited, run until done)
+#        --codex-cap N  Max Codex spend in USD (default $10)
 #
 # LLMs are only called for creative work (planning, coding, reviewing).
 # All routing, sequencing, and error handling is deterministic bash.
@@ -31,11 +33,17 @@ mkdir -p "$SESSION_DIR"
 LOCKFILE="/tmp/nightcrawler-${PROJECT}.lock"
 TOUCHED_FILES="$CONTROL_DIR/touched_files"
 
-BUDGET_CAP=20
+PROMPT_CAP=50                   # Max Claude prompts per session (default for Max 5x tier)
+CODEX_DOLLAR_CAP=10.00          # Real dollar cap for Codex calls only
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --budget) BUDGET_CAP="$2"; shift 2 ;;
+        --budget)
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "--budget requires a non-negative integer, got: $2" >&2; exit 1
+            fi
+            PROMPT_CAP="$2"; shift 2 ;;
+        --codex-cap) CODEX_DOLLAR_CAP="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -117,7 +125,10 @@ RECOVERY_COMMIT=""
 RECOVERY_SESSION_ID=""
 TASK_COST=0
 TOTAL_COST=0
-CODEX_DEGRADED=false    # true = Codex unavailable, skip audit/review with synthetic APPROVED
+PROMPT_COUNT=0              # Claude CLI prompts used this session (the real limit on Max)
+CODEX_COST=0                # Real dollars spent on Codex only
+CODEX_DEGRADED=false        # true = Codex unavailable, skip audit/review with synthetic APPROVED
+THROTTLE_WARNED=false       # true = already warned about approaching prompt limit
 
 # =============================================================================
 # SEC 3: Helpers
@@ -186,24 +197,55 @@ die() {
     exit 1
 }
 
-budget_check() {
-    python3 "$SCRIPTS/budget.py" check "$SESSION_ID" 2>/dev/null || echo '{"can_continue": false}'
+budget_pre_check() {
+    # Track 1: Claude prompt count (the real constraint on Max subscription)
+    # PROMPT_CAP=0 means "until done" — no prompt limit, run until tasks exhausted or rate limited
+    if [[ $PROMPT_CAP -gt 0 ]]; then
+        if [[ $PROMPT_COUNT -ge $PROMPT_CAP ]]; then
+            log "Prompt cap reached ($PROMPT_COUNT/$PROMPT_CAP)"
+            return 1
+        fi
+
+        # Warn at 80% of prompt cap
+        local warn_threshold=$(( PROMPT_CAP * 80 / 100 ))
+        if [[ $PROMPT_COUNT -ge $warn_threshold ]] && [[ "$THROTTLE_WARNED" != "true" ]]; then
+            THROTTLE_WARNED=true
+            local remaining=$(( PROMPT_CAP - PROMPT_COUNT ))
+            notify_normal "⚠️ Prompt budget: ${PROMPT_COUNT}/${PROMPT_CAP} used. ~${remaining} remaining."
+            log "THROTTLE: 80% prompt cap warning ($PROMPT_COUNT/$PROMPT_CAP)"
+        fi
+    fi
+
+    # Track 2: Codex real dollar cap
+    local codex_over
+    codex_over=$(python3 -c "print('yes' if $CODEX_COST >= $CODEX_DOLLAR_CAP else 'no')" 2>/dev/null || echo "no")
+    if [[ "$codex_over" == "yes" ]]; then
+        log "Codex dollar cap reached (\$$CODEX_COST/\$$CODEX_DOLLAR_CAP)"
+        CODEX_DEGRADED=true
+        notify_normal "⚠️ Codex budget exhausted (\$$CODEX_COST) — continuing without auditor"
+    fi
+
+    return 0
 }
 
-budget_pre_check() {
-    local check
-    check=$(budget_check)
-    local can
-    can=$(echo "$check" | python3 -c "import sys,json;print(json.load(sys.stdin).get('can_continue',False))" 2>/dev/null || echo "False")
-    if [[ "$can" != "True" ]]; then
-        log "Budget exhausted"
-        return 1
+# Increment prompt counter after each Claude CLI call.
+count_prompt() {
+    PROMPT_COUNT=$((PROMPT_COUNT + 1))
+    if [[ $PROMPT_CAP -gt 0 ]]; then
+        log "PROMPT: #${PROMPT_COUNT}/${PROMPT_CAP}"
+    else
+        log "PROMPT: #${PROMPT_COUNT} (unlimited mode)"
     fi
-    return 0
 }
 
 log_claude_cli_cost() {
     local raw_output="$1" task_id="$2" phase="$3"
+
+    # Count the prompt (this is what actually matters on Max subscription)
+    count_prompt
+
+    # Extract cost/tokens — Sonnet is free on Max but API-equivalent USD is a
+    # useful reference metric for understanding how much work was done.
     local cost_info
     cost_info=$(echo "$raw_output" | python3 -c "
 import sys, json
@@ -211,25 +253,24 @@ try:
     data = json.load(sys.stdin)
     cost = data.get('total_cost_usd', data.get('cost_usd', data.get('cost', 0)))
     usage = data.get('usage', {})
-    # Claude CLI splits input across cached/non-cached — sum all three
     inp = usage.get('input_tokens', 0) \
         + usage.get('cache_creation_input_tokens', 0) \
         + usage.get('cache_read_input_tokens', 0)
     out = usage.get('output_tokens', 0)
     model = list(data.get('modelUsage', {}).keys())[0] if data.get('modelUsage') else data.get('model', 'unknown')
-    print(json.dumps({'cost_usd': cost, 'input_tokens': inp, 'output_tokens': out, 'model': model}))
+    print(json.dumps({'cost_usd': cost, 'input_tokens': inp, 'output_tokens': out, 'model': model, 'source': 'claude'}))
 except:
-    print(json.dumps({'cost_usd': 0, 'input_tokens': 0, 'output_tokens': 0, 'model': 'unknown'}))
+    print(json.dumps({'cost_usd': 0, 'input_tokens': 0, 'output_tokens': 0, 'model': 'unknown', 'source': 'claude'}))
 " 2>/dev/null)
 
     local cost
     cost=$(echo "$cost_info" | python3 -c "import sys,json;print(json.load(sys.stdin).get('cost_usd',0))" 2>/dev/null || echo "0")
 
-    if [[ "$cost" != "0" ]]; then
-        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$cost_info" >/dev/null 2>&1 || true
-        TASK_COST=$(python3 -c "print(round($TASK_COST + $cost, 6))" 2>/dev/null || echo "$TASK_COST")
-        TOTAL_COST=$(python3 -c "print(round($TOTAL_COST + $cost, 6))" 2>/dev/null || echo "$TOTAL_COST")
-    fi
+    # Accumulate API-equivalent cost as reference (not for budget enforcement)
+    TASK_COST=$(python3 -c "print(round($TASK_COST + $cost, 6))" 2>/dev/null || echo "$TASK_COST")
+    TOTAL_COST=$(python3 -c "print(round($TOTAL_COST + $cost, 6))" 2>/dev/null || echo "$TOTAL_COST")
+
+    python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$cost_info" >/dev/null 2>&1 || true
 }
 
 log_codex_cost() {
@@ -237,9 +278,30 @@ log_codex_cost() {
     local cost
     cost=$(echo "$raw_output" | python3 -c "import sys,json;print(json.load(sys.stdin).get('cost_usd',0))" 2>/dev/null || echo "0")
     if [[ "$cost" != "0" ]]; then
-        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$raw_output" >/dev/null 2>&1 || true
+        # Codex costs real money — track it
+        CODEX_COST=$(python3 -c "print(round($CODEX_COST + $cost, 6))" 2>/dev/null || echo "$CODEX_COST")
         TASK_COST=$(python3 -c "print(round($TASK_COST + $cost, 6))" 2>/dev/null || echo "$TASK_COST")
         TOTAL_COST=$(python3 -c "print(round($TOTAL_COST + $cost, 6))" 2>/dev/null || echo "$TOTAL_COST")
+        local cost_info
+        cost_info=$(echo "$raw_output" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    data['source'] = 'codex'
+    print(json.dumps(data))
+except:
+    print(json.dumps({'cost_usd': $cost, 'source': 'codex'}))
+" 2>/dev/null)
+        python3 "$SCRIPTS/budget.py" log "$SESSION_ID" "$cost_info" >/dev/null 2>&1 || true
+
+        # Inline Codex cap enforcement — don't wait for next budget_pre_check()
+        local over
+        over=$(python3 -c "print('yes' if $CODEX_COST >= $CODEX_DOLLAR_CAP else 'no')" 2>/dev/null || echo "no")
+        if [[ "$over" == "yes" ]] && [[ "$CODEX_DEGRADED" != "true" ]]; then
+            CODEX_DEGRADED=true
+            notify_normal "⚠️ Codex budget exhausted (\$$CODEX_COST) — switching to degraded mode"
+            log "Codex cap hit after log_codex_cost (\$$CODEX_COST >= \$$CODEX_DOLLAR_CAP)"
+        fi
     fi
 }
 
@@ -1027,6 +1089,9 @@ RESPOND WITH EXACTLY ONE WORD: CONTINUE or STOP"
         log "WARN: Convergence check failed — defaulting to STOP (safer than risking infinite loop)"
         return 1
     }
+
+    # Count Haiku call toward prompt total (shares rate limit window with Sonnet)
+    count_prompt
 
     local answer
     answer=$(echo "$raw_output" | python3 -c "
@@ -1879,10 +1944,11 @@ Session: $SESSION_ID"
     BASELINE=$(git rev-parse HEAD)
     log "Baseline: $BASELINE"
 
-    # 14. Budget init (retry 3x — transient FS issues possible)
+    # 14. Budget init — budget.py is telemetry only (real enforcement is prompt-based in bash).
+    #     Pass large cap so budget.py's internal check never interferes.
     local budget_ok=false budget_attempt
     for budget_attempt in 1 2 3; do
-        if python3 "$SCRIPTS/budget.py" init "$SESSION_ID" "$BUDGET_CAP" 2>/dev/null; then
+        if python3 "$SCRIPTS/budget.py" init "$SESSION_ID" 99999 2>/dev/null; then
             budget_ok=true
             break
         fi
@@ -1892,6 +1958,13 @@ Session: $SESSION_ID"
     if [[ "$budget_ok" != "true" ]]; then
         die "Budget initialization failed after 3 attempts"
     fi
+    local budget_label
+    if [[ $PROMPT_CAP -gt 0 ]]; then
+        budget_label="${PROMPT_CAP} prompts, \$${CODEX_DOLLAR_CAP} Codex"
+    else
+        budget_label="unlimited (until done), \$${CODEX_DOLLAR_CAP} Codex"
+    fi
+    log "Budget: $budget_label"
 
     SESSION_INITIALIZED=true
 
@@ -1899,8 +1972,8 @@ Session: $SESSION_ID"
     local remaining
     remaining=$(count_tasks)
     update_status "running — $remaining tasks remaining"
-    notify_normal "Session $SESSION_ID started. $remaining tasks. Budget: \$$BUDGET_CAP."
-    journal '{"event":"session_start","session_id":"'"$SESSION_ID"'","project":"'"$PROJECT"'","budget":'"$BUDGET_CAP"',"baseline":"'"$BASELINE"'"}'
+    notify_normal "Session $SESSION_ID started. $remaining tasks. Budget: $budget_label."
+    journal '{"event":"session_start","session_id":"'"$SESSION_ID"'","project":"'"$PROJECT"'","prompt_cap":'"$PROMPT_CAP"',"codex_cap":'"$CODEX_DOLLAR_CAP"',"baseline":"'"$BASELINE"'"}'
     log "Startup complete"
 }
 
@@ -1919,8 +1992,8 @@ main_loop() {
 
         # Budget gate
         if ! budget_pre_check; then
-            log "Budget exhausted — ending session"
-            notify_normal "Budget exhausted. Ending session."
+            log "Prompt cap reached (${PROMPT_COUNT}/${PROMPT_CAP}) — ending session"
+            notify_normal "Prompt cap reached (${PROMPT_COUNT}/${PROMPT_CAP}). Ending session."
             break
         fi
 
@@ -2048,7 +2121,13 @@ main_loop() {
 
         local remaining
         remaining=$(count_tasks)
-        local notify_msg="Done: $TASK_ID ($commit_hash). Remaining: $remaining. Spent: \$$TASK_COST."
+        local prompt_info
+        if [[ $PROMPT_CAP -gt 0 ]]; then
+            prompt_info="${PROMPT_COUNT}/${PROMPT_CAP}"
+        else
+            prompt_info="${PROMPT_COUNT}"
+        fi
+        local notify_msg="Done: $TASK_ID (${commit_hash:0:8}). Remaining: $remaining. Prompts: ${prompt_info}. Cost: \$$TASK_COST."
         if [[ -n "$degraded_note" ]]; then
             notify_msg="${notify_msg} ⚠ Capped soft-reject."
         fi
@@ -2057,9 +2136,9 @@ main_loop() {
 
         log "=== Completed $TASK_ID ==="
 
-        # Budget check for next iteration
+        # Prompt cap check for next iteration
         if ! budget_pre_check; then
-            log "Budget exhausted after task — ending session"
+            log "Prompt cap reached after task (${PROMPT_COUNT}/${PROMPT_CAP}) — ending session"
             break
         fi
     done
@@ -2084,7 +2163,7 @@ generate_session_report() {
 **Started:** $(head -1 "$journal_file" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('ts','unknown'))" 2>/dev/null || echo "unknown")
 **Ended:** $end_time
 **Exit:** $(if [[ "$ORDERLY_EXIT" == "true" ]]; then echo "completed"; else echo "aborted"; fi)
-**Budget:** \$$BUDGET_CAP (spent: \$$TOTAL_COST)
+**Prompts:** ${PROMPT_COUNT}$(if [[ $PROMPT_CAP -gt 0 ]]; then echo "/${PROMPT_CAP}"; else echo " (unlimited)"; fi) | **API ref cost:** \$${TOTAL_COST} | **Codex:** \$${CODEX_COST}/\$${CODEX_DOLLAR_CAP}$(if [[ "$CODEX_DEGRADED" == "true" ]]; then echo " (degraded)"; fi)
 **Baseline:** ${BASELINE:-unknown}
 
 ---
@@ -2234,11 +2313,36 @@ session_end() {
     generate_session_report
 
     if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && [[ "$SESSION_INITIALIZED" == "true" ]]; then
-        if [[ "$ORDERLY_EXIT" == "true" ]]; then
-            notify_normal "Session $SESSION_ID completed. Total cost: \$$TOTAL_COST."
-        else
-            notify_normal "Session $SESSION_ID aborted: $reason. Cost so far: \$$TOTAL_COST."
+        # Count completed/locked tasks from journal
+        local tasks_done=0 tasks_locked=0
+        local journal_file="$SESSION_DIR/journal.jsonl"
+        if [[ -f "$journal_file" ]]; then
+            tasks_done=$(grep -c '"event":"task_complete"' "$journal_file" 2>/dev/null) || true
+            tasks_locked=$(grep -cE '"event":"(plan_hard_block|impl_hard_block)"' "$journal_file" 2>/dev/null) || true
         fi
+
+        local prompt_label
+        if [[ $PROMPT_CAP -gt 0 ]]; then
+            prompt_label="${PROMPT_COUNT}/${PROMPT_CAP} prompts"
+        else
+            prompt_label="${PROMPT_COUNT} prompts (unlimited)"
+        fi
+
+        local degraded_label=""
+        if [[ "$CODEX_DEGRADED" == "true" ]]; then
+            degraded_label=" | Codex: degraded"
+        fi
+
+        local end_status
+        if [[ "$ORDERLY_EXIT" == "true" ]]; then
+            end_status="completed"
+        else
+            end_status="aborted: $reason"
+        fi
+
+        notify_normal "Session $end_status.
+Tasks: ${tasks_done} done, ${tasks_locked} locked.
+${prompt_label} | API ref: \$${TOTAL_COST} | Codex: \$${CODEX_COST}${degraded_label}"
     fi
 
     [[ "$HEARTBEAT_STARTED" == "true" ]] && stop_heartbeat
@@ -2257,7 +2361,7 @@ main() {
     startup
     main_loop
     ORDERLY_EXIT=true
-    journal '{"event":"session_complete","ts":"'"$(date -u +%FT%TZ)"'","total_cost":'"$TOTAL_COST"'}'
+    journal '{"event":"session_complete","ts":"'"$(date -u +%FT%TZ)"'","prompts":'"$PROMPT_COUNT"',"prompt_cap":'"$PROMPT_CAP"',"codex_cost":'"$CODEX_COST"'}'
     session_end "completed"
 }
 

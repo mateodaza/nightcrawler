@@ -22,7 +22,8 @@ When Mateo sends a message:
 
 ### Session Control
 - `start clout` → exec: `bash /root/nightcrawler/scripts/start.sh clout`
-- `start clout --budget N` → exec: `bash /root/nightcrawler/scripts/start.sh clout --budget N`
+- `start clout --budget N` → exec: `bash /root/nightcrawler/scripts/start.sh clout --budget N` (N = max Claude prompts, 0 = unlimited)
+- `start clout --budget 0` → exec: `bash /root/nightcrawler/scripts/start.sh clout --budget 0` (run until all tasks done or rate limited)
 - `start clout --dry-run` → exec: `bash /root/nightcrawler/scripts/start.sh clout --dry-run`
 - `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`
 - `skip NC-XXX` → exec: `mkdir -p /tmp/nightcrawler/clout && echo NC-XXX >> /tmp/nightcrawler/clout/skip && echo "Skipping NC-XXX"`
