@@ -50,6 +50,8 @@ BUILD_CMD="make build"
 TEST_CMD="make test"
 INSTALL_CMD=""
 WORKDIR=""
+DEPS_CHECK=""   # command returning 0 if deps are installed (e.g. "test -d node_modules")
+TOOLS=""        # space-separated CLI tools to verify (e.g. "forge pnpm turbo")
 
 if [[ -f "$PROJECT_PATH/.nightcrawler/config.sh" ]]; then
     # shellcheck source=/dev/null
@@ -89,14 +91,8 @@ if [[ "$INSTALL_MODE" == true ]]; then
     fix_submodules
     if [[ -n "$INSTALL_CMD" ]]; then
         eval "$INSTALL_CMD" 2>&1 | tail -30
-    elif [[ -f pnpm-lock.yaml ]]; then
-        pnpm install 2>&1 | tail -30
-    elif [[ -f package-lock.json ]]; then
-        npm install 2>&1 | tail -30
-    elif [[ -f yarn.lock ]]; then
-        yarn install 2>&1 | tail -30
     else
-        echo "No lock file found and no INSTALL_CMD in config. Nothing to install."
+        echo "No INSTALL_CMD in .nightcrawler/config.sh. Nothing to install."
     fi
     exit 0
 fi
@@ -135,14 +131,27 @@ fi
 
 echo ""
 echo "=== DEPS ==="
-if [[ -f pnpm-lock.yaml ]]; then
-    test -d node_modules && echo "pnpm: node_modules OK" || echo "pnpm: node_modules MISSING — run: install $PROJECT"
-elif [[ -f package-lock.json ]]; then
-    test -d node_modules && echo "npm: node_modules OK" || echo "npm: node_modules MISSING — run: install $PROJECT"
+if [[ -n "$DEPS_CHECK" ]]; then
+    if eval "$DEPS_CHECK" >/dev/null 2>&1; then
+        echo "Deps: OK"
+    else
+        echo "Deps: MISSING — run: install $PROJECT"
+    fi
 else
-    echo "No JS package manager detected"
+    echo "No DEPS_CHECK configured (skipping)"
 fi
-command -v forge >/dev/null 2>&1 && echo "forge: $(forge --version 2>&1 | head -1)" || echo "forge: NOT INSTALLED"
+
+if [[ -n "$TOOLS" ]]; then
+    echo ""
+    echo "=== TOOLS ==="
+    for tool in $TOOLS; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            echo "$tool: $("$tool" --version 2>&1 | head -1)"
+        else
+            echo "$tool: NOT FOUND"
+        fi
+    done
+fi
 
 echo ""
 echo "=== BUILD ==="
