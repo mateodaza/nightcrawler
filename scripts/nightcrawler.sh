@@ -58,9 +58,9 @@ BUILD_WALL=120 BUILD_IDLE=60
 TEST_WALL=300  TEST_IDLE=120
 MAX_PLAN_ITERATIONS=3           # plan audit soft-reject cap
 MAX_IMPL_ITERATIONS=5           # impl review soft-reject cap (more room — code is harder)
-PLAN_MAX_TURNS=20               # Claude CLI --max-turns for planning (scale up for larger codebases)
-IMPL_MAX_TURNS=25               # Claude CLI --max-turns for implementation
-REPAIR_MAX_TURNS=15             # Claude CLI --max-turns for baseline repair
+PLAN_MAX_TURNS=""               # empty = omit --max-turns (unlimited; timeout is the safety net)
+IMPL_MAX_TURNS=""               # empty = omit --max-turns (unlimited; timeout is the safety net)
+REPAIR_MAX_TURNS=""             # empty = omit --max-turns (unlimited; timeout is the safety net)
 VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
 
 # Load project config if it exists (can override BUILD_CMD, TEST_CMD, etc.)
@@ -830,7 +830,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns $PLAN_MAX_TURNS 2>"$claude_stderr")
+            ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -907,7 +907,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns $PLAN_MAX_TURNS 2>"$claude_stderr")
+            ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -1223,7 +1223,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns $IMPL_MAX_TURNS 2>"$claude_stderr")
+            ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -1282,7 +1282,7 @@ Instructions:
         claude -p "$prompt" \
             --model sonnet \
             --output-format json \
-            --max-turns $IMPL_MAX_TURNS 2>"$claude_stderr")
+            ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
     set -e
 
@@ -1908,7 +1908,7 @@ RULES:
             claude -p "$repair_prompt" \
                 --model sonnet \
                 --output-format json \
-                --max-turns $REPAIR_MAX_TURNS 2>"$repair_stderr")
+                ${REPAIR_MAX_TURNS:+--max-turns $REPAIR_MAX_TURNS} 2>"$repair_stderr")
         repair_exit=$?
         set -e
 
