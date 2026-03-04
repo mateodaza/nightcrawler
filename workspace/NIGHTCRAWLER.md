@@ -10,6 +10,12 @@ When Mateo sends a message:
 2. Call your `exec` tool with the shell command shown after →
 3. Reply with ONLY the exec output
 
+**EXAMPLE:**
+- Mateo says: "status"
+- You call exec with: `cat /tmp/nightcrawler-clout-status 2>/dev/null || echo "No active session"`
+- Exec returns: "No active session"
+- You reply: "No active session"
+
 **NEVER reply without calling exec first.** If you catch yourself about to reply without having called exec, STOP and call exec.
 
 ## Helpers
@@ -34,14 +40,14 @@ PP="/home/nightcrawler/projects/$LP"
 ## Commands
 
 ### Session Control
-- `start <project>` → exec: `bash /root/nightcrawler/scripts/start.sh <project>`
-- `start <project> --budget N` → exec: `bash /root/nightcrawler/scripts/start.sh <project> --budget N`
-- `start <project> --budget 0` → exec: `bash /root/nightcrawler/scripts/start.sh <project> --budget 0` (unlimited — run until done or rate limited)
-- `start <project> --dry-run` → exec: `bash /root/nightcrawler/scripts/start.sh <project> --dry-run`
+- `start clout` → exec: `bash /root/nightcrawler/scripts/start.sh clout`
+- `start clout --budget N` → exec: `bash /root/nightcrawler/scripts/start.sh clout --budget N`
+- `start clout --budget 0` → exec: `bash /root/nightcrawler/scripts/start.sh clout --budget 0`
+- `start clout --dry-run` → exec: `bash /root/nightcrawler/scripts/start.sh clout --dry-run`
 - `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`
 
 ### Write Actions (require explicit project)
-- `install <project>` → exec: `bash /root/nightcrawler/scripts/diagnose.sh <project> --install`
+- `install clout` → exec: `bash /root/nightcrawler/scripts/diagnose.sh clout --install`
 - `skip <id>` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; mkdir -p /tmp/nightcrawler/$AP && echo "<id>" >> /tmp/nightcrawler/$AP/skip && echo "Skipping <id>"`
 
 ### Live State (lock first, then marker — no fallback)
@@ -57,8 +63,8 @@ PP="/home/nightcrawler/projects/$LP"
 - `branch` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; cd /home/nightcrawler/projects/$LP && git rev-parse --abbrev-ref HEAD && git log --oneline -5`
 
 ### Diagnostics
-- `diagnose` → exec: `bash /root/nightcrawler/scripts/diagnose.sh`
-- `diagnose <project>` → exec: `bash /root/nightcrawler/scripts/diagnose.sh <project>`
+- `diagnose` → exec: `bash /root/nightcrawler/scripts/diagnose.sh clout`
+- `diagnose clout` → exec: `bash /root/nightcrawler/scripts/diagnose.sh clout`
 
 ### Task Management
 - `tasks` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; bash /root/nightcrawler/scripts/queue-tasks.sh /home/nightcrawler/projects/$LP`
