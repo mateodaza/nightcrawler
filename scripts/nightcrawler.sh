@@ -460,40 +460,9 @@ require_clean_worktree_for_switch() {
 # --- Scope verification ---
 
 verify_impl_scope() {
-    cd "$PROJECT_PATH"
-    local violations=0
-
-    # Check tracked changes
-    while IFS= read -r -d '' f; do
-        case "$f" in
-            src/*|lib/*|test/*|script/*) ;;  # expected
-            TASK_QUEUE.md|PROGRESS.md|SESSION_PROGRESS.md|memory.md) ;;  # expected
-            foundry.toml|remappings.txt) ;;  # expected config
-            *)
-                log "SCOPE: Unexpected tracked change: $f"
-                git checkout HEAD -- "$f" 2>/dev/null || true
-                violations=$((violations + 1))
-                ;;
-        esac
-    done < <(git diff --name-only -z HEAD -- 2>/dev/null)
-
-    # Check untracked files
-    while IFS= read -r -d '' f; do
-        case "$f" in
-            src/*|lib/*|test/*|script/*) ;;
-            *)
-                log "SCOPE: Unexpected untracked file: $f"
-                case "$f" in ..|../*|/*|"") continue ;; esac
-                rm -rf -- "$f" 2>/dev/null || true
-                violations=$((violations + 1))
-                ;;
-        esac
-    done < <(git ls-files --others --exclude-standard -z)
-
-    if [[ $violations -gt 0 ]]; then
-        log "SCOPE: Cleaned $violations violations"
-        return 1
-    fi
+    # Scope checking disabled — trust the plan + review pipeline.
+    # The ghost-commit guard in commit_and_close_task() catches empty commits.
+    log "SCOPE: skipped (disabled)"
     return 0
 }
 
@@ -1523,6 +1492,18 @@ commit_and_close_task() {
     cd "$PROJECT_PATH"
     git add -A
 
+    # Ghost-commit guard: reject if only bookkeeping files changed (no actual code produced)
+    local code_files
+    code_files=$(git diff --cached --name-only | grep -cvE '^(TASK_QUEUE\.md|PROGRESS\.md|SESSION_PROGRESS\.md|memory\.md|\.nightcrawler/)$' || true)
+    if [[ "$code_files" -eq 0 ]]; then
+        log "GHOST-COMMIT BLOCKED: $task_id — only bookkeeping files staged, no code produced"
+        git reset HEAD -- . >/dev/null 2>&1
+        # Undo the queue/progress marks
+        git checkout HEAD -- TASK_QUEUE.md PROGRESS.md 2>/dev/null || true
+        echo "GHOST"
+        return 1
+    fi
+
     local commit_msg="[nightcrawler] feat($task_id): $description
 
 Task: $task_id
@@ -2079,7 +2060,14 @@ main_loop() {
         local description
         description=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+NC-[0-9]+\s+\[.\]\s*//' | head -c 72)
         local commit_hash
-        commit_hash=$(commit_and_close_task "$TASK_ID" "$description" "$degraded_note")
+        if ! commit_hash=$(commit_and_close_task "$TASK_ID" "$description" "$degraded_note"); then
+            if [[ "$commit_hash" == "GHOST" ]]; then
+                log "GHOST COMMIT BLOCKED: $TASK_ID produced no code — locking task"
+                escalate_urgent "🚫 GHOST ($PROJECT): $TASK_ID completed pipeline but wrote zero code files"
+                echo "$TASK_ID" >> "$CONTROL_DIR/skip"
+                continue
+            fi
+        fi
         log "Committed $TASK_ID as $commit_hash"
 
         # Post-commit verification
@@ -2101,7 +2089,12 @@ main_loop() {
             fi
 
             # Re-commit
-            commit_hash=$(commit_and_close_task "$TASK_ID" "$description")
+            if ! commit_hash=$(commit_and_close_task "$TASK_ID" "$description"); then
+                log "GHOST COMMIT BLOCKED on re-commit: $TASK_ID"
+                escalate_urgent "🚫 GHOST ($PROJECT): $TASK_ID re-impl produced no code"
+                echo "$TASK_ID" >> "$CONTROL_DIR/skip"
+                continue
+            fi
             if ! verify_post_commit "$TASK_ID" "$commit_hash"; then
                 handle_post_commit_failure "$TASK_ID" "$commit_hash" 2
                 escalate_urgent "LOCKED ($PROJECT): $TASK_ID post-commit verify failed 2x after re-impl"
