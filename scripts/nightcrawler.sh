@@ -1162,6 +1162,7 @@ ${rules}
 
 DONE CRITERIA — implementation is complete when ALL of these are true:
 - Every file, struct, function, and test from the plan exists
+- If you modified any package.json, run '$INSTALL_CMD' before building
 - '$BUILD_CMD' compiles with zero errors
 - '$TEST_CMD' passes with zero failures
 - No files outside the plan's scope are modified
@@ -1229,6 +1230,7 @@ ${rules}
 
 DONE CRITERIA — revision is complete when:
 - Every reviewer feedback point is addressed
+- If you modified any package.json, run '$INSTALL_CMD' before building
 - '$BUILD_CMD' compiles with zero errors
 - '$TEST_CMD' passes with zero failures
 - Changes stay within the plan's scope
