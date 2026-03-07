@@ -178,9 +178,11 @@ _tg_send() {
     response=$(curl -s --connect-timeout 5 --max-time 10 \
         -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         "${args[@]}")
+    log "TG_DEBUG: thread=${use_thread} thread_id=${TELEGRAM_THREAD_ID:-EMPTY} chat=${TELEGRAM_CHAT_ID:-EMPTY} ok=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok','parse_fail'))" 2>/dev/null || echo 'parse_error')"
     if echo "$response" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('ok') else 1)" 2>/dev/null; then
         return 0
     fi
+    log "TG_DEBUG: send failed — response: ${response:0:200}"
     # If thread send failed, retry without thread ID (falls back to General)
     if [[ "$use_thread" == "true" ]] && [[ -n "${TELEGRAM_THREAD_ID:-}" ]]; then
         _tg_send "$msg" "false"
