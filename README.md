@@ -25,11 +25,12 @@ The orchestrator is **deterministic bash**. LLMs are only called for creative wo
 - A VPS or server (recommended) — or your local machine if you prefer
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) with a Max subscription
 - [Codex CLI](https://github.com/openai/codex) (for independent audits/reviews)
+- [OpenClaw](https://github.com/nichochar/openclaw) (optional locally; required for full mobile Telegram automation)
 - Your project's toolchain (Node, Python, Rust, etc.)
 
-**Where to run it:** A VPS is recommended because sessions run for hours and you don't want your laptop tied up or asleep. A cheap VPS (2 vCPU, 4GB RAM, ~$7/mo) is plenty — Nightcrawler barely uses local compute, it's all API calls. That said, it works fine locally too (just keep your machine awake).
+**Where to run it:** A VPS is recommended because sessions run for hours and you don't want your laptop tied up or asleep. A cheap VPS (2 vCPU, 4GB RAM, ~$7/mo) is plenty — Nightcrawler barely uses local compute, the heavy lifting is done by the LLMs. That said, it works fine locally too (just keep your machine awake).
 
-**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers all Sonnet calls. Codex CLI ($20/mo subscription) covers all audits/reviews. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
+**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers Sonnet calls. Codex audits/reviews run via Codex CLI, with API fallback available; keep `--codex-cap` set to bound metered fallback spend. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
 
 ### 2. Set Up Nightcrawler
 
@@ -38,7 +39,7 @@ git clone https://github.com/mateodaza/nightcrawler.git
 cd nightcrawler
 
 # Interactive bootstrap — checks prerequisites, configures API keys,
-# sets up Claude/Codex CLIs, Telegram bot, and OpenClaw (optional)
+# sets up Claude/Codex CLIs, Telegram bot, and OpenClaw
 bash scripts/nightcrawler-setup.sh
 ```
 
@@ -49,7 +50,7 @@ The setup script is idempotent (safe to re-run) and never auto-installs system p
 3. **Claude Code CLI** — checks install + auth
 4. **Codex CLI** — checks install
 5. **Telegram bot** — configures token + chat ID, sends test message
-6. **OpenClaw** (optional) — deploys workspace files, creates systemd service
+6. **OpenClaw** — deploys workspace files, creates systemd service (needed for Telegram control)
 
 Or set up manually:
 
@@ -75,11 +76,14 @@ This creates two files in your project:
 
 **`.nightcrawler/config.sh`** — build/test commands, tooling:
 ```bash
-PROJECT_DESC="Next.js/TypeScript monorepo"
 BUILD_CMD="pnpm build"
 TEST_CMD="pnpm type-check"
 INSTALL_CMD="pnpm install"
+DEPS_CHECK="test -d node_modules"
+TOOLS="node pnpm"
+TOOLS_ALLOW="node pnpm"
 TELEGRAM_THREAD_ID="24"   # optional — routes to a Telegram topic
+# PROJECT_DESC is optional/manual (used for richer planning prompts)
 ```
 
 **`.nightcrawler/CLAUDE.md`** — project context for the LLM (copied to `.claude/CLAUDE.md` by start.sh before each session):
@@ -132,7 +136,7 @@ Human-only — Nightcrawler skips these automatically.
 ### 5. Run
 
 ```bash
-# Dry run (pre-flight only, no LLM calls)
+# Dry run (runs planning/audit, then stops before implementation/commit)
 bash scripts/start.sh myproject --budget 5 --dry-run
 
 # Real session
@@ -173,7 +177,7 @@ If audit/review rejects, the plan/code is revised. Hard blocks (security issues)
 Designed for Claude Max subscriptions:
 
 - **`--budget N`** — Max Claude prompts per session. `N=0` = unlimited (run until done or rate limited).
-- Codex CLI runs independently for audits/reviews. If Codex is unavailable, the session continues in degraded mode (auto-approves) rather than stopping.
+- **`--codex-cap N`** — Cap on metered Codex spend for API fallback (default `$10`). If Codex is unavailable, the session continues in degraded mode (auto-approves) rather than stopping.
 
 ## Recommended Config
 
@@ -202,9 +206,9 @@ For your first run, start small and scale up:
 
 ## Telegram Control (OpenClaw)
 
-[OpenClaw](https://github.com/nichochar/openclaw) is a Telegram bot framework that lets you control your server from your phone. It's optional — you can always SSH in and run `start.sh` directly — but recommended because it turns session management into quick messages instead of SSH sessions. Start a run from bed, check status from your phone, get notifications when tasks complete or hit blockers.
+[OpenClaw](https://github.com/nichochar/openclaw) is a Telegram bot framework that lets you control your server from your phone. Start a run from bed, check status from your phone, get notifications when tasks complete or hit blockers.
 
-Setup is handled by `nightcrawler-setup.sh` (step 6). Once configured, you can message your bot:
+Setup is handled by `nightcrawler-setup.sh` (step 6). OpenClaw is required for full mobile/Telegram automation; if you run locally from terminal only, you can skip it. Once configured, you can message your bot:
 
 ```
 start <project> --budget N     Start a session
@@ -266,7 +270,7 @@ nightcrawler/
 │   ├── nightcrawler-setup.sh    # VPS bootstrap (prerequisites, keys, services)
 │   ├── generate-workspace.sh    # regenerate OpenClaw workspace
 │   ├── deploy-workspace.sh      # deploy workspace to OpenClaw
-│   ├── call_codex.py            # Codex CLI/API wrapper
+│   ├── call_codex.py            # Codex CLI wrapper (API fallback)
 │   └── budget.py                # cost telemetry (JSONL tracking)
 ├── workspace/
 │   └── NIGHTCRAWLER.md          # OpenClaw command dispatcher (auto-generated)
