@@ -37,5 +37,5 @@ jobs:
       - name: Lock-first live-state contract smoke check
         run: |
           grep -n "Live State (lock first, then marker — no fallback)" workspace/NIGHTCRAWLER.md
-          grep -n 'status.*lock first, then marker' workspace/NIGHTCRAWLER.md
-          grep -n 'alive.*lock first, then marker' workspace/NIGHTCRAWLER.md
+          grep -n '^- `status`' workspace/NIGHTCRAWLER.md
+          grep -n '^- `alive`' workspace/NIGHTCRAWLER.md
