@@ -1030,14 +1030,17 @@ classify_rejection() {
 # Dynamic convergence check — asks LLM if iterations are making progress or going in circles.
 # Uses Haiku (cheapest) since this is a simple classification.
 # Returns 0 = keep going, 1 = stop (stuck)
+CONSECUTIVE_STOPS=0  # tracks consecutive STOP verdicts across convergence checks
+
 check_convergence() {
     local phase="$1"  # "plan" or "implementation"
     shift
     local feedbacks=("$@")
     local count=${#feedbacks[@]}
 
-    # Always continue if fewer than 2 feedbacks — not enough signal yet
-    (( count < 2 )) && return 0
+    # Need at least 5 rounds of feedback before Haiku has enough signal to judge convergence.
+    # Below that, it's basically guessing. The iteration cap (MAX_*_ITERATIONS) is the real ceiling.
+    (( count < 5 )) && return 0
 
     # Build feedback history
     local history=""
@@ -1068,8 +1071,8 @@ RESPOND WITH EXACTLY ONE WORD: CONTINUE or STOP"
             --model haiku \
             --output-format json \
             --max-turns 1 2>/dev/null) || {
-        log "WARN: Convergence check failed — defaulting to STOP (safer than risking infinite loop)"
-        return 1
+        log "WARN: Convergence check failed — defaulting to CONTINUE (iteration cap is the real safety net)"
+        return 0
     }
 
     # Count Haiku call toward prompt total (shares rate limit window with Sonnet)
@@ -1087,11 +1090,17 @@ except:
 " 2>/dev/null)
 
     if [[ "$answer" == "STOP" ]]; then
-        log "Convergence check: STOP after $count rounds (stuck/circular)"
-        notify_normal "⚠️ ${phase} stuck after ${count} rounds — capping iterations"
-        return 1
+        CONSECUTIVE_STOPS=$((CONSECUTIVE_STOPS + 1))
+        if (( CONSECUTIVE_STOPS >= 2 )); then
+            log "Convergence check: 2 consecutive STOPs after $count rounds — stuck"
+            notify_normal "⚠️ ${phase} stuck after ${count} rounds — capping iterations"
+            return 1
+        fi
+        log "Convergence check: STOP (1 of 2 needed, continuing)"
+        return 0
     fi
 
+    CONSECUTIVE_STOPS=0  # reset on any CONTINUE
     log "Convergence check: CONTINUE (round $count making progress)"
     return 0
 }
@@ -1101,6 +1110,7 @@ plan_loop() {
     local plan_file iteration=0
     local -a feedbacks=()
     PLAN_AUDIT_MODE="approved"
+    CONSECUTIVE_STOPS=0  # reset for this loop
 
     plan_file=$(plan_task "$task_file" "$task_id") || return 1
     [[ -z "$plan_file" ]] && return 1
@@ -1368,6 +1378,7 @@ impl_loop() {
     local -a feedbacks=()
     local iteration=0
     local reviews_reached=0
+    CONSECUTIVE_STOPS=0  # reset for this loop
     IMPL_REVIEW_MODE="approved"
     REVIEW_FEEDBACK=""
 

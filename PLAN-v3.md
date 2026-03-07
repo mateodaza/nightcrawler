@@ -173,10 +173,14 @@ echo "✅ Update complete. Run /new in Telegram to reload workspace."
 At the end of each session (in `nightcrawler.sh`, after the task loop), if at least one task was completed:
 
 1. Push `nightcrawler/dev` to origin (already happens — `git push origin nightcrawler/dev`)
-2. Check if an open PR already exists for `nightcrawler/dev → $BASE_BRANCH`
+2. Verify remote branch parity before touching PR state:
+   - Resolve local HEAD: `git rev-parse HEAD`
+   - Resolve remote head: `git ls-remote origin refs/heads/nightcrawler/dev`
+   - If mismatch: warn and skip PR create/edit for this session (non-fatal)
+3. Check if an open PR already exists for `nightcrawler/dev → $BASE_BRANCH`
    - `gh pr list --head nightcrawler/dev --state open --json number`
    - `BASE_BRANCH` comes from project config (openclaw.yaml `base_branch`, defaults to `main`)
-3. If no open PR: create one
+4. If no open PR: create one
    ```bash
    gh pr create \
      --base "$BASE_BRANCH" \
@@ -184,11 +188,11 @@ At the end of each session (in `nightcrawler.sh`, after the task loop), if at le
      --title "🕷️ Nightcrawler: ${COMPLETED_COUNT} tasks completed" \
      --body "$(generate_pr_body)"
    ```
-4. If PR already exists: update the body with new session results
+5. If PR already exists: update the body with new session results
    ```bash
    gh pr edit $PR_NUMBER --body "$(generate_pr_body)"
    ```
-5. Send Telegram notification with PR link
+6. Send Telegram notification with PR link
 
 **PR body template:**
 ```markdown
@@ -216,6 +220,7 @@ At the end of each session (in `nightcrawler.sh`, after the task loop), if at le
 - New function in `nightcrawler.sh`: `create_or_update_pr()`
 - Requires `gh` CLI installed and authenticated on VPS (add to `nightcrawler-setup.sh` prerequisites)
 - Non-fatal: if PR creation fails (no gh, no auth, no network), log warning and continue
+- Non-fatal: if remote `nightcrawler/dev` does not match local HEAD, skip PR update and warn
 - ~40 lines in nightcrawler.sh + PR body generator
 
 **Prerequisite:** `gh auth login` on VPS. Add to `nightcrawler-setup.sh` step 7.
@@ -480,6 +485,14 @@ Rule: Tier 1 features must never fail the core task loop unless explicitly marke
 - [ ] PR body has completed tasks, session stats, remaining queue
 - [ ] Subsequent sessions update the existing PR (not create duplicates)
 - [ ] Failed PR creation doesn't crash the session
+- [ ] If remote `nightcrawler/dev` != local HEAD, PR create/edit is skipped with warning (no stale PR body update)
+
+### Feature flags are done when:
+- [ ] `NC_ENABLE_SKILL_SYNC=0` disables skill sync; `1` enables it
+- [ ] `NC_ENABLE_UPDATE_CMD=0` hides/disables `update`; `1` enables it
+- [ ] `NC_ENABLE_AUTO_PR=0` disables PR create/edit; `1` enables it
+- [ ] `NC_ENABLE_RICH_ALERTS=0` keeps plain alerts; `1` enables structured alerts
+- [ ] With all flags at `0`, core Nightcrawler task loop behavior is unchanged
 
 ### Dispatcher/live-state model is done when:
 - [ ] `status` returns active session when lock is held even if marker is absent (startup window)
