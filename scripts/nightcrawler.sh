@@ -110,6 +110,7 @@ if [[ -f "$HOME/.env" ]]; then
         esac
     done < "$HOME/.env"
 fi
+echo "ENV_LOAD_DEBUG: HOME=$HOME TOKEN=${TELEGRAM_BOT_TOKEN:+SET_${#TELEGRAM_BOT_TOKEN}chars} CHAT=${TELEGRAM_CHAT_ID:-EMPTY}" >&2
 
 # =============================================================================
 # SEC 2: State flags
@@ -192,6 +193,7 @@ _tg_send() {
 }
 
 notify_normal() {
+    echo "NOTIFY_DEBUG: TOKEN=${TELEGRAM_BOT_TOKEN:+SET_${#TELEGRAM_BOT_TOKEN}chars} CHAT=${TELEGRAM_CHAT_ID:-EMPTY} THREAD=${TELEGRAM_THREAD_ID:-EMPTY}" >&2
     [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && return 0
     [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
     _tg_send "$1" || true
