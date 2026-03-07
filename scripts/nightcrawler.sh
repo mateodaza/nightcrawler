@@ -706,9 +706,9 @@ $diff_stat
 Write ONE line (max 120 chars) capturing the most useful technical insight for someone implementing the NEXT task in this codebase. Focus on patterns, gotchas, or conventions discovered — not what you did.
 
 Examples of good learnings:
-- SafeERC20 wrapper required for all token transfers — raw transfer() silently fails
-- vm.warp(block.timestamp + N) needs +1 for strict > checks in timeout tests
-- WalletRecord struct fields must be updated in the mutating function, not in a separate call
+- API client requires auth header even for public endpoints — 403 without it
+- Test fixtures must call cleanup() in afterEach or state leaks between tests
+- The config loader merges defaults AFTER env vars — override order matters
 
 RESPOND WITH EXACTLY ONE LINE. No prefix, no quotes."
 
@@ -776,22 +776,20 @@ RULES (coding standards — reference during planning, not primary context):
 ${rules}
 
 MANDATORY READS — you MUST read ALL of these before writing any plan:
-1. RESEARCH.md — the CANONICAL protocol spec. This is your primary source of truth. Every struct, enum, constant, and state machine lives here.
-2. TASK_QUEUE.md — read the FULL entry for this task including ALL acceptance criteria and sub-items.
-3. All existing source files in src/ — understand what's already built so you don't duplicate or conflict.
-4. All existing test files in test/ — understand existing test patterns and helpers.
-5. foundry.toml — understand compiler settings and project config.
-6. Any other .sol files in the project root or script/ directories.
+1. TASK_QUEUE.md — read the FULL entry for this task including ALL acceptance criteria and sub-items.
+2. .claude/CLAUDE.md — project-specific conventions, key files, and architecture notes. Follow all instructions there.
+3. All existing source files — understand what's already built so you don't duplicate or conflict.
+4. All existing test files — understand existing test patterns and helpers.
+5. Project config files (package.json, tsconfig, foundry.toml, Cargo.toml, etc.) — understand build settings and dependencies.
 
 DONE CRITERIA — your plan is complete when ALL of these are true:
-- Every struct/enum lists EXACT fields copied from RESEARCH.md (field name, type, and description — do not paraphrase or omit)
 - Every acceptance criterion from TASK_QUEUE.md maps to at least one plan item AND one test case
-- Every function has a full signature (name, parameters with types, return types, visibility, modifiers)
-- Every function references which RESEARCH.md section it implements
-- Test cases cover: happy path, reverts for each require, access control, edge cases from acceptance criteria
+- Every function/component has a clear specification (name, parameters, return types, behavior)
+- Test cases cover: happy path, error cases, edge cases from acceptance criteria
+- Plan follows all conventions described in .claude/CLAUDE.md
 
 UNCERTAINTY PROTOCOL:
-- If RESEARCH.md is ambiguous or contradictory on a detail, flag it as [AMBIGUOUS: description] in your plan. Do NOT guess — the auditor will assess your interpretation.
+- If a spec or reference doc is ambiguous or contradictory, flag it as [AMBIGUOUS: description] in your plan. Do NOT guess — the auditor will assess your interpretation.
 - If a TASK_QUEUE.md acceptance criterion is unclear, note your interpretation with [INTERPRETED: criterion → your reading].
 
 Instructions:
@@ -864,14 +862,14 @@ RULES (coding standards):
 ${rules}
 
 MANDATORY READS — re-read to fix the auditor's concerns:
-1. RESEARCH.md — re-verify EVERY struct, enum, constant, and state transition field-by-field.
-2. TASK_QUEUE.md — re-read the FULL task entry and ALL acceptance criteria.
-3. Existing src/ and test/ files — check for conflicts or patterns you need to follow.
+1. TASK_QUEUE.md — re-read the FULL task entry and ALL acceptance criteria.
+2. .claude/CLAUDE.md — re-check project conventions and referenced spec/docs.
+3. Existing source and test files — check for conflicts or patterns you need to follow.
 
 DONE CRITERIA — the revised plan is complete when:
 - Every auditor feedback point is explicitly addressed (state what changed and why)
-- Every struct/enum field matches RESEARCH.md EXACTLY (copy definitions, do not paraphrase)
 - Every acceptance criterion maps to plan items AND test cases
+- Plan follows all conventions described in .claude/CLAUDE.md
 - No ambiguities are left unresolved — use [AMBIGUOUS: ...] or [INTERPRETED: ...] tags if spec is unclear
 
 Instructions:
@@ -997,8 +995,10 @@ run_audit() {
 # IMPORTANT: Pattern must match "missing X" or "no X" or "lacks X" or "vulnerable to X"
 # to avoid false positives from phrases like "correctly handles reentrancy."
 # Each pattern is: (negative context word).{0,30}(security keyword)
-HARD_BLOCK_PATTERNS="(missing|lacks?|no|without|absent|vulnerable to|exposed to|susceptible to).{0,30}(reentrancy guard|reentrancy protection|access control|overflow protection|underflow protection|authorization)"
-HARD_BLOCK_PATTERNS_DIRECT="funds.at.risk|loss.of.funds|privilege.escalation|critical.vulnerabilit|data.loss|steal.funds|drain.funds"
+# Hard block patterns — configurable via config.sh (append project-specific patterns)
+# Default: generic security concerns that apply to any project
+HARD_BLOCK_PATTERNS="${HARD_BLOCK_PATTERNS:-(missing|lacks?|no|without|absent|vulnerable to|exposed to|susceptible to).{0,30}(access control|authorization|authentication|input validation|injection protection|overflow protection|rate limiting)}"
+HARD_BLOCK_PATTERNS_DIRECT="${HARD_BLOCK_PATTERNS_DIRECT:-privilege.escalation|critical.vulnerabilit|data.loss|data.leak|remote.code.execution|sql.injection|command.injection|auth(entication|orization)?.bypass}"
 
 classify_rejection() {
     local feedback="$1"
@@ -1173,22 +1173,22 @@ RULES (coding standards — follow these for style and patterns):
 ${rules}
 
 DONE CRITERIA — implementation is complete when ALL of these are true:
-- Every file, struct, function, and test from the plan exists
-- If you modified any package.json, run '$INSTALL_CMD' before building
-- '$BUILD_CMD' compiles with zero errors
+- Every file, function, component, and test from the plan exists
+- If you modified any dependency file (package.json, requirements.txt, Cargo.toml, etc.), run '$INSTALL_CMD' before building
+- '$BUILD_CMD' compiles/builds with zero errors
 - '$TEST_CMD' passes with zero failures
 - No files outside the plan's scope are modified
-- No extra contracts, files, or features beyond the plan
+- No extra files or features beyond the plan
 
 UNCERTAINTY PROTOCOL:
 - If the plan is unclear on a specific behavior, implement the safest/simplest interpretation and add a comment: // TODO: spec ambiguity — [description]
-- If you hit a compiler error from the plan's design, fix it minimally and note the deviation
+- If you hit a build error from the plan's design, fix it minimally and note the deviation
 
 Instructions:
 - Implement exactly what the plan says. No more, no less.
 - Be context-efficient: read only the files you need, avoid re-reading files you've already seen. Context is limited.
 - $VERIFY_INSTRUCTIONS
-- Do NOT create probe/test/scratch contracts.
+- Do NOT create throwaway/scratch/probe files.
 "
 
     log "Implementing $task_id"
