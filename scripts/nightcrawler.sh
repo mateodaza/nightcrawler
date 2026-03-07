@@ -1752,9 +1752,14 @@ switch_to_dev() {
 
 sync_with_main() {
     log "Fetching latest from origin"
-    git -C "$PROJECT_PATH" fetch origin main 2>/dev/null || log "WARN: fetch failed (offline?)"
+    git -C "$PROJECT_PATH" fetch origin main nightcrawler/dev 2>/dev/null || log "WARN: fetch failed (offline?)"
 
-    # Merge origin/main into nightcrawler/dev (single merge, not two)
+    # Pull any remote changes to nightcrawler/dev first (e.g. task queue edits pushed directly)
+    if git -C "$PROJECT_PATH" rev-parse --verify origin/nightcrawler/dev &>/dev/null; then
+        git -C "$PROJECT_PATH" merge origin/nightcrawler/dev --no-edit 2>/dev/null || true
+    fi
+
+    # Merge origin/main into nightcrawler/dev
     log "Merging origin/main into nightcrawler/dev"
     if ! git -C "$PROJECT_PATH" merge origin/main --no-edit 2>/dev/null; then
         # Conflict — try auto-resolving by preferring our (nightcrawler/dev) version for TASK_QUEUE.md
