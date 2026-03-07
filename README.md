@@ -29,7 +29,7 @@ The orchestrator is **deterministic bash**. LLMs are only called for creative wo
 
 **Where to run it:** A VPS is recommended because sessions run for hours and you don't want your laptop tied up or asleep. A cheap VPS (2 vCPU, 4GB RAM, ~$7/mo) is plenty — Nightcrawler barely uses local compute, it's all API calls. That said, it works fine locally too (just keep your machine awake).
 
-**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers all Sonnet calls. Codex CLI handles audits/reviews independently. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
+**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers all Sonnet calls. Codex CLI ($20/mo subscription) covers all audits/reviews. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
 
 ### 2. Set Up Nightcrawler
 
