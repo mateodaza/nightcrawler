@@ -264,7 +264,7 @@ The information is all already in the session journal — just surface it in the
 
 **Current:** `status`, `log`, `progress` are separate commands. No at-a-glance view.
 
-**After:** A static HTML page generated after each session (or live-updated during). Shows: current task, pipeline stage, cost so far, completed tasks with diffs, locked tasks with reasons. Serve it on the VPS with a one-liner caddy/nginx config. Way better than tailing logs or waiting for Telegram pings.
+**After:** A static HTML page generated after each session (or live-updated during). Shows: current task, pipeline stage, cost so far, completed tasks with diffs, locked tasks with reasons, and a **live log panel** (tail of the active session log). Serve it on the VPS with a one-liner caddy/nginx config. Way better than tailing logs or waiting for Telegram pings.
 
 ```
 🕷️ Nightcrawler Dashboard — camello
@@ -290,9 +290,12 @@ BUILD: ✅ passing | TESTS: 45/45
 - New script: `scripts/nightcrawler-dashboard.sh` — generates HTML from session data
 - Reads from: status file, session journal, budget tracker, git log
 - HTML output to `/var/www/nightcrawler/index.html` (or similar)
-- Optionally: live-refresh via a cron or inotifywait that regenerates on journal writes
+- Live log panel: last 200 lines of active `nightcrawler.log`, auto-refresh every 3-5 seconds, with pause/resume toggle in UI
+- If no active session exists, log panel shows latest completed session tail (or explicit "No active session log")
+- Regeneration trigger: cron/inotify/journal-write hook (implementation choice), but dashboard must update while session runs
 - Also expose as a Telegram command (`dashboard`) for text-only summary
-- ~120 lines (HTML generator + text fallback)
+- Non-fatal: if live log refresh fails, dashboard still renders core session summary
+- ~150 lines (HTML generator + log panel + text fallback)
 
 ### 2.3 `nightcrawler history` command
 
@@ -486,6 +489,13 @@ Rule: Tier 1 features must never fail the core task loop unless explicitly marke
 - [ ] Subsequent sessions update the existing PR (not create duplicates)
 - [ ] Failed PR creation doesn't crash the session
 - [ ] If remote `nightcrawler/dev` != local HEAD, PR create/edit is skipped with warning (no stale PR body update)
+
+### Dashboard/live log is done when:
+- [ ] `dashboard` shows active project, current task, stage, budget, and recent completed tasks
+- [ ] Live log panel displays tail of active `nightcrawler.log` and refreshes within <=5 seconds while session is running
+- [ ] UI pause/resume works (pause stops refresh, resume restarts refresh)
+- [ ] No active session case is handled cleanly (explicit message, no crash/blank page)
+- [ ] Dashboard is read-only and cannot impact/interrupt the Nightcrawler core loop
 
 ### Feature flags are done when:
 - [ ] `NC_ENABLE_SKILL_SYNC=0` disables skill sync; `1` enables it
