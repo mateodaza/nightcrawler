@@ -5,13 +5,13 @@ Every command below MUST be executed with your `exec` tool. No exceptions.
 
 ## MANDATORY BEHAVIOR
 
-When Mateo sends a message:
+When Operator sends a message:
 1. Match it to a command below
 2. Call your `exec` tool with the shell command shown after →
 3. Reply with ONLY the exec output
 
 **EXAMPLE:**
-- Mateo says: "status"
+- Operator says: "status"
 - You call exec with: `cat /tmp/nightcrawler-clout-status 2>/dev/null || echo "No active session"`
 - Exec returns: "No active session"
 - You reply: "No active session"
@@ -68,7 +68,7 @@ PP="/home/nightcrawler/projects/$LP"
 
 ### Task Management
 - `tasks` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; bash /root/nightcrawler/scripts/queue-tasks.sh /home/nightcrawler/projects/$LP`
-  - After showing output, tell Mateo: "Reply `queue add <id> [<id> ...]` to add tasks"
+  - After showing output, tell Operator: "Reply `queue add <id> [<id> ...]` to add tasks"
 - `queue add <id> [<id> ...]` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; bash /root/nightcrawler/scripts/queue-tasks.sh /home/nightcrawler/projects/$LP --add <id> [<id> ...]`
 
 ### Projects

@@ -56,8 +56,8 @@ BUILD_CMD="make build"
 TEST_CMD="make test"
 BUILD_WALL=120 BUILD_IDLE=60
 TEST_WALL=300  TEST_IDLE=120
-MAX_PLAN_ITERATIONS=3           # plan audit soft-reject cap
-MAX_IMPL_ITERATIONS=5           # impl review soft-reject cap (more room — code is harder)
+MAX_PLAN_ITERATIONS=10          # plan audit soft-reject cap (hard blocks + convergence catch real problems)
+MAX_IMPL_ITERATIONS=10          # impl review soft-reject cap (hard blocks + convergence catch real problems)
 PLAN_MAX_TURNS=""               # empty = omit --max-turns (unlimited; timeout is the safety net)
 IMPL_MAX_TURNS=""               # empty = omit --max-turns (unlimited; timeout is the safety net)
 REPAIR_MAX_TURNS=""             # empty = omit --max-turns (unlimited; timeout is the safety net)

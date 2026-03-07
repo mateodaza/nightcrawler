@@ -96,8 +96,9 @@ Orchestrator MUST kill child process, release temp files, and clean up before mo
 - MANUAL tasks (marked [🚧]) are executed by Mateo, not Nightcrawler — skip automatically and move to next eligible task
 
 ### Loop Discipline
-- Maximum 3 iterations per phase (plan or implementation) before declaring a lock
-- A lock is declared when EITHER: 3 iterations are reached regardless of feedback theme, OR Jaccard keyword overlap >0.5 across last 3 rejections (whichever triggers first)
+- Maximum iterations per phase default to 10 (configurable via MAX_PLAN_ITERATIONS / MAX_IMPL_ITERATIONS in config.sh)
+- A lock is declared when EITHER: iteration cap is reached, OR Jaccard keyword overlap >0.5 across last 3 rejections (convergence detection — whichever triggers first)
+- Hard blocks (security, correctness) exit immediately regardless of iteration count
 - Never implement without an approved mini-plan
 - Never commit without an approved implementation review
 - Each mini-plan must reference the specific task ID and acceptance criteria

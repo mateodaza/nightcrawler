@@ -10,6 +10,7 @@ SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 NC_ROOT="$(dirname "$SCRIPTS")"
 WORKSPACE="$NC_ROOT/workspace/NIGHTCRAWLER.md"
 YAML="$NC_ROOT/config/openclaw.yaml"
+OPERATOR_NAME="${NIGHTCRAWLER_OPERATOR_NAME:-Operator}"
 
 # --diff mode: generate to temp and show diff without overwriting
 DIFF_MODE=false
@@ -56,13 +57,13 @@ Every command below MUST be executed with your `exec` tool. No exceptions.
 
 ## MANDATORY BEHAVIOR
 
-When Mateo sends a message:
+When __OPERATOR_NAME__ sends a message:
 1. Match it to a command below
 2. Call your `exec` tool with the shell command shown after →
 3. Reply with ONLY the exec output
 
 **EXAMPLE:**
-- Mateo says: "status"
+- __OPERATOR_NAME__ says: "status"
 - You call exec with: `cat /tmp/nightcrawler-clout-status 2>/dev/null || echo "No active session"`
 - Exec returns: "No active session"
 - You reply: "No active session"
@@ -146,7 +147,7 @@ cat >> "$WORKSPACE" << 'FOOTER'
 
 ### Task Management
 - `tasks` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; bash /root/nightcrawler/scripts/queue-tasks.sh /home/nightcrawler/projects/$LP`
-  - After showing output, tell Mateo: "Reply `queue add <id> [<id> ...]` to add tasks"
+  - After showing output, tell __OPERATOR_NAME__: "Reply `queue add <id> [<id> ...]` to add tasks"
 - `queue add <id> [<id> ...]` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; bash /root/nightcrawler/scripts/queue-tasks.sh /home/nightcrawler/projects/$LP --add <id> [<id> ...]`
 
 ### Projects
@@ -162,6 +163,19 @@ cat >> "$WORKSPACE" << 'FOOTER'
 - If exec fails, report the error. Do NOT retry.
 - Keep responses SHORT.
 FOOTER
+
+# Replace operator placeholder
+NC_OPERATOR_NAME="$OPERATOR_NAME" python3 - "$WORKSPACE" << 'PYEOF'
+import os, sys
+
+path = sys.argv[1]
+operator = os.environ.get("NC_OPERATOR_NAME", "Operator")
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+text = text.replace("__OPERATOR_NAME__", operator)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
+PYEOF
 
 if [[ "$DIFF_MODE" == true ]]; then
     diff "$ORIGINAL_WORKSPACE" "$WORKSPACE" || true
