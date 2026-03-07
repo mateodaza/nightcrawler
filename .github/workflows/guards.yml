@@ -1,0 +1,41 @@
+name: Guards
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  drift-and-sanity:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps for scripts
+        run: python3 -m pip install --upgrade pyyaml
+
+      - name: Shell syntax check
+        run: find scripts -type f -name "*.sh" -print0 | xargs -0 -n1 bash -n
+
+      - name: Python compile check
+        run: python3 -m compileall scripts
+
+      - name: Regenerate dispatcher
+        run: bash scripts/generate-workspace.sh
+
+      - name: Fail on stale generated dispatcher
+        run: git diff --exit-code workspace/NIGHTCRAWLER.md
+
+      - name: Lock-first live-state contract smoke check
+        run: |
+          grep -n "Live State (lock first, then marker — no fallback)" workspace/NIGHTCRAWLER.md
+          grep -n 'status.*lock first, then marker' workspace/NIGHTCRAWLER.md
+          grep -n 'alive.*lock first, then marker' workspace/NIGHTCRAWLER.md

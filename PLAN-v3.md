@@ -16,7 +16,7 @@ Nightcrawler's value is the **human-AI-AI triangle**: you define scope, Sonnet e
 
 ### 1.1 Nightcrawler Skill — Claude Code context for repo agents
 
-**What it is:** A `.claude/skills/` file that lives in each project repo. When you're chatting with the project's Claude Code agent, the skill teaches it how Nightcrawler works — the TASK_QUEUE.md format, how to size tasks, how to write acceptance criteria, the dependency system, status markers, everything. The agent becomes your planning partner.
+**What it is:** A `.nightcrawler/skills/` file that lives in each project repo (synced to `.claude/skills/` by `start.sh`). When you're chatting with the project's Claude Code agent, the skill teaches it how Nightcrawler works — the TASK_QUEUE.md format, how to size tasks, how to write acceptance criteria, the dependency system, status markers, everything. The agent becomes your planning partner.
 
 **Why a skill, not a Telegram command:** You're already in a conversation with your repo's agent when you're thinking about what to build next. That's the right moment to plan tasks — you have the codebase context, you can ask follow-ups, you can iterate. A Telegram command would generate tasks in a black box and hand you a file to review cold. The skill keeps you in the loop the entire time.
 
@@ -59,22 +59,112 @@ Teaches the repo agent:
 
 **Implementation:**
 
-1. Create `skills/nightcrawler-planning/SKILL.md` in the nightcrawler repo (template)
-2. `nightcrawler-init.sh` copies it into the project's `.claude/skills/` during onboarding
-3. Skill is `user-invocable: false` — Claude auto-loads it when task planning is relevant
-4. ~80 lines of skill content (format spec + examples + guidelines)
+1. Create `skills/nightcrawler-planning/SKILL.md` in the nightcrawler repo (master template)
+2. `nightcrawler-init.sh` copies it into the project's `.nightcrawler/skills/` during onboarding (repo-owned, source-controlled)
+3. `start.sh` syncs `.nightcrawler/skills/` → `.claude/skills/` on every session start (same pattern as `.nightcrawler/CLAUDE.md` → `.claude/CLAUDE.md`)
+4. Skill is `user-invocable: false` — Claude auto-loads it when task planning is relevant
+5. ~80 lines of skill content (format spec + examples + guidelines)
 
-**Deployment per project:**
-- `nightcrawler-init.sh` already creates `.nightcrawler/` config — extend it to also copy the skill
-- `start.sh` already syncs `.nightcrawler/CLAUDE.md` → `.claude/CLAUDE.md` — add skill copy too
-- Or: just include it in the project's `.claude/skills/` directly during init (simpler)
+**Why `.nightcrawler/skills/` not `.claude/skills/` directly:** `start.sh` treats `.claude/` as generated output — it overwrites settings.json and CLAUDE.md on every run. Putting the skill in `.nightcrawler/skills/` keeps it repo-owned and source-controlled. `start.sh` copies it to `.claude/skills/` at session start, same as everything else.
 
 **What this is NOT:**
 - Not an autonomous planner — you're in the conversation, you decide what ships
 - Not a Telegram command — it runs where you're already working (Claude Code)
 - Not a replacement for thinking about your product — it's a formatting assistant that knows the pipeline
 
-### 1.2 Auto-PR after session
+### 1.2 `nightcrawler update` — single command to sync everything
+
+**Problem:** Right now, deploying a Nightcrawler update to the VPS is fragile and manual:
+```bash
+cd /root/nightcrawler
+git pull
+bash scripts/generate-workspace.sh    # easy to forget
+bash scripts/deploy-workspace.sh      # easy to forget
+# oh wait, did I need to re-run nightcrawler-init.sh --update for my projects?
+# did I need to /new in Telegram to reload?
+```
+
+Miss a step and things silently break — stale workspace, wrong permissions, old prompts. This bit us multiple times already.
+
+**After:** One command does everything:
+```bash
+nightcrawler update
+```
+
+Or from Telegram:
+```
+update
+```
+
+**What it does (in order):**
+
+1. `cd /root/nightcrawler && git pull` — pull latest nightcrawler code
+2. `generate-workspace.sh` — rebuild NIGHTCRAWLER.md from project registry
+3. `deploy-workspace.sh` — copy to `~/.openclaw/workspace/`
+4. For each registered project: sync skill templates to `.nightcrawler/skills/`
+5. Print summary of what changed
+6. Remind to `/new` in Telegram (or auto-restart OpenClaw service if safe)
+
+**The script:** `scripts/nightcrawler-update.sh` (~60 lines)
+
+```bash
+#!/usr/bin/env bash
+# nightcrawler-update.sh — Pull + regenerate + deploy in one shot
+set -euo pipefail
+
+NC_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+echo "🕷️ Nightcrawler — Updating..."
+
+# 1. Pull latest
+echo "→ Pulling latest..."
+git -C "$NC_ROOT" pull
+
+# 2. Regenerate workspace
+echo "→ Regenerating workspace..."
+bash "$NC_ROOT/scripts/generate-workspace.sh"
+
+# 3. Deploy to OpenClaw
+echo "→ Deploying workspace..."
+bash "$NC_ROOT/scripts/deploy-workspace.sh"
+
+# 4. Sync project skills/templates
+YAML="$NC_ROOT/config/openclaw.yaml"
+if [[ -f "$YAML" ]] && python3 -c "import yaml" 2>/dev/null; then
+    PROJECTS=$(python3 -c "
+import yaml
+with open('$YAML') as f:
+    data = yaml.safe_load(f) or {}
+projects = data.get('projects', {}) or {}
+for name, info in projects.items():
+    print(f\"{name}|{info.get('path', '')}\")
+")
+    while IFS='|' read -r name path; do
+        [[ -z "$path" ]] && continue
+        # Sync planning skill template to repo-owned location (start.sh copies to .claude/skills/)
+        if [[ -d "$NC_ROOT/skills/nightcrawler-planning" ]] && [[ -d "$path" ]]; then
+            mkdir -p "$path/.nightcrawler/skills/nightcrawler-planning"
+            cp "$NC_ROOT/skills/nightcrawler-planning/SKILL.md" \
+               "$path/.nightcrawler/skills/nightcrawler-planning/SKILL.md" 2>/dev/null && \
+                echo "  ✓ $name: planning skill synced" || true
+        fi
+    done <<< "$PROJECTS"
+fi
+
+echo ""
+echo "✅ Update complete. Run /new in Telegram to reload workspace."
+```
+
+**Workspace command:**
+```
+- `update` → exec: `bash /root/nightcrawler/scripts/nightcrawler-update.sh`
+```
+
+**Why this matters for open-source:** When you share Nightcrawler with friends, the update flow has to be bulletproof. "Run `nightcrawler update` after pulling" is one thing to remember. "Run these 4 scripts in this order from this directory" is where people give up.
+
+**Future:** Could add a git post-merge hook that auto-runs `nightcrawler-update.sh` so even `git pull` alone does the right thing. But explicit is better than magic for v1.
+
+### 1.3 Auto-PR after session
 
 **Why:** After a Nightcrawler session, you currently `git pull` on the VPS, inspect commits, and manually merge. A PR gives you a proper diff view, CI checks, and a one-click merge button — all from your phone.
 
@@ -83,12 +173,13 @@ Teaches the repo agent:
 At the end of each session (in `nightcrawler.sh`, after the task loop), if at least one task was completed:
 
 1. Push `nightcrawler/dev` to origin (already happens — `git push origin nightcrawler/dev`)
-2. Check if an open PR already exists for `nightcrawler/dev → main`
+2. Check if an open PR already exists for `nightcrawler/dev → $BASE_BRANCH`
    - `gh pr list --head nightcrawler/dev --state open --json number`
+   - `BASE_BRANCH` comes from project config (openclaw.yaml `base_branch`, defaults to `main`)
 3. If no open PR: create one
    ```bash
    gh pr create \
-     --base main \
+     --base "$BASE_BRANCH" \
      --head nightcrawler/dev \
      --title "🕷️ Nightcrawler: ${COMPLETED_COUNT} tasks completed" \
      --body "$(generate_pr_body)"
@@ -274,15 +365,87 @@ run-all --budget 10
 | Phase | Feature | Risk | Effort | Depends on |
 |-------|---------|------|--------|------------|
 | 1 | Planning skill (SKILL.md template) | Low (new file, no core changes) | ~80 lines | — |
-| 2 | Auto-PR | Low (end-of-session addition, non-fatal) | ~80 lines | `gh` on VPS |
-| 3 | Smarter failure notifications | Low (enhance existing function) | ~30 lines | — |
-| 4 | Dashboard (HTML + text) | Low (new script, read-only) | ~120 lines | — |
-| 5 | History command | Low (new script, read-only) | ~60 lines | — |
-| 6 | GitHub Issues sync | Medium (external API) | ~100 lines | `gh` on VPS |
-| 7 | Spec-to-queue | Zero (same skill, bigger input) | 0 lines | Phase 1 |
-| 8 | Parallel orchestration | Medium (coordination logic) | ~120 lines | — |
+| 2 | `nightcrawler update` (single sync command) | Low (wraps existing scripts) | ~60 lines | — |
+| 3 | Auto-PR | Low (end-of-session addition, non-fatal) | ~80 lines | `gh` on VPS |
+| 4 | Smarter failure notifications | Low (enhance existing function) | ~30 lines | — |
+| 5 | Dashboard (HTML + text) | Low (new script, read-only) | ~120 lines | — |
+| 6 | History command | Low (new script, read-only) | ~60 lines | — |
+| 7 | GitHub Issues sync | Medium (external API) | ~100 lines | `gh` on VPS |
+| 8 | Spec-to-queue | Zero (same skill, bigger input) | 0 lines | Phase 1 |
+| 9 | Parallel orchestration | Medium (coordination logic) | ~120 lines | — |
 
-Phases 1-2 are the priority. Everything else can wait until they're proven.
+Phases 1-3 are the priority. Everything else can wait until they're proven.
+
+---
+
+## Operational Guarantees (for v3 rollout)
+
+### Rollout controls (kill switches)
+
+Every Tier 1 feature ships behind an env flag. Default is OFF until smoke tests pass.
+
+| Feature | Flag | Default |
+|---------|------|---------|
+| Planning skill sync | `NC_ENABLE_SKILL_SYNC` | `0` |
+| `nightcrawler update` command | `NC_ENABLE_UPDATE_CMD` | `0` |
+| Auto-PR | `NC_ENABLE_AUTO_PR` | `0` |
+| Enhanced failure notifications | `NC_ENABLE_RICH_ALERTS` | `0` |
+
+Rollout process:
+- Enable per project first (camello, then clout), not globally.
+- Promote to default ON only after 3 clean sessions per project.
+- Any regression: flip flag to `0` and continue normal pipeline (no rollback required).
+
+### Failure policy matrix (fatal vs non-fatal)
+
+| Component | Failure behavior |
+|-----------|------------------|
+| Planning skill sync | Warn and continue session startup |
+| `nightcrawler update` git pull fails | Fatal for update command only; no partial deploy |
+| `generate-workspace.sh` fails during update | Fatal for update command only |
+| Workspace deploy fails during update | Warn and continue (scripts still updated) |
+| Auto-PR create/edit fails | Warn, continue session completion |
+| Rich alert formatting fails | Fallback to current plain alert format |
+
+Rule: Tier 1 features must never fail the core task loop unless explicitly marked fatal above.
+
+### Security and trust boundaries
+
+- Telegram/OpenClaw remains command-dispatch only; no free-form shell execution.
+- High-impact write commands (`update`, future `run-all`, `remove`) must be explicit and non-ambiguous.
+- `status`/`alive` remain lock-first live checks.
+- Credentials remain in `~/.env`; scripts can read/update known keys only.
+- No feature in this plan bypasses Codex audit/review gates in normal mode.
+
+### Idempotency contract
+
+- `nightcrawler update` is safe to run repeatedly: pull, regenerate, deploy, sync templates.
+- Skill sync overwrites template targets deterministically (source of truth is `nightcrawler/skills/` + project `.nightcrawler/skills/`).
+- Auto-PR is idempotent: create once, then edit existing PR body.
+- Setup/bootstrap scripts are re-runnable and must skip already-configured steps.
+
+### Smoke-test matrix (minimum)
+
+| Feature | Happy path | Failure path |
+|---------|------------|--------------|
+| Planning skill sync | Skill appears in project `.nightcrawler/skills/` and is copied to `.claude/skills/` on start | Missing template dir logs warning, startup still succeeds |
+| `nightcrawler update` | Pull + regen + deploy + skill sync completes with summary | Empty/null YAML handled (`or {}`), command exits cleanly |
+| Auto-PR | Completed session creates/updates PR against `$BASE_BRANCH` | `gh` missing/auth fails logs warning, session still completes |
+| Rich alerts | Locked task sends structured alert with actionable options | Journal parse failure falls back to existing plain alert |
+
+### Success metrics (30-day)
+
+- Update reliability: >= 95% successful `nightcrawler update` runs without manual fixes.
+- PR automation: >= 90% of sessions with completed tasks produce/create-or-update PR successfully.
+- Alert usefulness: >= 80% of lock events resolved without SSHing into VPS logs.
+- Regression guard: 0 incidents where Tier 1 features break core task loop execution.
+
+### Drift guards (prevent stale generated artifacts)
+
+- `generate-workspace.sh --diff` must be clean before merge.
+- Add a CI check that regenerates `workspace/NIGHTCRAWLER.md` and fails if git diff is non-empty.
+- Shell/Python sanity gates on every PR: `bash -n scripts/*.sh` and `python3 -m compileall scripts`.
+- `status`/`alive` behavior is contract-locked: lock-held check first, marker second, no status-file fallback.
 
 ---
 
@@ -301,13 +464,25 @@ Phases 1-2 are the priority. Everything else can wait until they're proven.
 
 ### Planning skill is done when:
 - [ ] `skills/nightcrawler-planning/SKILL.md` exists in nightcrawler repo (template)
-- [ ] `nightcrawler-init.sh` copies skill into project's `.claude/skills/` during onboarding
+- [ ] `nightcrawler-init.sh` copies skill into project's `.nightcrawler/skills/` during onboarding
 - [ ] In a project repo, Claude Code can generate tasks in correct TASK_QUEUE.md format when asked
 - [ ] Generated tasks have stable IDs, acceptance criteria, dependencies, MANUAL flags
 - [ ] Agent knows how to continue from existing task IDs (doesn't restart numbering)
+
+### `nightcrawler update` is done when:
+- [ ] `nightcrawler update` from VPS or Telegram pulls + regenerates + deploys in one command
+- [ ] Skill templates sync to all registered projects
+- [ ] Summary shows what changed
+- [ ] Works from any directory (script resolves its own root)
 
 ### Auto-PR is done when:
 - [ ] Session with ≥1 completed task creates a PR on GitHub
 - [ ] PR body has completed tasks, session stats, remaining queue
 - [ ] Subsequent sessions update the existing PR (not create duplicates)
 - [ ] Failed PR creation doesn't crash the session
+
+### Dispatcher/live-state model is done when:
+- [ ] `status` returns active session when lock is held even if marker is absent (startup window)
+- [ ] `alive` distinguishes: lock-held active, marker-only stale/starting, neither = no active session
+- [ ] `log/progress/queue/branch` may fall back to most recent project
+- [ ] `workspace/NIGHTCRAWLER.md` always matches `generate-workspace.sh` output (no manual drift)
