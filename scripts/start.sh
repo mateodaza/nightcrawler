@@ -44,12 +44,29 @@ if [[ -f "$CONTROL_DIR/skip" ]]; then
     rm -f "$CONTROL_DIR/skip"
 fi
 
-# 4. Source project config (needed before dependency install)
+# 4. Source project config (needed before dependency install + permissions)
 INSTALL_CMD=""
 WORKDIR=""
+DEPS_CHECK=""
+TOOLS=""
+TOOLS_ALLOW=""
+TELEGRAM_THREAD_ID=""
 if [[ -f "$PROJECT_PATH/.nightcrawler/config.sh" ]]; then
     # shellcheck source=/dev/null
     source "$PROJECT_PATH/.nightcrawler/config.sh"
+fi
+
+# 4b. Validate critical config
+if [[ -f "$PROJECT_PATH/.nightcrawler/config.sh" ]]; then
+    MISSING=""
+    [[ -z "${BUILD_CMD:-}" ]] && MISSING="$MISSING BUILD_CMD"
+    [[ -z "${TEST_CMD:-}" ]] && MISSING="$MISSING TEST_CMD"
+    if [[ -n "$MISSING" ]]; then
+        echo "WARNING: Missing in .nightcrawler/config.sh:$MISSING"
+        echo "Session may fail. Run 'nightcrawler init' to fix."
+    fi
+else
+    echo "WARNING: No .nightcrawler/config.sh found — using defaults"
 fi
 
 # 5. Initialize git submodules if any are missing
@@ -66,21 +83,33 @@ if [[ -f "$PROJECT_PATH/.gitmodules" ]]; then
     fi
 fi
 
-# 6. Install dependencies if node_modules is missing
+# 6. Install dependencies if needed
 INSTALL_DIR="$PROJECT_PATH"
 [[ -n "$WORKDIR" ]] && INSTALL_DIR="$PROJECT_PATH/$WORKDIR"
 
-if [[ -n "$INSTALL_CMD" ]]; then
-    if [[ ! -d "$INSTALL_DIR/node_modules" ]]; then
-        echo "Installing dependencies (node_modules missing, using INSTALL_CMD)..."
-        (cd "$INSTALL_DIR" && eval "$INSTALL_CMD" 2>&1 | tail -5)
+NEED_INSTALL=false
+if [[ -n "$DEPS_CHECK" ]]; then
+    # Config-driven check (generic)
+    if ! (cd "$INSTALL_DIR" && eval "$DEPS_CHECK") >/dev/null 2>&1; then
+        NEED_INSTALL=true
     fi
-elif [[ -f "$INSTALL_DIR/pnpm-lock.yaml" ]] && [[ ! -d "$INSTALL_DIR/node_modules" ]]; then
-    echo "Installing dependencies (node_modules missing)..."
-    (cd "$INSTALL_DIR" && pnpm install 2>&1 | tail -5)
-elif [[ -f "$INSTALL_DIR/package-lock.json" ]] && [[ ! -d "$INSTALL_DIR/node_modules" ]]; then
-    echo "Installing dependencies (node_modules missing)..."
-    (cd "$INSTALL_DIR" && npm install 2>&1 | tail -5)
+elif [[ -d "$INSTALL_DIR" ]] && [[ ! -d "$INSTALL_DIR/node_modules" ]]; then
+    # Legacy fallback: check node_modules
+    if [[ -f "$INSTALL_DIR/pnpm-lock.yaml" ]] || [[ -f "$INSTALL_DIR/package-lock.json" ]]; then
+        NEED_INSTALL=true
+    fi
+fi
+
+if [[ "$NEED_INSTALL" == true ]] && [[ -n "$INSTALL_CMD" ]]; then
+    echo "Installing dependencies..."
+    (cd "$INSTALL_DIR" && eval "$INSTALL_CMD" 2>&1 | tail -5)
+elif [[ "$NEED_INSTALL" == true ]]; then
+    # Auto-detect (legacy fallback)
+    if [[ -f "$INSTALL_DIR/pnpm-lock.yaml" ]]; then
+        (cd "$INSTALL_DIR" && pnpm install 2>&1 | tail -5)
+    elif [[ -f "$INSTALL_DIR/package-lock.json" ]]; then
+        (cd "$INSTALL_DIR" && npm install 2>&1 | tail -5)
+    fi
 fi
 
 # 7. Refresh .claude/CLAUDE.md from repo-owned .nightcrawler/CLAUDE.md
@@ -118,57 +147,48 @@ else
     rm -rf "$PROJECT_PATH/.claude/skills"
 fi
 
-# 9. Ensure .claude/settings.json exists for Claude Code CLI permissions
-if [[ ! -f "$PROJECT_PATH/.claude/settings.json" ]]; then
-    echo "Creating .claude/settings.json for tool permissions"
-    cat > "$PROJECT_PATH/.claude/settings.json" << 'SETTINGSEOF'
-{
-  "permissions": {
-    "allow": [
-      "Bash(forge *)",
-      "Bash(cast *)",
-      "Bash(pnpm *)",
-      "Bash(npm *)",
-      "Bash(npx *)",
-      "Bash(turbo *)",
-      "Bash(node *)",
-      "Bash(cat *)",
-      "Bash(ls *)",
-      "Bash(find *)",
-      "Bash(mkdir *)",
-      "Bash(cp *)",
-      "Bash(mv *)",
-      "Bash(head *)",
-      "Bash(tail *)",
-      "Bash(wc *)",
-      "Bash(diff *)",
-      "Bash(git status*)",
-      "Bash(git diff*)",
-      "Bash(git log*)",
-      "Read",
-      "Write",
-      "Edit",
-      "Glob",
-      "Grep"
-    ],
-    "deny": [
-      "Bash(curl*)",
-      "Bash(wget*)",
-      "Bash(ssh*)",
-      "Bash(scp*)",
-      "Bash(git push*)",
-      "Bash(git reset*)",
-      "Bash(sudo*)",
-      "Bash(rm -rf /*)",
-      "Bash(rm -rf ~*)",
-      "Bash(chmod 777*)",
-      "Bash(pkill*)",
-      "Bash(kill*)"
-    ]
-  }
+# 9. Generate .claude/settings.json from config (always refresh)
+_generate_settings() {
+    local allow_tools="${TOOLS_ALLOW:-}"
+    if [[ -z "$allow_tools" ]]; then
+        # Default: safe utils + TOOLS from config
+        allow_tools="cat ls find mkdir cp mv head tail wc diff"
+        for t in $TOOLS; do
+            allow_tools="$allow_tools $t"
+        done
+    fi
+
+    python3 -c "
+import json, sys
+tools = '${allow_tools}'.split()
+allow = [f'Bash({t} *)' for t in tools]
+# Safe defaults always included
+allow += [
+    'Bash(cat *)', 'Bash(ls *)', 'Bash(find *)', 'Bash(mkdir *)',
+    'Bash(cp *)', 'Bash(mv *)', 'Bash(head *)', 'Bash(tail *)',
+    'Bash(wc *)', 'Bash(diff *)',
+    'Bash(git status*)', 'Bash(git diff*)', 'Bash(git log*)',
+    'Read', 'Write', 'Edit', 'Glob', 'Grep'
+]
+# Deduplicate while preserving order
+seen = set()
+unique = []
+for item in allow:
+    if item not in seen:
+        seen.add(item)
+        unique.append(item)
+deny = [
+    'Bash(curl*)', 'Bash(wget*)', 'Bash(ssh*)', 'Bash(scp*)',
+    'Bash(git push*)', 'Bash(git reset*)', 'Bash(sudo*)',
+    'Bash(rm -rf /*)', 'Bash(rm -rf ~*)', 'Bash(chmod 777*)',
+    'Bash(pkill*)', 'Bash(kill*)'
+]
+json.dump({'permissions': {'allow': unique, 'deny': deny}}, sys.stdout, indent=2)
+" > "$PROJECT_PATH/.claude/settings.json"
 }
-SETTINGSEOF
-fi
+
+_generate_settings
+echo "Generated .claude/settings.json from config"
 
 # 10. Kill budget-kill flag from previous stop command
 rm -f /tmp/nightcrawler-budget-kill

@@ -1,3 +1,54 @@
+#!/usr/bin/env bash
+# generate-workspace.sh — Rebuilds workspace/NIGHTCRAWLER.md from project registry.
+# Preserves all generic commands exactly. Only generates per-project session/diagnose blocks.
+#
+# Usage: generate-workspace.sh
+
+set -euo pipefail
+
+SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+NC_ROOT="$(dirname "$SCRIPTS")"
+WORKSPACE="$NC_ROOT/workspace/NIGHTCRAWLER.md"
+YAML="$NC_ROOT/config/openclaw.yaml"
+
+# --diff mode: generate to temp and show diff without overwriting
+DIFF_MODE=false
+if [[ "${1:-}" == "--diff" ]]; then
+    DIFF_MODE=true
+fi
+
+# Pre-flight
+if ! python3 -c "import yaml" 2>/dev/null; then
+    echo "ERROR: PyYAML is required. Install with: pip install pyyaml"
+    exit 1
+fi
+
+if [[ ! -f "$YAML" ]]; then
+    echo "ERROR: openclaw.yaml not found at $YAML"
+    exit 1
+fi
+
+# Extract project names from openclaw.yaml
+PROJECTS=$(python3 -c "
+import yaml
+with open('$YAML') as f:
+    data = yaml.safe_load(f)
+projects = data.get('projects', {}) or {}
+print(' '.join(projects.keys()))
+")
+
+if [[ -z "$PROJECTS" ]]; then
+    echo "WARNING: No projects found in openclaw.yaml"
+fi
+
+# In diff mode, generate to a temp file
+ORIGINAL_WORKSPACE="$WORKSPACE"
+if [[ "$DIFF_MODE" == true ]]; then
+    WORKSPACE=$(mktemp)
+fi
+
+# --- STATIC_HEADER ---
+cat > "$WORKSPACE" << 'HEADER'
 # Nightcrawler — Command Dispatcher
 
 You are Nightcrawler. You are a COMMAND DISPATCHER, not a chatbot.
@@ -38,21 +89,48 @@ PP="/home/nightcrawler/projects/$LP"
 ```
 
 ## Commands
+HEADER
 
-### Session Control
-- `start clout` → exec: `bash /root/nightcrawler/scripts/start.sh clout`
-- `start clout --budget N` → exec: `bash /root/nightcrawler/scripts/start.sh clout --budget N`
-- `start clout --budget 0` → exec: `bash /root/nightcrawler/scripts/start.sh clout --budget 0`
-- `start clout --dry-run` → exec: `bash /root/nightcrawler/scripts/start.sh clout --dry-run`
-- `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`
+# --- GENERATED_PROJECT_BLOCKS ---
 
-### Write Actions (require explicit project)
-- `install clout` → exec: `bash /root/nightcrawler/scripts/diagnose.sh clout --install`
-- `skip <id>` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; mkdir -p /tmp/nightcrawler/$AP && echo "<id>" >> /tmp/nightcrawler/$AP/skip && echo "Skipping <id>"`
+# Per-project session control
+{
+    echo ""
+    echo "### Session Control"
+    for proj in $PROJECTS; do
+        cat << EOF
+- \`start $proj\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj\`
+- \`start $proj --budget N\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj --budget N\`
+- \`start $proj --budget 0\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj --budget 0\`
+- \`start $proj --dry-run\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj --dry-run\`
+EOF
+    done
+    echo '- `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`'
 
-### Diagnostics
-- `diagnose` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; bash /root/nightcrawler/scripts/diagnose.sh $AP`
-- `diagnose clout` → exec: `bash /root/nightcrawler/scripts/diagnose.sh clout`
+    echo ""
+    echo "### Write Actions (require explicit project)"
+    for proj in $PROJECTS; do
+        cat << EOF
+- \`install $proj\` → exec: \`bash /root/nightcrawler/scripts/diagnose.sh $proj --install\`
+EOF
+    done
+    echo '- `skip <id>` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; mkdir -p /tmp/nightcrawler/$AP && echo "<id>" >> /tmp/nightcrawler/$AP/skip && echo "Skipping <id>"`'
+} >> "$WORKSPACE"
+
+# Per-project diagnostics
+{
+    echo ""
+    echo "### Diagnostics"
+    echo '- `diagnose` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; bash /root/nightcrawler/scripts/diagnose.sh $AP`'
+    for proj in $PROJECTS; do
+        cat << EOF
+- \`diagnose $proj\` → exec: \`bash /root/nightcrawler/scripts/diagnose.sh $proj\`
+EOF
+    done
+} >> "$WORKSPACE"
+
+# --- STATIC_FOOTER ---
+cat >> "$WORKSPACE" << 'FOOTER'
 
 ### Live State (lock first, then marker — no fallback)
 - `status` → exec: `AP=""; for lf in /tmp/nightcrawler-*.lock; do [ -f "$lf" ] && ! flock -n "$lf" true 2>/dev/null && AP=$(basename "$lf" | sed 's/nightcrawler-//;s/\.lock//') && break; done; if [ -z "$AP" ]; then AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); fi; if [ -z "$AP" ]; then echo "No active session"; else cat /tmp/nightcrawler-${AP}-status 2>/dev/null || echo "Session active ($AP) but no status yet"; fi`
@@ -83,3 +161,12 @@ PP="/home/nightcrawler/projects/$LP"
 - Do NOT orchestrate tasks or read source files.
 - If exec fails, report the error. Do NOT retry.
 - Keep responses SHORT.
+FOOTER
+
+if [[ "$DIFF_MODE" == true ]]; then
+    diff "$ORIGINAL_WORKSPACE" "$WORKSPACE" || true
+    rm "$WORKSPACE"
+    exit 0
+fi
+
+echo "Generated $WORKSPACE with projects: $PROJECTS"

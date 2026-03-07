@@ -162,32 +162,45 @@ html_escape() {
     echo "$s"
 }
 
-notify_normal() {
-    local msg="$1"
-    [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && return 0
-    [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
+_tg_send() {
+    local msg="$1" use_thread="${2:-true}"
     local escaped
     escaped=$(html_escape "$msg")
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d chat_id="$TELEGRAM_CHAT_ID" \
-        -d parse_mode=HTML \
-        -d text="$escaped" >/dev/null 2>&1 || true
+    local -a args=(
+        -d chat_id="$TELEGRAM_CHAT_ID"
+        -d parse_mode=HTML
+        -d text="$escaped"
+    )
+    if [[ "$use_thread" == "true" ]] && [[ -n "${TELEGRAM_THREAD_ID:-}" ]]; then
+        args+=(-d message_thread_id="$TELEGRAM_THREAD_ID")
+    fi
+    local response
+    response=$(curl -s --connect-timeout 5 --max-time 10 \
+        -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        "${args[@]}")
+    if echo "$response" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('ok') else 1)" 2>/dev/null; then
+        return 0
+    fi
+    # If thread send failed, retry without thread ID (falls back to General)
+    if [[ "$use_thread" == "true" ]] && [[ -n "${TELEGRAM_THREAD_ID:-}" ]]; then
+        _tg_send "$msg" "false"
+        return $?
+    fi
+    return 1
+}
+
+notify_normal() {
+    [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && return 0
+    [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
+    _tg_send "$1" || true
 }
 
 escalate_urgent() {
-    local msg="$1"
     [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && return 0
     [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
-    local escaped
-    escaped=$(html_escape "$msg")
     local attempt
     for attempt in 1 2 3; do
-        if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="$TELEGRAM_CHAT_ID" \
-            -d parse_mode=HTML \
-            -d text="$escaped" >/dev/null 2>&1; then
-            return 0
-        fi
+        _tg_send "$1" && return 0
         sleep 5
     done
 }
@@ -501,7 +514,7 @@ $(cat "$skip_file")
     fi
 
     local prompt
-    prompt=$(cat <<'PROMPT_END'
+    read -r -d '' prompt <<'PROMPT_END' || true
 You are a smart task scheduler for an autonomous coding agent. Your job: maximize productive work.
 
 Read the TASK_QUEUE.md and pick the next task to execute. Be pragmatic, not bureaucratic.
@@ -527,7 +540,6 @@ PICKING LOGIC (in priority order):
 
 RESPOND WITH EXACTLY ONE LINE: just the task ID (e.g. NC-004) or NONE.
 PROMPT_END
-)
 
     # Append all context
     prompt="${prompt}
