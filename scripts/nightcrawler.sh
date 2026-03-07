@@ -538,7 +538,7 @@ PICKING LOGIC (in priority order):
 
 5. TRULY NOTHING: Only say NONE if every non-manual task is either [x], in the skip list, or genuinely blocked on incomplete dependencies with no evidence of completion.
 
-RESPOND WITH EXACTLY ONE LINE: just the task ID (e.g. NC-004) or NONE.
+RESPOND WITH EXACTLY ONE LINE: just the task ID (e.g. CAM-004, NC-017) or NONE.
 PROMPT_END
 
     # Append all context
@@ -611,7 +611,7 @@ except:
 
     # Strip any extra text — model should return just the ID but be safe
     local task_id
-    task_id=$(echo "$answer" | grep -oE 'NC-[0-9A-Z]+' | head -1)
+    task_id=$(echo "$answer" | grep -oE '[A-Z]+-[0-9A-Z]+' | head -1)
 
     if [[ -z "$task_id" ]]; then
         log "pick_next_task: could not parse task ID from model response: $answer"
@@ -682,7 +682,7 @@ count_tasks() {
     [[ -f "$queue" ]] || { echo "0"; return; }
     # Count [ ] tasks excluding MANUAL — approximate, just for notifications
     local n
-    n=$(grep '\[ \]' "$queue" | grep -v MANUAL | grep -c 'NC-' 2>/dev/null) || true
+    n=$(grep -cE '^\#{4}\s+[A-Z]+-[0-9]+\s+\[ \]' "$queue" 2>/dev/null) || true
     echo "${n:-0}"
 }
 
@@ -2077,7 +2077,7 @@ main_loop() {
         # Phase C: Commit
         notify_normal "✅ $TASK_ID passed review — committing..."
         local description
-        description=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+NC-[0-9]+\s+\[.\]\s*//' | head -c 72)
+        description=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+[A-Z]+-[0-9]+\s+\[.\]\s*//' | head -c 72)
         local commit_hash
         if ! commit_hash=$(commit_and_close_task "$TASK_ID" "$description" "$degraded_note"); then
             if [[ "$commit_hash" == "GHOST" ]]; then
