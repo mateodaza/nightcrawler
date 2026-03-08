@@ -1740,53 +1740,55 @@ execute_recovery() {
 # =============================================================================
 
 switch_to_dev() {
-    local current
+    local current base
     current=$(git -C "$PROJECT_PATH" rev-parse --abbrev-ref HEAD)
+    base="${BASE_BRANCH:-main}"
 
     case "$current" in
-        "main")
+        "$base")
             if git -C "$PROJECT_PATH" rev-parse --verify nightcrawler/dev &>/dev/null; then
-                log "On main — switching to existing nightcrawler/dev"
+                log "On $base — switching to existing nightcrawler/dev"
                 git -C "$PROJECT_PATH" checkout nightcrawler/dev
             else
-                log "First session — creating nightcrawler/dev from main"
-                git -C "$PROJECT_PATH" checkout -B nightcrawler/dev main
+                log "First session — creating nightcrawler/dev from $base"
+                git -C "$PROJECT_PATH" checkout -B nightcrawler/dev "$base"
             fi
             ;;
         "nightcrawler/dev")
             log "Already on nightcrawler/dev"
             ;;
         *)
-            die "On unexpected branch '$current' — expected main or nightcrawler/dev"
+            die "On unexpected branch '$current' — expected $base or nightcrawler/dev"
             ;;
     esac
 }
 
 sync_with_main() {
+    local base="${BASE_BRANCH:-main}"
     log "Fetching latest from origin"
-    git -C "$PROJECT_PATH" fetch origin main nightcrawler/dev 2>/dev/null || log "WARN: fetch failed (offline?)"
+    git -C "$PROJECT_PATH" fetch origin "$base" nightcrawler/dev 2>/dev/null || log "WARN: fetch failed (offline?)"
 
     # Pull any remote changes to nightcrawler/dev first (e.g. task queue edits pushed directly)
     if git -C "$PROJECT_PATH" rev-parse --verify origin/nightcrawler/dev &>/dev/null; then
         git -C "$PROJECT_PATH" merge origin/nightcrawler/dev --no-edit 2>/dev/null || true
     fi
 
-    # Merge origin/main into nightcrawler/dev
-    log "Merging origin/main into nightcrawler/dev"
-    if ! git -C "$PROJECT_PATH" merge origin/main --no-edit 2>/dev/null; then
+    # Merge origin/<base> into nightcrawler/dev
+    log "Merging origin/$base into nightcrawler/dev"
+    if ! git -C "$PROJECT_PATH" merge "origin/$base" --no-edit 2>/dev/null; then
         # Conflict — try auto-resolving by preferring our (nightcrawler/dev) version for TASK_QUEUE.md
-        log "WARN: merge conflict with origin/main — attempting auto-resolve"
+        log "WARN: merge conflict with origin/$base — attempting auto-resolve"
         git -C "$PROJECT_PATH" checkout --ours -- TASK_QUEUE.md 2>/dev/null || true
         git -C "$PROJECT_PATH" add TASK_QUEUE.md 2>/dev/null || true
         if ! git -C "$PROJECT_PATH" -c core.editor=true merge --continue 2>/dev/null; then
             git -C "$PROJECT_PATH" merge --abort 2>/dev/null || true
-            log "WARN: merge with origin/main failed — continuing on current nightcrawler/dev (out of sync)"
-            escalate_urgent "WARNING ($PROJECT): Could not merge origin/main — session running on stale nightcrawler/dev"
+            log "WARN: merge with origin/$base failed — continuing on current nightcrawler/dev (out of sync)"
+            escalate_urgent "WARNING ($PROJECT): Could not merge origin/$base — session running on stale nightcrawler/dev"
             return
         fi
         log "Auto-resolved merge conflict (kept nightcrawler/dev TASK_QUEUE.md)"
     fi
-    log "nightcrawler/dev synced with origin/main"
+    log "nightcrawler/dev synced with origin/$base"
 }
 
 startup() {
