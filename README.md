@@ -2,6 +2,8 @@
 
 Autonomous coding agent that executes your backlog overnight. You define the tasks, it plans, implements, reviews, and commits — unsupervised.
 
+> **If you've used Claude Code's [`/loop`](https://code.claude.com/docs/en/scheduled-tasks) and want to go further:** `/loop` polls a deploy or babysits a PR inside a single session. Nightcrawler runs a full pipeline — plan → independent audit → implement → independent review → commit → verify — across your entire backlog, unattended, overnight. Different scope, same intuition: your codebase should move while you sleep.
+
 ## How It Works
 
 ```
