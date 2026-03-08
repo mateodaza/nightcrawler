@@ -307,9 +307,14 @@ Then send `/new` in Telegram to reload.
 
 ## Proven Results
 
-First multi-session run (Clout project — Solidity/Foundry):
+**Clout** (Solidity/Foundry + Next.js):
 - 30 tasks completed across 6 sessions
 - 182 tests, all passing
 - Full smart contract suite + React frontend
 - Independent Codex audit on every plan and implementation
 - Zero manual intervention during overnight runs
+
+**Camello** (Next.js 15 + Hono/tRPC monorepo):
+- Second project onboarded — different stack, same pipeline
+- Autonomous commits on a TypeScript monorepo (Drizzle, Turborepo)
+- Zero changes to the orchestrator to support a new stack
