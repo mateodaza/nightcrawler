@@ -146,7 +146,7 @@ bash scripts/start.sh myproject --budget 20
 start myproject --budget 20
 ```
 
-Nightcrawler auto-creates a `nightcrawler/dev` branch, works there, and attempts to push after each verified task (non-fatal if push fails). You merge to main when ready.
+Nightcrawler auto-creates a `nightcrawler/dev` branch, works there, and pushes after each verified task. To keep everything local (no pushes), add `NC_AUTO_PUSH=0` to your project's `.nightcrawler/config.sh`. Push failures are always non-fatal — the session continues either way.
 
 ## Pipeline
 
@@ -293,6 +293,8 @@ nightcrawler/
 **Claude Code CLI auth:** The CLI uses your Max subscription, not the API key. Run `claude login` and authenticate with your Anthropic account. `ANTHROPIC_API_KEY` in `~/.env` is used by other parts of the pipeline but the CLI itself prefers subscription auth.
 
 **Codex CLI auth:** Codex stores its credentials at `~/.codex/config.json`. Run `codex` once interactively to authenticate. If Codex is unavailable during a session, Nightcrawler continues in degraded mode (auto-approves audits/reviews) rather than stopping.
+
+**Git push from VPS:** Nightcrawler pushes to `nightcrawler/dev` after each task. On a VPS, you need SSH keys set up for your Git remote. We recommend [GitHub's SSH setup guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh) — generate a key on the VPS, add it to your GitHub account, and switch your remote to SSH (`git remote set-url origin git@github.com:user/repo.git`). Alternatively, set `NC_AUTO_PUSH=0` in your project's config to keep commits local and pull them from another machine.
 
 **Rate limits:** Claude Max has undocumented rate limits (token-weighted, not pure message count). If you hit them, the session pauses and retries automatically. The 5x tier ($100/mo) works for single-project sessions; 20x ($200/mo) is better for long overnight runs or multiple projects.
 

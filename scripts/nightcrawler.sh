@@ -2138,9 +2138,11 @@ main_loop() {
         # Capture session memory — 1-line learning from this task (async, non-blocking)
         capture_task_learning "$TASK_ID" "$commit_hash" &
 
-        # Push to nightcrawler/dev after each verified task
+        # Push to nightcrawler/dev after each verified task (disable with NC_AUTO_PUSH=0 in config.sh)
         cd "$PROJECT_PATH"
-        if git push origin HEAD:nightcrawler/dev 2>/dev/null; then
+        if [[ "${NC_AUTO_PUSH:-1}" == "0" ]]; then
+            log "Auto-push disabled (NC_AUTO_PUSH=0) — commit stays local"
+        elif git push origin HEAD:nightcrawler/dev 2>/dev/null; then
             log "Pushed to nightcrawler/dev"
         else
             log "WARN: push to nightcrawler/dev failed (non-fatal)"
