@@ -42,7 +42,7 @@ _load_env()
 API_MODEL = os.environ.get("NIGHTCRAWLER_CODEX_MODEL", "o4-mini")
 MAX_TOKENS = 1024
 CLI_TIMEOUT = 120  # 2 minutes for CLI commands
-STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
+STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", str(Path.home() / ".nightcrawler")))
 
 
 # =============================================================================

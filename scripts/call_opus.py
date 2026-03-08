@@ -34,7 +34,7 @@ def _load_env():
 
 _load_env()
 
-STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
+STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", str(Path.home() / ".nightcrawler")))
 MODEL = os.environ.get("NIGHTCRAWLER_OPUS_MODEL", "claude-opus-4-6")
 MAX_TOKENS = 2048  # Cap Opus output for mini-plans (cost control)
 

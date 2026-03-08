@@ -28,7 +28,8 @@ if [[ -z "$PROJECT" ]]; then
     PROJECT=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1)
 fi
 if [[ -z "$PROJECT" ]]; then
-    SESSION=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1)
+    STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-$HOME/.nightcrawler}"
+    SESSION=$(ls -t "$STATE_DIR/sessions/" 2>/dev/null | head -1)
     if [[ -n "$SESSION" ]]; then
         PROJECT=$(echo "$SESSION" | sed 's/^[0-9]*-[0-9]*-//')
     fi

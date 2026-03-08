@@ -37,7 +37,7 @@ def _load_env():
 
 _load_env()
 
-STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", "/home/nightcrawler/nightcrawler"))
+STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", str(Path.home() / ".nightcrawler")))
 MODEL = os.environ.get("NIGHTCRAWLER_SONNET_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = 8192  # Higher limit for implementation code
 

@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-/home/nightcrawler/nightcrawler}"
+STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-$HOME/.nightcrawler}"
 LOCK_DIR="/tmp"
 HEARTBEAT_FILE="/tmp/nightcrawler-heartbeat"
 

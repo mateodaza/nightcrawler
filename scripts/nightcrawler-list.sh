@@ -62,7 +62,7 @@ for name in projects:
 
     # Last session
     last_session="never"
-    sessions_dir="/home/nightcrawler/nightcrawler/sessions"
+    sessions_dir="${NIGHTCRAWLER_STATE_PATH:-$HOME/.nightcrawler}/sessions"
     if [[ -d "$sessions_dir" ]]; then
         latest=$(ls -d "$sessions_dir"/*-"$name" 2>/dev/null | sort | tail -1)
         if [[ -n "$latest" ]]; then
