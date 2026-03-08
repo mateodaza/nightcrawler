@@ -463,7 +463,16 @@ else
     echo "NOTE: generate-workspace.sh not found — run it after creating it to update workspace commands"
 fi
 
-# --- 12. Summary ---
+# --- 12. Auto-commit init files (keeps worktree clean for start.sh) ---
+if [[ -d "$PROJECT_DIR/.git" ]]; then
+    git -C "$PROJECT_DIR" add .nightcrawler/ .gitignore 2>/dev/null || true
+    if [[ -n "$(git -C "$PROJECT_DIR" diff --cached --name-only 2>/dev/null)" ]]; then
+        git -C "$PROJECT_DIR" commit -m "chore: nightcrawler init setup" --no-verify 2>/dev/null
+        echo "Auto-committed .nightcrawler/ and .gitignore"
+    fi
+fi
+
+# --- 13. Summary ---
 echo ""
 echo "=== Done ==="
 echo "Project: $PROJECT_NAME"
