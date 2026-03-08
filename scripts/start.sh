@@ -192,12 +192,13 @@ json.dump({'permissions': {'allow': unique, 'deny': deny}}, sys.stdout, indent=2
 _generate_settings
 echo "Generated .claude/settings.json from config"
 
-# Ensure auto-generated files are gitignored (settings.json is never hand-edited)
+# Ensure all auto-generated .claude/ files are gitignored
+# (CLAUDE.md, settings.json, skills/ are all regenerated from .nightcrawler/ by start.sh)
 if [[ -f "$PROJECT_PATH/.gitignore" ]]; then
-    grep -qF '.claude/settings.json' "$PROJECT_PATH/.gitignore" 2>/dev/null || \
-        echo '.claude/settings.json' >> "$PROJECT_PATH/.gitignore"
+    grep -qF '.claude/' "$PROJECT_PATH/.gitignore" 2>/dev/null || \
+        echo '.claude/' >> "$PROJECT_PATH/.gitignore"
 else
-    echo '.claude/settings.json' > "$PROJECT_PATH/.gitignore"
+    echo '.claude/' > "$PROJECT_PATH/.gitignore"
 fi
 
 # 10. Kill budget-kill flag from previous stop command
