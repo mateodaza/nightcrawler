@@ -28,7 +28,7 @@ The orchestrator is **deterministic bash**. LLMs are only called for creative wo
 - [OpenClaw](https://github.com/nichochar/openclaw) (optional locally; required for full mobile Telegram automation)
 - Your project's toolchain (Node, Python, Rust, etc.)
 
-**Where to run it:** A VPS is recommended because sessions run for hours and you don't want your laptop tied up or asleep. A cheap VPS (2 vCPU, 4GB RAM, ~$7/mo) is plenty — Nightcrawler barely uses local compute, the heavy lifting is done by the LLMs. That said, it works fine locally too (just keep your machine awake).
+**Where to run it:** A VPS is recommended because sessions run for hours and you don't want your laptop tied up or asleep. Nightcrawler barely uses local compute — the heavy lifting is done by the LLMs — so a cheap VPS (2 vCPU, 4GB RAM) is plenty. We run on [Hetzner](https://www.hetzner.com/cloud/) (~€4/mo for CX22) and recommend it for the price. Any provider works though — see the [OpenClaw VPS guide](https://docs.openclaw.ai/vps) for options including Railway, Fly.io, Oracle Cloud (free tier), and others. It also works fine locally (just keep your machine awake).
 
 **Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers Sonnet calls. Codex audits/reviews run via Codex CLI, with API fallback available; keep `--codex-cap` set to bound metered fallback spend. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
 
@@ -279,6 +279,23 @@ nightcrawler/
 ├── RULES.md                     # safety + operational rules
 └── sessions/                    # session logs + reports (auto-generated)
 ```
+
+## Troubleshooting
+
+**Claude Code CLI auth:** The CLI uses your Max subscription, not the API key. Run `claude login` and authenticate with your Anthropic account. `ANTHROPIC_API_KEY` in `~/.env` is used by other parts of the pipeline but the CLI itself prefers subscription auth.
+
+**Codex CLI auth:** Codex stores its credentials at `~/.codex/config.json`. Run `codex` once interactively to authenticate. If Codex is unavailable during a session, Nightcrawler continues in degraded mode (auto-approves audits/reviews) rather than stopping.
+
+**Rate limits:** Claude Max has undocumented rate limits (token-weighted, not pure message count). If you hit them, the session pauses and retries automatically. The 5x tier ($100/mo) works for single-project sessions; 20x ($200/mo) is better for long overnight runs or multiple projects.
+
+**Stale workspace:** If Telegram commands stop working after a `git pull`, you probably need to regenerate and redeploy the OpenClaw workspace:
+```bash
+bash scripts/generate-workspace.sh
+bash scripts/deploy-workspace.sh
+```
+Then send `/new` in Telegram to reload.
+
+**OpenClaw not picking up env vars:** OpenClaw runs as a systemd service and doesn't inherit your shell environment. API keys must be in `~/.env` — the pipeline loads them explicitly via `_load_env()`. If you added a key to `.bashrc` or `.zshrc`, it won't be visible to Nightcrawler.
 
 ## Proven Results
 
