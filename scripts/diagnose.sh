@@ -38,7 +38,9 @@ if [[ -z "$PROJECT" ]]; then
     exit 1
 fi
 
-PROJECT_PATH="${NIGHTCRAWLER_PROJECT_PATH:-/home/nightcrawler/projects/$PROJECT}"
+SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPTS/_resolve-path.sh"
+PROJECT_PATH="$(_resolve_project_path "$PROJECT")"
 
 if [[ ! -d "$PROJECT_PATH" ]]; then
     echo "FATAL: Project directory not found: $PROJECT_PATH"

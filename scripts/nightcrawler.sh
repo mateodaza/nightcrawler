@@ -25,8 +25,9 @@ done
 export PATH
 
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPTS/_resolve-path.sh"
 STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-/home/nightcrawler/nightcrawler}"
-PROJECT_PATH="${NIGHTCRAWLER_PROJECT_PATH:-/home/nightcrawler/projects/$PROJECT}"
+PROJECT_PATH="$(_resolve_project_path "$PROJECT")"
 CONTROL_DIR="/tmp/nightcrawler/${PROJECT}"
 SESSION_ID="$(date -u +%Y%m%d-%H%M%S)-${PROJECT}"
 SESSION_DIR="$STATE_DIR/sessions/$SESSION_ID"

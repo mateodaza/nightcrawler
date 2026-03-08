@@ -15,7 +15,8 @@ export PATH
 
 PROJECT="${1:?Usage: start.sh <project> [--budget N] [--dry-run]}"
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_PATH="${NIGHTCRAWLER_PROJECT_PATH:-/home/nightcrawler/projects/$PROJECT}"
+source "$SCRIPTS/_resolve-path.sh"
+PROJECT_PATH="$(_resolve_project_path "$PROJECT")"
 LOCKFILE="/tmp/nightcrawler-${PROJECT}.lock"
 CONTROL_DIR="/tmp/nightcrawler/${PROJECT}"
 
