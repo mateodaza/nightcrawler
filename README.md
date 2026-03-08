@@ -208,7 +208,15 @@ For your first run, start small and scale up:
 
 [OpenClaw](https://github.com/nichochar/openclaw) is a Telegram bot framework that lets you control your server from your phone. Start a run from bed, check status from your phone, get notifications when tasks complete or hit blockers.
 
-Setup is handled by `nightcrawler-setup.sh` (step 6). OpenClaw is required for full mobile/Telegram automation; if you run locally from terminal only, you can skip it. Once configured, you can message your bot:
+**Setup:** You need a Telegram bot token and your chat ID. If you don't have one yet:
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → save the token
+2. Get your chat ID by messaging your bot then running `curl "https://api.telegram.org/bot<token>/getUpdates"` — look for `from.id`
+3. Run `nightcrawler-setup.sh` — it will prompt for both values and send a test message
+
+Full walkthrough: [OpenClaw Telegram docs](https://docs.openclaw.ai/telegram)
+
+OpenClaw is required for mobile/Telegram automation; if you run locally from terminal only, you can skip it. Once configured, you can message your bot:
 
 ```
 start <project> --budget N     Start a session
@@ -220,7 +228,7 @@ queue                          Pending tasks
 alive                          Check if session is running
 ```
 
-Notifications route to per-project Telegram topics when `TELEGRAM_THREAD_ID` is set. With Topics enabled on your Telegram group, each project gets its own thread — no notification noise across projects.
+**Recommended: use a Telegram group with Topics enabled.** DMs work for a single project, but once you're running multiple projects you want notifications separated. Create a group, add your bot, enable Topics (group settings → Topics), then create a topic per project. Set `TELEGRAM_THREAD_ID` in each project's `.nightcrawler/config.sh` to route notifications to the right thread — keeps each project's noise in its own lane.
 
 ## Multi-Project
 
