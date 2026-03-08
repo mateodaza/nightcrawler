@@ -30,7 +30,7 @@ The orchestrator is **deterministic bash**. LLMs are only called for creative wo
 
 **Where to run it:** A VPS is recommended because sessions run for hours and you don't want your laptop tied up or asleep. Nightcrawler barely uses local compute — the heavy lifting is done by the LLMs — so a cheap VPS (2 vCPU, 4GB RAM) is plenty. We run on [Hetzner](https://www.hetzner.com/cloud/) (~€4/mo for CX22) and recommend it for the price. Any provider works though — see the [OpenClaw VPS guide](https://docs.openclaw.ai/vps) for options including Railway, Fly.io, Oracle Cloud (free tier), and others. It also works fine locally (just keep your machine awake).
 
-**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers Sonnet calls. Codex audits/reviews run via Codex CLI, with API fallback available; keep `--codex-cap` set to bound metered fallback spend. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
+**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers Sonnet calls. Codex CLI ($20/mo) handles audits and reviews, with API fallback available; keep `--codex-cap` set to bound metered fallback spend. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
 
 ### 2. Set Up Nightcrawler
 
