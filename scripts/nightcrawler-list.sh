@@ -56,7 +56,8 @@ for name in projects:
 
     # Check for active session
     lockfile="/tmp/nightcrawler-${name}.lock"
-    if [[ -f "$lockfile" ]] && ! flock -n "$lockfile" true 2>/dev/null; then
+    source "$SCRIPTS/_lock.sh"
+    if [[ -f "$lockfile" ]] && ! nc_flock_test "$lockfile"; then
         status="RUNNING"
     fi
 

@@ -1791,8 +1791,9 @@ sync_with_main() {
 
 startup() {
     # 1. flock
+    source "$SCRIPTS/_lock.sh"
     exec 200>"$LOCKFILE"
-    flock -n 200 || die "Another session running (lock held on $LOCKFILE)"
+    nc_flock_fd 200 || die "Another session running (lock held on $LOCKFILE)"
     echo "$$" >&200
 
     # 2. Create control dir (SESSION_DIR already created at init)

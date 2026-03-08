@@ -39,7 +39,8 @@ fi
 
 # Check for active session (refuse removal if lock is held)
 LOCK_FILE="/tmp/nightcrawler-${PROJECT_NAME}.lock"
-if [[ -f "$LOCK_FILE" ]] && ! flock -n "$LOCK_FILE" true 2>/dev/null; then
+source "$SCRIPTS/_lock.sh"
+if [[ -f "$LOCK_FILE" ]] && ! nc_flock_test "$LOCK_FILE"; then
     echo "ERROR: Cannot remove '$PROJECT_NAME' — session is active (lock held at $LOCK_FILE)"
     echo "Run 'stop' first, then retry."
     exit 1

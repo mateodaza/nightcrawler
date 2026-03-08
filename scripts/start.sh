@@ -29,8 +29,9 @@ if [[ ! -d "$PROJECT_PATH" ]]; then
 fi
 
 # 2. Clear stale lock — only if no live process holds it
+source "$SCRIPTS/_lock.sh"
 if [[ -f "$LOCKFILE" ]]; then
-    if flock -n "$LOCKFILE" true 2>/dev/null; then
+    if nc_flock_test "$LOCKFILE"; then
         echo "Cleared stale lock file"
         rm -f "$LOCKFILE"
     else
