@@ -296,7 +296,7 @@ nightcrawler/
 
 **Codex CLI auth:** Codex stores its credentials at `~/.codex/config.json`. Run `codex` once interactively to authenticate. If Codex is unavailable during a session, Nightcrawler continues in degraded mode (auto-approves audits/reviews) rather than stopping.
 
-**Git push from VPS:** Nightcrawler pushes to `nightcrawler/dev` after each task. On a VPS, you need SSH keys set up for your Git remote. We recommend [GitHub's SSH setup guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh) — generate a key on the VPS, add it to your GitHub account, and switch your remote to SSH (`git remote set-url origin git@github.com:user/repo.git`). Alternatively, set `NC_AUTO_PUSH=0` in your project's config to keep commits local and pull them from another machine.
+**Git remote setup:** Nightcrawler pushes to `nightcrawler/dev` after each task. Your project needs a remote configured with push access. On a VPS or local Mac, set up SSH keys — see [GitHub's SSH setup guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh). Then switch your remote to SSH: `git remote set-url origin git@github.com:user/repo.git`. If fetch/push fails with "offline?" warnings, this is usually the missing step. Alternatively, set `NC_AUTO_PUSH=0` in your project's config to keep commits local and pull them from another machine.
 
 **Rate limits:** Claude Max has undocumented rate limits (token-weighted, not pure message count). If you hit them, the session pauses and retries automatically. The 5x tier ($100/mo) works for single-project sessions; 20x ($200/mo) is better for long overnight runs or multiple projects.
 
