@@ -80,6 +80,23 @@ else
     echo "WARNING: No .nightcrawler/config.sh found — using defaults"
 fi
 
+# 4c. Verify project tools from config
+if [[ -n "$TOOLS" ]]; then
+    TOOL_MISSING=""
+    for tool in $TOOLS; do
+        if ! command -v "$tool" &>/dev/null; then
+            TOOL_MISSING="$TOOL_MISSING $tool"
+        fi
+    done
+    if [[ -n "$TOOL_MISSING" ]]; then
+        echo "FATAL: Project tools not found in PATH:$TOOL_MISSING"
+        echo "  These are defined in .nightcrawler/config.sh TOOLS=\"$TOOLS\""
+        echo "  Install them or update TOOLS to match what's available."
+        echo "  PATH=$PATH"
+        exit 1
+    fi
+fi
+
 # 5. Initialize git submodules if any are missing
 if [[ -f "$PROJECT_PATH/.gitmodules" ]]; then
     NEED_SM=false
