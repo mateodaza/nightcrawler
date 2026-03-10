@@ -7,11 +7,20 @@
 set -euo pipefail
 
 # Ensure tool paths are available (nohup/systemd don't source shell profiles)
-NVM_BIN=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)
+NVM_BIN=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1 || true)
 for p in "$HOME/.foundry/bin" "$HOME/.cargo/bin" "/usr/local/bin" "$HOME/.local/bin" "$NVM_BIN"; do
     [[ -d "$p" ]] && PATH="$p:$PATH"
 done
 export PATH
+
+# Hard dependencies — fail fast with clear message
+for dep in node python3 claude; do
+    if ! command -v "$dep" &>/dev/null; then
+        echo "FATAL: '$dep' not found in PATH. Install it or check your PATH setup."
+        echo "  PATH=$PATH"
+        exit 1
+    fi
+done
 
 PROJECT="${1:?Usage: start.sh <project> [--budget N] [--dry-run]}"
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
