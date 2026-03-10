@@ -150,6 +150,13 @@ if [[ -n "$TOOLS" ]]; then
     fi
 fi
 
+# 6d. Copy RULES.md to state dir (Codex audit/review reads it from there)
+STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-$HOME/.nightcrawler}"
+mkdir -p "$STATE_DIR"
+if [[ -f "$SCRIPTS/../RULES.md" ]]; then
+    cp "$SCRIPTS/../RULES.md" "$STATE_DIR/RULES.md"
+fi
+
 # 7. Refresh .claude/CLAUDE.md from repo-owned .nightcrawler/CLAUDE.md
 mkdir -p "$PROJECT_PATH/.claude"
 if [[ -f "$PROJECT_PATH/.nightcrawler/CLAUDE.md" ]]; then

@@ -240,7 +240,7 @@ def audit_plan(plan_file: str, task_file: str, rules_file: str, project_path: st
     """Audit a mini-plan. Tries Codex CLI exec first, falls back to API."""
     plan = Path(plan_file).read_text()
     task = Path(task_file).read_text()
-    rules = Path(rules_file).read_text()
+    rules = Path(rules_file).read_text() if Path(rules_file).exists() else "No project rules provided."
     project_context = _read_project_context(project_path)
 
     audit_prompt = f"""You are an independent code auditor for a Solidity/Foundry project. Review this implementation plan.
@@ -345,7 +345,7 @@ def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch:
                 diff_source: str = None, test_output_file: str = None):
     """Review implementation. Tries codex exec CLI first, falls back to API."""
     plan = Path(plan_file).read_text()
-    rules = Path(rules_file).read_text()
+    rules = Path(rules_file).read_text() if Path(rules_file).exists() else "No project rules provided."
 
     # Get diff for both CLI and API paths
     if diff_source:
