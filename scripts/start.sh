@@ -80,23 +80,6 @@ else
     echo "WARNING: No .nightcrawler/config.sh found — using defaults"
 fi
 
-# 4c. Verify project tools from config
-if [[ -n "$TOOLS" ]]; then
-    TOOL_MISSING=""
-    for tool in $TOOLS; do
-        if ! command -v "$tool" &>/dev/null; then
-            TOOL_MISSING="$TOOL_MISSING $tool"
-        fi
-    done
-    if [[ -n "$TOOL_MISSING" ]]; then
-        echo "FATAL: Project tools not found in PATH:$TOOL_MISSING"
-        echo "  These are defined in .nightcrawler/config.sh TOOLS=\"$TOOLS\""
-        echo "  Install them or update TOOLS to match what's available."
-        echo "  PATH=$PATH"
-        exit 1
-    fi
-fi
-
 # 5. Initialize git submodules if any are missing
 if [[ -f "$PROJECT_PATH/.gitmodules" ]]; then
     NEED_SM=false
@@ -137,6 +120,33 @@ elif [[ "$NEED_INSTALL" == true ]]; then
         (cd "$INSTALL_DIR" && pnpm install 2>&1 | tail -5)
     elif [[ -f "$INSTALL_DIR/package-lock.json" ]]; then
         (cd "$INSTALL_DIR" && npm install 2>&1 | tail -5)
+    fi
+fi
+
+# 6b. Add project-local binaries to PATH (e.g. turbo, next, vitest in node_modules/.bin)
+INSTALL_DIR="${INSTALL_DIR:-$PROJECT_PATH}"
+for bindir in "$PROJECT_PATH/node_modules/.bin" "$INSTALL_DIR/node_modules/.bin"; do
+    if [[ -d "$bindir" ]] && [[ ":$PATH:" != *":$bindir:"* ]]; then
+        PATH="$bindir:$PATH"
+    fi
+done
+export PATH
+
+# 6c. Verify project tools from config (after deps install + node_modules/.bin in PATH)
+if [[ -n "$TOOLS" ]]; then
+    TOOL_MISSING=""
+    for tool in $TOOLS; do
+        if ! command -v "$tool" &>/dev/null; then
+            TOOL_MISSING="$TOOL_MISSING $tool"
+        fi
+    done
+    if [[ -n "$TOOL_MISSING" ]]; then
+        echo "FATAL: Project tools not found in PATH:$TOOL_MISSING"
+        echo "  These are defined in .nightcrawler/config.sh TOOLS=\"$TOOLS\""
+        echo "  Install them or update TOOLS to match what's available."
+        echo "  If these are project deps, run: $INSTALL_CMD"
+        echo "  PATH=$PATH"
+        exit 1
     fi
 fi
 
