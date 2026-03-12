@@ -351,7 +351,30 @@ You: "Read TECHNICAL_SPEC_v1.md and generate the full task queue for the project
 
 The agent reads the spec, breaks it into phases, generates tasks with acceptance criteria and dependencies, flags MANUAL items. You review the whole thing, iterate, commit. Same skill, bigger input.
 
-### 3.3 Parallel project orchestration
+### 3.3 Multi-instance support
+
+**Why:** Two concurrent Nightcrawler instances on the same repo (e.g., two VPSes, local + VPS) currently collide — they push to the same `nightcrawler/dev` branch and clobber each other. Workspace commands (`log`, `progress`, `cost`, `queue`) are also hardcoded to the original VPS paths, so they break on any other machine.
+
+**What's done (prerequisite — shipped March 2026):**
+- `generate-workspace.sh` outputs portable `__NC_SCRIPTS__`/`__NC_STATE_DIR__` placeholders instead of hardcoded paths
+- `deploy-workspace.sh` substitutes real paths at deploy time per machine
+- `nightcrawler.sh` writes project path to both `/tmp` (fast) and `$STATE_DIR` (survives reboots)
+- Recovery: `git pull && bash nightcrawler/scripts/deploy-workspace.sh`
+
+**Remaining (v3 scope):**
+
+**`NC_DEV_BRANCH`** config variable in `.nightcrawler/config.sh`:
+```bash
+NC_DEV_BRANCH="nightcrawler/dev-vps1"  # default: "nightcrawler/dev"
+```
+
+`nightcrawler.sh` and `start.sh` replace ~20 hardcoded `nightcrawler/dev` references with `${NC_DEV_BRANCH:-nightcrawler/dev}`. Backward compatible — unset means existing behavior.
+
+`nightcrawler-init.sh` adds the commented variable to generated config templates so new instances know it exists.
+
+**Naming options:** manual (`nightcrawler/dev-vps1`) for clarity, or `nightcrawler/dev-$(hostname -s)` for auto-differentiation per machine.
+
+### 3.4 Parallel project orchestration
 
 **Current:** Multiple projects run in parallel but are completely independent. No coordination.
 
@@ -381,6 +404,7 @@ run-all --budget 10
 | 7 | GitHub Issues sync | Medium (external API) | ~100 lines | `gh` on VPS |
 | 8 | Spec-to-queue | Zero (same skill, bigger input) | 0 lines | Phase 1 |
 | 9 | Parallel orchestration | Medium (coordination logic) | ~120 lines | — |
+| 10 | `NC_DEV_BRANCH` configurable branch | Low (20 replacements + config var) | ~25 lines | workspace path fix (done) |
 
 Phases 1-3 are the priority. Everything else can wait until they're proven.
 

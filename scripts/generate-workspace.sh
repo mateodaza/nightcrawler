@@ -33,7 +33,7 @@ fi
 PROJECTS=$(python3 -c "
 import yaml
 with open('$YAML') as f:
-    data = yaml.safe_load(f)
+    data = yaml.safe_load(f) or {}
 projects = data.get('projects', {}) or {}
 print(' '.join(projects.keys()))
 ")
@@ -81,12 +81,12 @@ if [ -z "$AP" ]; then echo "No active session" && exit 0; fi
 
 Last project (for observational history — falls back to most recent session):
 ```bash
-LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; if [ -z "$LP" ]; then echo "No project found" && exit 0; fi
+LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t __NC_STATE_DIR__/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; if [ -z "$LP" ]; then echo "No project found" && exit 0; fi
 ```
 
 Project path:
 ```bash
-PP="/home/nightcrawler/projects/$LP"
+PP=$(cat /tmp/nightcrawler-$LP-path 2>/dev/null || cat __NC_STATE_DIR__/project-$LP-path 2>/dev/null); if [ -z "$PP" ]; then echo "Project path unknown — run 'start $LP' first" && exit 0; fi
 ```
 
 ## Commands
@@ -100,10 +100,10 @@ HEADER
     echo "### Session Control"
     for proj in $PROJECTS; do
         cat << EOF
-- \`start $proj\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj\`
-- \`start $proj --budget N\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj --budget N\`
-- \`start $proj --budget 0\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj --budget 0\`
-- \`start $proj --dry-run\` → exec: \`bash /root/nightcrawler/scripts/start.sh $proj --dry-run\`
+- \`start $proj\` → exec: \`bash __NC_SCRIPTS__/start.sh $proj\`
+- \`start $proj --budget N\` → exec: \`bash __NC_SCRIPTS__/start.sh $proj --budget N\`
+- \`start $proj --budget 0\` → exec: \`bash __NC_SCRIPTS__/start.sh $proj --budget 0\`
+- \`start $proj --dry-run\` → exec: \`bash __NC_SCRIPTS__/start.sh $proj --dry-run\`
 EOF
     done
     echo '- `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`'
@@ -112,7 +112,7 @@ EOF
     echo "### Write Actions (require explicit project)"
     for proj in $PROJECTS; do
         cat << EOF
-- \`install $proj\` → exec: \`bash /root/nightcrawler/scripts/diagnose.sh $proj --install\`
+- \`install $proj\` → exec: \`bash __NC_SCRIPTS__/diagnose.sh $proj --install\`
 EOF
     done
     echo '- `skip <id>` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; mkdir -p /tmp/nightcrawler/$AP && echo "<id>" >> /tmp/nightcrawler/$AP/skip && echo "Skipping <id>"`'
@@ -122,10 +122,10 @@ EOF
 {
     echo ""
     echo "### Diagnostics"
-    echo '- `diagnose` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; bash /root/nightcrawler/scripts/diagnose.sh $AP`'
+    echo '- `diagnose` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; bash __NC_SCRIPTS__/diagnose.sh $AP`'
     for proj in $PROJECTS; do
         cat << EOF
-- \`diagnose $proj\` → exec: \`bash /root/nightcrawler/scripts/diagnose.sh $proj\`
+- \`diagnose $proj\` → exec: \`bash __NC_SCRIPTS__/diagnose.sh $proj\`
 EOF
     done
 } >> "$WORKSPACE"
@@ -138,20 +138,20 @@ cat >> "$WORKSPACE" << 'FOOTER'
 - `alive` → exec: `AP=""; for lf in /tmp/nightcrawler-*.lock; do [ -f "$lf" ] && ! flock -n "$lf" true 2>/dev/null && AP=$(basename "$lf" | sed 's/nightcrawler-//;s/\.lock//') && break; done; if [ -n "$AP" ]; then echo "Session is alive (lock held for $AP)"; else AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -n "$AP" ]; then echo "Marker present ($AP) but lock not held — stale or starting"; else echo "No active session"; fi; fi`
 
 ### Observation (can fall back to last project)
-- `log` → exec: `tail -30 /home/nightcrawler/nightcrawler/sessions/$(ls -t /home/nightcrawler/nightcrawler/sessions/ | head -1)/nightcrawler.log 2>/dev/null || echo "No log available"`
+- `log` → exec: `tail -30 __NC_STATE_DIR__/sessions/$(ls -t __NC_STATE_DIR__/sessions/ | head -1)/nightcrawler.log 2>/dev/null || echo "No log available"`
 - `log N` → exec: same but `tail -N`
-- `progress` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; cat /home/nightcrawler/projects/$LP/PROGRESS.md 2>/dev/null || echo "No progress file"`
-- `cost` → exec: `python3 /root/nightcrawler/scripts/budget.py check $(ls -t /home/nightcrawler/nightcrawler/sessions/ | head -1) 2>/dev/null || echo "No budget data"`
-- `queue` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; grep -E '^#{1,6}\s+' /home/nightcrawler/projects/$LP/TASK_QUEUE.md 2>/dev/null || echo "No queue"`
-- `branch` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; cd /home/nightcrawler/projects/$LP && git rev-parse --abbrev-ref HEAD && git log --oneline -5`
+- `progress` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t __NC_STATE_DIR__/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; PP=$(cat /tmp/nightcrawler-$LP-path 2>/dev/null || cat __NC_STATE_DIR__/project-$LP-path 2>/dev/null); cat "$PP/PROGRESS.md" 2>/dev/null || echo "No progress file"`
+- `cost` → exec: `python3 __NC_SCRIPTS__/budget.py check $(ls -t __NC_STATE_DIR__/sessions/ | head -1) 2>/dev/null || echo "No budget data"`
+- `queue` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t __NC_STATE_DIR__/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; PP=$(cat /tmp/nightcrawler-$LP-path 2>/dev/null || cat __NC_STATE_DIR__/project-$LP-path 2>/dev/null); grep -E '^#{1,6}\s+' "$PP/TASK_QUEUE.md" 2>/dev/null || echo "No queue"`
+- `branch` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t __NC_STATE_DIR__/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; PP=$(cat /tmp/nightcrawler-$LP-path 2>/dev/null || cat __NC_STATE_DIR__/project-$LP-path 2>/dev/null); cd "$PP" && git rev-parse --abbrev-ref HEAD && git log --oneline -5`
 
 ### Task Management
-- `tasks` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; bash /root/nightcrawler/scripts/queue-tasks.sh /home/nightcrawler/projects/$LP`
+- `tasks` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t __NC_STATE_DIR__/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; PP=$(cat /tmp/nightcrawler-$LP-path 2>/dev/null || cat __NC_STATE_DIR__/project-$LP-path 2>/dev/null); bash __NC_SCRIPTS__/queue-tasks.sh "$PP"`
   - After showing output, tell __OPERATOR_NAME__: "Reply `queue add <id> [<id> ...]` to add tasks"
-- `queue add <id> [<id> ...]` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t /home/nightcrawler/nightcrawler/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; bash /root/nightcrawler/scripts/queue-tasks.sh /home/nightcrawler/projects/$LP --add <id> [<id> ...]`
+- `queue add <id> [<id> ...]` → exec: `LP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$LP" ]; then LP=$(ls -t __NC_STATE_DIR__/sessions/ 2>/dev/null | head -1 | sed 's/^[0-9]*-[0-9]*-//'); fi; PP=$(cat /tmp/nightcrawler-$LP-path 2>/dev/null || cat __NC_STATE_DIR__/project-$LP-path 2>/dev/null); bash __NC_SCRIPTS__/queue-tasks.sh "$PP" --add <id> [<id> ...]`
 
 ### Projects
-- `list` → exec: `bash /root/nightcrawler/scripts/nightcrawler-list.sh`
+- `list` → exec: `bash __NC_SCRIPTS__/nightcrawler-list.sh`
 
 ### Notes
 - `note <text>` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); P=${AP:-general}; mkdir -p /tmp/nightcrawler/$P && echo "[$(date -u +%FT%TZ)] <text>" >> /tmp/nightcrawler/$P/notes && echo "Noted"`

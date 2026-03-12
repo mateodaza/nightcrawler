@@ -1991,8 +1991,11 @@ Session: $SESSION_ID"
     notify_normal "Session $SESSION_ID started. $remaining tasks. Budget: $budget_label."
     journal '{"event":"session_start","session_id":"'"$SESSION_ID"'","project":"'"$PROJECT"'","prompt_cap":'"$PROMPT_CAP"',"codex_cap":'"$CODEX_DOLLAR_CAP"',"baseline":"'"$BASELINE"'"}'
 
-    # Write active project marker (used by dispatcher for live-state detection)
+    # Write active project marker and path (used by dispatcher for live-state detection)
     echo "$PROJECT" > /tmp/nightcrawler-active-project
+    # Write project path to tmp (fast) and state dir (persistent across reboots)
+    echo "$PROJECT_PATH" > "/tmp/nightcrawler-${PROJECT}-path"
+    echo "$PROJECT_PATH" > "$STATE_DIR/project-${PROJECT}-path"
     log "Startup complete"
 }
 
