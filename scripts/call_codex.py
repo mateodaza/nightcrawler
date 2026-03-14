@@ -2,7 +2,7 @@
 """
 call_codex.py — Independent audit/review via Codex CLI (primary) or OpenAI API (fallback).
 
-PRIMARY: Uses `codex review` CLI which runs gpt-5.3-codex — the best coding model.
+PRIMARY: Uses `codex review` CLI which runs gpt-5.4 — the best coding model.
 FALLBACK: If CLI fails, falls back to OpenAI API with configurable model.
 
 Usage:
@@ -46,7 +46,7 @@ STATE_DIR = Path(os.environ.get("NIGHTCRAWLER_STATE_PATH", str(Path.home() / ".n
 
 
 # =============================================================================
-# Codex CLI (primary) — uses gpt-5.3-codex
+# Codex CLI (primary) — uses gpt-5.4
 # =============================================================================
 
 def codex_cli_available() -> bool:
@@ -89,17 +89,17 @@ def codex_cli_exec(prompt: str, project_path: str = None) -> dict:
             output = result.stderr.strip()
 
         if not output:
-            return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "empty output"}
+            return {"content": "", "method": "cli", "model": "gpt-5.4", "error": "empty output"}
 
         return {
             "content": output,
             "method": "cli",
-            "model": "gpt-5.3-codex",
+            "model": "gpt-5.4",
         }
     except subprocess.TimeoutExpired:
-        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": "timeout"}
+        return {"content": "", "method": "cli", "model": "gpt-5.4", "error": "timeout"}
     except Exception as e:
-        return {"content": "", "method": "cli", "model": "gpt-5.3-codex", "error": str(e)}
+        return {"content": "", "method": "cli", "model": "gpt-5.4", "error": str(e)}
 
 
 # =============================================================================
@@ -473,7 +473,7 @@ def test_connectivity():
             "Reply with exactly: CODEX_CLI_OK",
         )
         if cli_result.get("content") and not cli_result.get("error"):
-            results["cli"] = {"status": "ok", "model": "gpt-5.3-codex", "response": cli_result["content"][:100]}
+            results["cli"] = {"status": "ok", "model": "gpt-5.4", "response": cli_result["content"][:100]}
         else:
             results["cli"] = {"status": "error", "error": cli_result.get("error", "empty output")}
     else:

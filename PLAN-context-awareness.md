@@ -354,7 +354,7 @@ Output ONLY the orientation document. No preamble."
     set +e
     raw_output=$(cd "$PROJECT_PATH" && timeout 120 \
         claude -p "$prompt" \
-            --model sonnet \
+            --model opus \
             --output-format json \
             --max-turns 3 2>/dev/null)
     exit_code=$?

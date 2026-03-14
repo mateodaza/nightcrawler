@@ -563,7 +563,7 @@ $(cat "$queue")"
         set +e
         raw_output=$(cd "$PROJECT_PATH" && timeout 60 \
             claude -p "$prompt" \
-                --model sonnet \
+                --model opus \
                 --output-format json \
                 --max-turns 1 2>"$claude_stderr")
         exit_code=$?
@@ -716,7 +716,7 @@ RESPOND WITH EXACTLY ONE LINE. No prefix, no quotes."
     local raw_output
     raw_output=$(cd "$PROJECT_PATH" && timeout 30 \
         claude -p "$learning_prompt" \
-            --model haiku \
+            --model sonnet \
             --output-format json \
             --max-turns 1 2>/dev/null) || return 0
 
@@ -808,7 +808,7 @@ Instructions:
     set +e
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model sonnet \
+            --model opus \
             --output-format json \
             ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -885,7 +885,7 @@ Instructions:
     set +e
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model sonnet \
+            --model opus \
             --output-format json \
             ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -1069,7 +1069,7 @@ RESPOND WITH EXACTLY ONE WORD: CONTINUE or STOP"
     local raw_output
     raw_output=$(cd "$PROJECT_PATH" && timeout 30 \
         claude -p "$prompt" \
-            --model haiku \
+            --model sonnet \
             --output-format json \
             --max-turns 1 2>/dev/null) || {
         log "WARN: Convergence check failed — defaulting to CONTINUE (iteration cap is the real safety net)"
@@ -1214,7 +1214,7 @@ Instructions:
     set +e
     raw_output=$(cd "$project_path" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model sonnet \
+            --model opus \
             --output-format json \
             ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -1274,7 +1274,7 @@ Instructions:
     set +e
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model sonnet \
+            --model opus \
             --output-format json \
             ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -1921,7 +1921,7 @@ RULES:
         set +e
         repair_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
             claude -p "$repair_prompt" \
-                --model sonnet \
+                --model opus \
                 --output-format json \
                 ${REPAIR_MAX_TURNS:+--max-turns $REPAIR_MAX_TURNS} 2>"$repair_stderr")
         repair_exit=$?

@@ -9,10 +9,10 @@ Autonomous coding agent that executes your backlog overnight. You define the tas
 ```
 YOU                                 NIGHTCRAWLER
 ━━━━━━━━━━━━━━━━━━━                 ━━━━━━━━━━━━━━━━━━━━━━━
-Write TASK_QUEUE.md                 Pick next task (Sonnet)
-Set budget + constraints            Plan implementation (Sonnet)
+Write TASK_QUEUE.md                 Pick next task (Opus)
+Set budget + constraints            Plan implementation (Opus)
 Go to sleep                         Audit plan (Codex)
-                                    Implement code (Sonnet)
+                                    Implement code (Opus)
 Wake up, check Telegram             Review implementation (Codex)
 Merge nightcrawler/dev → main       Commit + verify (build + tests)
                                     Loop until queue empty or budget hit
@@ -32,7 +32,7 @@ The orchestrator is **deterministic bash**. LLMs are only called for creative wo
 
 **Where to run it:** A VPS is recommended because sessions run for hours and you don't want your laptop tied up or asleep. Nightcrawler barely uses local compute — the heavy lifting is done by the LLMs — so a cheap VPS (2 vCPU, 4GB RAM) is plenty. We run on [Hetzner](https://www.hetzner.com/cloud/) (~€4/mo for CX22) and recommend it for the price. Any provider works though — see the [OpenClaw VPS guide](https://docs.openclaw.ai/vps) for options including Railway, Fly.io, Oracle Cloud (free tier), and others. It also works fine locally (just keep your machine awake).
 
-**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers Sonnet calls. Codex CLI ($20/mo) handles audits and reviews, with API fallback available; keep `--codex-cap` set to bound metered fallback spend. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
+**Cost:** Claude Max subscription ($100/mo for 5x, $200/mo for 20x) covers Opus calls. Codex CLI ($20/mo) handles audits and reviews, with API fallback available; keep `--codex-cap` set to bound metered fallback spend. The Max 5x tier works for single-project sessions; 20x is better if you're running multiple projects concurrently (shared rate limits).
 
 ### 2. Set Up Nightcrawler
 
@@ -155,7 +155,7 @@ Nightcrawler auto-creates a `nightcrawler/dev` branch, works there, and pushes a
 Each task goes through this pipeline:
 
 ```
-pick_task → plan (Sonnet) → audit (Codex) → implement (Sonnet) → review (Codex) → commit → verify
+pick_task → plan (Opus) → audit (Codex) → implement (Opus) → review (Codex) → commit → verify
               ↑                   |               ↑                    |
               └── revise ─────────┘               └── revise ──────────┘
                 (max 3 rounds)                      (max 5 rounds)
@@ -167,12 +167,14 @@ If audit/review rejects, the plan/code is revised. Hard blocks (security issues)
 
 | Role | Model | Why |
 |------|-------|-----|
-| Task picking | Sonnet | Reads queue + git log, picks next eligible task |
-| Planning | Sonnet | Generates implementation plan from task + acceptance criteria |
-| Plan audit | Codex | Independent review — catches issues Sonnet misses |
-| Implementation | Sonnet | Writes code following the approved plan |
-| Code review | Codex | Independent review of the implementation |
-| Learning capture | Haiku | Extracts one-line insights after each task |
+| Task picking | Opus | Reads queue + git log, picks next eligible task |
+| Planning | Opus | Generates implementation plan from task + acceptance criteria |
+| Plan audit | Codex (gpt-5.4) | Independent review — catches issues Opus misses |
+| Implementation | Opus | Writes code following the approved plan |
+| Code review | Codex (gpt-5.4) | Independent review of the implementation |
+| Learning capture | Sonnet | Extracts one-line insights after each task |
+| Convergence check | Sonnet | Detects infinite revision loops |
+| OpenClaw (Telegram bot) | Haiku | Routes commands from Telegram to start.sh — not part of the pipeline itself |
 
 ## Budget
 
