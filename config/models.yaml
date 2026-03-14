@@ -11,7 +11,7 @@ roles:
 
   implementer:
     provider: anthropic
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     interface: claude-code-cli
     max_output_tokens: dynamic   # capped by remaining task budget (see SPEC.md §5.4)
     temperature: 0
@@ -44,7 +44,7 @@ caching:
 fallback:
   # If Opus is down, PAUSE. Planning quality is critical, Sonnet insufficient.
   planner_down: pause_and_escalate
-  # If Opus is down for implementation, PAUSE. Quality is critical.
+  # If Sonnet is down for implementation, PAUSE. Don't use Opus (too slow, hits timeout).
   implementer_down: pause_and_escalate
   # If Codex CLI fails, switch to direct OpenAI API (same model, different interface).
   auditor_cli_down: fallback_to_openai_api

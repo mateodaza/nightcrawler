@@ -79,7 +79,7 @@ AUDIT_WALL=180  AUDIT_IDLE=60
 IMPL_WALL=600   IMPL_IDLE=180
 REVIEW_WALL=180 REVIEW_IDLE=60
 CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
-CLAUDE_CLI_TIMEOUT=1800 # wall-clock safety net for Claude Code CLI (30min — 25 turns × ~60s each, with margin)
+CLAUDE_CLI_TIMEOUT=3600 # wall-clock safety net for Claude Code CLI (60min — Opus planning can be slow)
 
 # Strip API keys from environment — force both CLIs to use subscription auth.
 # Claude CLI uses `claude login` session; Codex CLI uses ~/.codex/config.json.
@@ -801,7 +801,7 @@ Instructions:
 
     log "Planning $task_id"
     update_status "planning $task_id"
-    notify_normal "📋 Planning $task_id..."
+    notify_normal "📋 Planning $task_id"
 
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_plan_${task_id}_stderr.log"
@@ -1204,7 +1204,7 @@ Instructions:
 
     log "Implementing $task_id"
     update_status "implementing $task_id"
-    notify_normal "🔨 Implementing $task_id..."
+    notify_normal "🔨 Implementing $task_id"
 
     # Use timeout (not run_timed) — Claude Code CLI in JSON mode produces no
     # intermediate output, so idle timeout would kill it prematurely.
@@ -1214,7 +1214,7 @@ Instructions:
     set +e
     raw_output=$(cd "$project_path" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model opus \
+            --model sonnet \
             --output-format json \
             ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -1266,7 +1266,7 @@ Instructions:
 
     log "Revising implementation (iteration $iteration)"
     update_status "revising $TASK_ID (iteration $iteration)"
-    notify_normal "🔄 Revising $TASK_ID (round $iteration)..."
+    notify_normal "🔄 Revising $TASK_ID (round $iteration)"
 
     # Use timeout (not run_timed) — same reason as implement_task
     local raw_output exit_code
@@ -1274,7 +1274,7 @@ Instructions:
     set +e
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model opus \
+            --model sonnet \
             --output-format json \
             ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -1921,7 +1921,7 @@ RULES:
         set +e
         repair_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
             claude -p "$repair_prompt" \
-                --model opus \
+                --model sonnet \
                 --output-format json \
                 ${REPAIR_MAX_TURNS:+--max-turns $REPAIR_MAX_TURNS} 2>"$repair_stderr")
         repair_exit=$?
@@ -1988,7 +1988,8 @@ Session: $SESSION_ID"
     local remaining
     remaining=$(count_tasks)
     update_status "running — $remaining tasks remaining"
-    notify_normal "Session $SESSION_ID started. $remaining tasks. Budget: $budget_label."
+    notify_normal "🚀 Session $SESSION_ID ($PROJECT)
+$remaining tasks | Budget: $budget_label"
     journal '{"event":"session_start","session_id":"'"$SESSION_ID"'","project":"'"$PROJECT"'","prompt_cap":'"$PROMPT_CAP"',"codex_cap":'"$CODEX_DOLLAR_CAP"',"baseline":"'"$BASELINE"'"}'
 
     # Write active project marker and path (used by dispatcher for live-state detection)
@@ -2027,14 +2028,20 @@ main_loop() {
 
         log "=== Starting task $TASK_ID ==="
         TASK_COST=0
+        local task_start_ts=$SECONDS
         journal '{"event":"task_start","task_id":"'"$TASK_ID"'"}'
         mark_task_in_progress "$TASK_ID"
-        update_status "working on $TASK_ID"
 
-        # Write task context
+        # Write task context and extract description for notifications
         local task_file="$SESSION_DIR/tasks/$TASK_ID/task_context.md"
         mkdir -p "$(dirname "$task_file")"
         extract_task_context "$TASK_ID" > "$task_file"
+        local task_desc
+        task_desc=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+[A-Z]+-[0-9]+\s+\[.\]\s*//' | head -c 72)
+
+        update_status "working on $TASK_ID: $task_desc"
+        notify_normal "🆕 $TASK_ID: $task_desc
+Remaining: $(count_tasks) tasks"
 
         # Phase A: Plan
         if ! plan_loop "$task_file" "$TASK_ID"; then
@@ -2093,9 +2100,8 @@ main_loop() {
         fi
 
         # Phase C: Commit
-        notify_normal "✅ $TASK_ID passed review — committing..."
-        local description
-        description=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+[A-Z]+-[0-9]+\s+\[.\]\s*//' | head -c 72)
+        notify_normal "✅ $TASK_ID passed review — committing"
+        local description="$task_desc"
         local commit_hash
         if ! commit_hash=$(commit_and_close_task "$TASK_ID" "$description" "$degraded_note"); then
             if [[ "$commit_hash" == "GHOST" ]]; then
@@ -2163,9 +2169,12 @@ main_loop() {
         else
             prompt_info="${PROMPT_COUNT}"
         fi
-        local notify_msg="Done: $TASK_ID (${commit_hash:0:8}). Remaining: $remaining. Prompts: ${prompt_info}. Cost: \$$TASK_COST."
+        local elapsed_min=$(( (SECONDS - task_start_ts) / 60 ))
+        local notify_msg="✔ $TASK_ID: $task_desc
+${elapsed_min}min | \$$TASK_COST | ${prompt_info} prompts | $remaining left"
         if [[ -n "$degraded_note" ]]; then
-            notify_msg="${notify_msg} ⚠ Capped soft-reject."
+            notify_msg="${notify_msg}
+⚠ Capped soft-reject"
         fi
         notify_normal "$notify_msg"
         update_status "completed $TASK_ID — $remaining remaining"
@@ -2376,9 +2385,9 @@ session_end() {
             end_status="aborted: $reason"
         fi
 
-        notify_normal "Session $end_status.
-Tasks: ${tasks_done} done, ${tasks_locked} locked.
-${prompt_label} | API ref: \$${TOTAL_COST} | Codex: \$${CODEX_COST}${degraded_label}"
+        notify_normal "🏁 Session $end_status
+${tasks_done} done, ${tasks_locked} locked
+${prompt_label} | Cost: \$${TOTAL_COST} | Codex: \$${CODEX_COST}${degraded_label}"
     fi
 
     [[ "$HEARTBEAT_STARTED" == "true" ]] && stop_heartbeat
