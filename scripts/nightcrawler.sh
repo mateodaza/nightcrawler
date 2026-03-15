@@ -563,7 +563,7 @@ $(cat "$queue")"
         set +e
         raw_output=$(cd "$PROJECT_PATH" && timeout 60 \
             claude -p "$prompt" \
-                --model opus \
+                --model sonnet \
                 --output-format json \
                 --max-turns 1 2>"$claude_stderr")
         exit_code=$?
@@ -806,9 +806,11 @@ Instructions:
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_plan_${task_id}_stderr.log"
     set +e
+    local plan_model="${PLAN_MODEL:-sonnet}"
+    log "Planning with model: $plan_model"
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model opus \
+            --model "$plan_model" \
             --output-format json \
             ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -883,9 +885,10 @@ Instructions:
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_planrev_${task_id}_${iteration}_stderr.log"
     set +e
+    local plan_model="${PLAN_MODEL:-sonnet}"
     raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
         claude -p "$prompt" \
-            --model opus \
+            --model "$plan_model" \
             --output-format json \
             ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
     exit_code=$?
@@ -1153,7 +1156,38 @@ plan_loop() {
         fi
     done
 
-    # Iterations exhausted or convergence check said stop — proceed with warning
+    # Iterations exhausted or convergence check said stop — escalate to Opus
+    if [[ "${PLAN_MODEL:-sonnet}" != "opus" ]]; then
+        log "plan_loop: Sonnet stuck after $iteration iterations — escalating to Opus"
+        notify_normal "🧠 Escalating plan to Opus ($task_id stuck after ${iteration} rounds)"
+        PLAN_MODEL="opus"
+        journal '{"event":"plan_escalate_opus","task_id":"'"$task_id"'","iteration":'"$iteration"'}'
+
+        # One Opus re-plan attempt with accumulated feedback
+        local all_feedback=""
+        for fb in "${feedbacks[@]}"; do
+            all_feedback+="$fb
+---
+"
+        done
+        if revise_plan "$plan_file" "$all_feedback" "$iteration" "$task_id"; then
+            # Run one more audit on the Opus plan
+            run_audit "$plan_file" "$task_file"
+            if [[ "$AUDIT_VERDICT" == "APPROVED" ]]; then
+                PLAN_AUDIT_MODE="approved"
+                PLAN_MODEL="sonnet"  # reset for next task
+                PLAN_FILE="$plan_file"
+                log "plan_loop: Opus rescue plan approved"
+                return 0
+            fi
+            log "plan_loop: Opus rescue plan not approved — proceeding anyway"
+        else
+            log "plan_loop: Opus rescue plan failed"
+        fi
+        PLAN_MODEL="sonnet"  # reset for next task
+    fi
+
+    # Proceed with best available plan
     log "plan_loop: capped after $iteration iterations — proceeding with best plan"
     PLAN_AUDIT_MODE="capped_soft_reject"
     PLAN_LAST_FEEDBACK="$AUDIT_FEEDBACK"

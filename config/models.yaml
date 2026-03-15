@@ -4,8 +4,8 @@
 roles:
   planner:
     provider: anthropic
-    model: claude-opus-4-6
-    interface: claude-code-cli  # runs in Podman container
+    model: claude-sonnet-4-6    # Sonnet default, escalates to Opus when stuck
+    interface: claude-code-cli
     max_output_tokens: 2000     # force concise plans
     temperature: 0              # deterministic planning
 
@@ -42,7 +42,7 @@ caching:
 
 # Fallback policy
 fallback:
-  # If Opus is down, PAUSE. Planning quality is critical, Sonnet insufficient.
+  # If Sonnet is down for planning, PAUSE. Opus escalation also unavailable.
   planner_down: pause_and_escalate
   # If Sonnet is down for implementation, PAUSE. Don't use Opus (too slow, hits timeout).
   implementer_down: pause_and_escalate
