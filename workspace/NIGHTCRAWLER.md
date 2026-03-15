@@ -40,19 +40,29 @@ PP=$(cat /tmp/nightcrawler-$LP-path 2>/dev/null || cat __NC_STATE_DIR__/project-
 ## Commands
 
 ### Session Control
+
+The word after `start` is the project name. Pass it through exactly as typed.
+
+- `start camello` → exec: `bash __NC_SCRIPTS__/start.sh camello`
+- `start camello --budget N` → exec: `bash __NC_SCRIPTS__/start.sh camello --budget N`
+- `start camello --budget 0` → exec: `bash __NC_SCRIPTS__/start.sh camello --budget 0`
+- `start camello --dry-run` → exec: `bash __NC_SCRIPTS__/start.sh camello --dry-run`
 - `start clout` → exec: `bash __NC_SCRIPTS__/start.sh clout`
 - `start clout --budget N` → exec: `bash __NC_SCRIPTS__/start.sh clout --budget N`
-- `start clout --budget 0` → exec: `bash __NC_SCRIPTS__/start.sh clout --budget 0`
-- `start clout --dry-run` → exec: `bash __NC_SCRIPTS__/start.sh clout --dry-run`
+- Any other `start X ...` → exec: `bash __NC_SCRIPTS__/start.sh X ...` (pass all args through)
 - `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`
 
 ### Write Actions (require explicit project)
+- `install camello` → exec: `bash __NC_SCRIPTS__/diagnose.sh camello --install`
 - `install clout` → exec: `bash __NC_SCRIPTS__/diagnose.sh clout --install`
+- Any other `install X` → exec: `bash __NC_SCRIPTS__/diagnose.sh X --install`
 - `skip <id>` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; mkdir -p /tmp/nightcrawler/$AP && echo "<id>" >> /tmp/nightcrawler/$AP/skip && echo "Skipping <id>"`
 
 ### Diagnostics
 - `diagnose` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; bash __NC_SCRIPTS__/diagnose.sh $AP`
+- `diagnose camello` → exec: `bash __NC_SCRIPTS__/diagnose.sh camello`
 - `diagnose clout` → exec: `bash __NC_SCRIPTS__/diagnose.sh clout`
+- Any other `diagnose X` → exec: `bash __NC_SCRIPTS__/diagnose.sh X`
 
 ### Live State (lock first, then marker — no fallback)
 - `status` → exec: `AP=""; for lf in /tmp/nightcrawler-*.lock; do [ -f "$lf" ] && ! flock -n "$lf" true 2>/dev/null && AP=$(basename "$lf" | sed 's/nightcrawler-//;s/\.lock//') && break; done; if [ -z "$AP" ]; then AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); fi; if [ -z "$AP" ]; then echo "No active session"; else cat /tmp/nightcrawler-${AP}-status 2>/dev/null || echo "Session active ($AP) but no status yet"; fi`
