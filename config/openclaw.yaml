@@ -5,6 +5,9 @@
 # base_branch: the branch sessions must start from (checked at startup step 4).
 # path: absolute path to the project repo on the VPS.
 projects:
+  camello:
+    path: /home/nightcrawler/projects/camello
+    base_branch: main
   clout:
     path: /home/nightcrawler/projects/clout
     base_branch: main

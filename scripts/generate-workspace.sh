@@ -18,9 +18,9 @@ if [[ "${1:-}" == "--diff" ]]; then
     DIFF_MODE=true
 fi
 
-# Pre-flight
-if ! python3 -c "import yaml" 2>/dev/null; then
-    echo "ERROR: PyYAML is required. Install with: pip install pyyaml"
+# Pre-flight — PyYAML preferred but not required (regex fallback available)
+if ! python3 -c "pass" 2>/dev/null; then
+    echo "ERROR: Python3 is required."
     exit 1
 fi
 
@@ -29,13 +29,24 @@ if [[ ! -f "$YAML" ]]; then
     exit 1
 fi
 
-# Extract project names from openclaw.yaml
+# Extract project names from openclaw.yaml (PyYAML preferred, regex fallback)
 PROJECTS=$(python3 -c "
-import yaml
-with open('$YAML') as f:
-    data = yaml.safe_load(f) or {}
-projects = data.get('projects', {}) or {}
-print(' '.join(projects.keys()))
+import sys
+try:
+    import yaml
+    with open('$YAML') as f:
+        data = yaml.safe_load(f) or {}
+    projects = data.get('projects', {}) or {}
+    print(' '.join(projects.keys()))
+except ImportError:
+    import re
+    with open('$YAML') as f:
+        text = f.read()
+    m = re.search(r'^projects:\s*\n((?:[ \t]+\S.*\n)*)', text, re.MULTILINE)
+    if not m:
+        sys.exit(0)
+    names = re.findall(r'^  (\w+):', m.group(1), re.MULTILINE)
+    print(' '.join(names))
 ")
 
 if [[ -z "$PROJECTS" ]]; then
@@ -98,6 +109,9 @@ HEADER
 {
     echo ""
     echo "### Session Control"
+    echo ""
+    echo "The word after \`start\` is the project name. Pass it through exactly as typed."
+    echo ""
     for proj in $PROJECTS; do
         cat << EOF
 - \`start $proj\` → exec: \`bash __NC_SCRIPTS__/start.sh $proj\`
@@ -106,6 +120,7 @@ HEADER
 - \`start $proj --dry-run\` → exec: \`bash __NC_SCRIPTS__/start.sh $proj --dry-run\`
 EOF
     done
+    echo '- Any other `start X ...` → exec: `bash __NC_SCRIPTS__/start.sh X ...` (pass all args through)'
     echo '- `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`'
 
     echo ""
@@ -115,6 +130,7 @@ EOF
 - \`install $proj\` → exec: \`bash __NC_SCRIPTS__/diagnose.sh $proj --install\`
 EOF
     done
+    echo '- Any other `install X` → exec: `bash __NC_SCRIPTS__/diagnose.sh X --install`'
     echo '- `skip <id>` → exec: `AP=$(cat /tmp/nightcrawler-active-project 2>/dev/null | head -1); if [ -z "$AP" ]; then echo "No active session — specify project"; exit 0; fi; mkdir -p /tmp/nightcrawler/$AP && echo "<id>" >> /tmp/nightcrawler/$AP/skip && echo "Skipping <id>"`'
 } >> "$WORKSPACE"
 
@@ -128,6 +144,7 @@ EOF
 - \`diagnose $proj\` → exec: \`bash __NC_SCRIPTS__/diagnose.sh $proj\`
 EOF
     done
+    echo '- Any other `diagnose X` → exec: `bash __NC_SCRIPTS__/diagnose.sh X`'
 } >> "$WORKSPACE"
 
 # --- STATIC_FOOTER ---

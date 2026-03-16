@@ -49,6 +49,8 @@ The word after `start` is the project name. Pass it through exactly as typed.
 - `start camello --dry-run` → exec: `bash __NC_SCRIPTS__/start.sh camello --dry-run`
 - `start clout` → exec: `bash __NC_SCRIPTS__/start.sh clout`
 - `start clout --budget N` → exec: `bash __NC_SCRIPTS__/start.sh clout --budget N`
+- `start clout --budget 0` → exec: `bash __NC_SCRIPTS__/start.sh clout --budget 0`
+- `start clout --dry-run` → exec: `bash __NC_SCRIPTS__/start.sh clout --dry-run`
 - Any other `start X ...` → exec: `bash __NC_SCRIPTS__/start.sh X ...` (pass all args through)
 - `stop` → exec: `touch /tmp/nightcrawler-budget-kill && echo "Stop signal sent"`
 
