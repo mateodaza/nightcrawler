@@ -138,19 +138,18 @@ THROTTLE_WARNED=false       # true = already warned about approaching prompt lim
 
 log() { local msg="[$(date -u +%FT%TZ)] $*"; echo "$msg" >> "$SESSION_DIR/nightcrawler.log" 2>/dev/null; echo "$msg" >&2; }
 
-# Pipe prompt via stdin to avoid ARG_MAX on large prompts (135KB+ task queues).
-# Usage: call_claude "$prompt" --model sonnet --output-format json ...
-# Returns: raw claude output on stdout, exit code via $?
+# Pipe prompt via stdin to avoid ARG_MAX, with built-in timeout.
+# Usage: call_claude <timeout_secs> "$prompt" --model sonnet --output-format json ...
 call_claude() {
+    local tmo="$1"; shift
     local prompt="$1"; shift
     local tmpf="/tmp/nightcrawler-prompt.$$.$(date +%s%N)"
     printf '%s' "$prompt" > "$tmpf"
-    claude -p "$@" < "$tmpf"
+    timeout "$tmo" claude -p "$@" < "$tmpf"
     local rc=$?
     rm -f "$tmpf"
     return $rc
 }
-export -f call_claude
 
 run_timed() {
     local wall="$1" idle="$2"; shift 2
@@ -575,8 +574,8 @@ $(cat "$queue")"
     local pick_attempt
     for pick_attempt in 1 2 3; do
         set +e
-        raw_output=$(cd "$PROJECT_PATH" && timeout 60 \
-            call_claude "$prompt" \
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude 60 "$prompt" \
                 --model sonnet \
                 --output-format json \
                 --max-turns 1 2>"$claude_stderr")
@@ -728,8 +727,8 @@ Examples of good learnings:
 RESPOND WITH EXACTLY ONE LINE. No prefix, no quotes."
 
     local raw_output
-    raw_output=$(cd "$PROJECT_PATH" && timeout 30 \
-        call_claude "$learning_prompt" \
+    raw_output=$(cd "$PROJECT_PATH" && \
+        call_claude 30 "$learning_prompt" \
             --model sonnet \
             --output-format json \
             --max-turns 1 2>/dev/null) || return 0
@@ -822,8 +821,8 @@ Instructions:
     set +e
     local plan_model="${PLAN_MODEL:-sonnet}"
     log "Planning with model: $plan_model"
-    raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
-        call_claude "$prompt" \
+    raw_output=$(cd "$PROJECT_PATH" && \
+        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
             --model "$plan_model" \
             --output-format json \
             ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
@@ -900,8 +899,8 @@ Instructions:
     local claude_stderr="$SESSION_DIR/claude_planrev_${task_id}_${iteration}_stderr.log"
     set +e
     local plan_model="${PLAN_MODEL:-sonnet}"
-    raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
-        call_claude "$prompt" \
+    raw_output=$(cd "$PROJECT_PATH" && \
+        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
             --model "$plan_model" \
             --output-format json \
             ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
@@ -1084,8 +1083,8 @@ DECIDE:
 RESPOND WITH EXACTLY ONE WORD: CONTINUE or STOP"
 
     local raw_output
-    raw_output=$(cd "$PROJECT_PATH" && timeout 30 \
-        call_claude "$prompt" \
+    raw_output=$(cd "$PROJECT_PATH" && \
+        call_claude 30 "$prompt" \
             --model sonnet \
             --output-format json \
             --max-turns 1 2>/dev/null) || {
@@ -1260,8 +1259,8 @@ Instructions:
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_impl_${task_id}_stderr.log"
     set +e
-    raw_output=$(cd "$project_path" && timeout "$CLAUDE_CLI_TIMEOUT" \
-        call_claude "$prompt" \
+    raw_output=$(cd "$project_path" && \
+        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
             --model sonnet \
             --output-format json \
             ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
@@ -1320,8 +1319,8 @@ Instructions:
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_rev_${TASK_ID}_${iteration}_stderr.log"
     set +e
-    raw_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
-        call_claude "$prompt" \
+    raw_output=$(cd "$PROJECT_PATH" && \
+        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
             --model sonnet \
             --output-format json \
             ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
@@ -1967,8 +1966,8 @@ RULES:
         local repair_stderr="$SESSION_DIR/claude_repair_stderr.log"
         local repair_output repair_exit
         set +e
-        repair_output=$(cd "$PROJECT_PATH" && timeout "$CLAUDE_CLI_TIMEOUT" \
-            call_claude "$repair_prompt" \
+        repair_output=$(cd "$PROJECT_PATH" && \
+            call_claude "$CLAUDE_CLI_TIMEOUT" "$repair_prompt" \
                 --model sonnet \
                 --output-format json \
                 ${REPAIR_MAX_TURNS:+--max-turns $REPAIR_MAX_TURNS} 2>"$repair_stderr")
