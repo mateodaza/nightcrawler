@@ -150,6 +150,7 @@ call_claude() {
     rm -f "$tmpf"
     return $rc
 }
+export -f call_claude
 
 run_timed() {
     local wall="$1" idle="$2"; shift 2
