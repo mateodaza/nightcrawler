@@ -55,6 +55,7 @@ done
 PROJECT_DESC="software"         # e.g. "Solidity/Foundry", "Next.js/TypeScript"
 BUILD_CMD="make build"
 TEST_CMD="make test"
+INSTALL_CMD="make install"
 BUILD_WALL=120 BUILD_IDLE=60
 TEST_WALL=300  TEST_IDLE=120
 MAX_PLAN_ITERATIONS=10          # plan audit soft-reject cap (hard blocks + convergence catch real problems)
