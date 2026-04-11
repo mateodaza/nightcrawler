@@ -44,8 +44,32 @@ if [[ -f "$LOCKFILE" ]]; then
         echo "Cleared stale lock file"
         rm -f "$LOCKFILE"
     else
-        echo "FATAL: Another session is actively running (lock held by live process)"
-        exit 1
+        # Lock is held — check if the actual nightcrawler.sh session is alive
+        # If not, orphaned children (esbuild, vitest workers) inherited fd 200 and
+        # are keeping the lock alive after the parent died.
+        NC_PIDS=$(pgrep -f "nightcrawler\.sh $PROJECT" 2>/dev/null || true)
+        if [[ -z "$NC_PIDS" ]]; then
+            echo "Lock held but no live nightcrawler.sh for $PROJECT — orphaned children. Cleaning up..."
+            if command -v fuser &>/dev/null; then
+                fuser -k "$LOCKFILE" 2>/dev/null || true
+            else
+                # fuser not available — try lsof
+                for pid in $(lsof -t "$LOCKFILE" 2>/dev/null || true); do
+                    kill -9 "$pid" 2>/dev/null || true
+                done
+            fi
+            sleep 1
+            if nc_flock_test "$LOCKFILE"; then
+                echo "Cleared orphaned lock"
+                rm -f "$LOCKFILE"
+            else
+                echo "FATAL: Could not clear lock even after killing orphans"
+                exit 1
+            fi
+        else
+            echo "FATAL: Another session is actively running (PIDs: $NC_PIDS)"
+            exit 1
+        fi
     fi
 fi
 
