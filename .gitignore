@@ -18,3 +18,7 @@ scripts/_pycache/
 
 # Don't ignore sessions — they're the audit trail
 # Don't ignore memory.md — it's persistent state
+
+# Local secrets / operator-side state
+.ssh-local/
+.claude/
