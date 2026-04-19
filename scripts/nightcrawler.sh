@@ -103,6 +103,13 @@ REVIEW_IDLE_TIMEOUT="${REVIEW_IDLE_TIMEOUT:-0}"     # 0 = disabled
 # path byte-for-byte so nightly runs are unaffected until we flip this on.
 NC_USE_STREAM="${NC_USE_STREAM:-0}"
 
+# A5: MCP_CONNECTION_NONBLOCKING for the claude CLI. Claude 2.1.63 may or
+# may not honor this env var — keep off by default; flip on to measure
+# startup-time / MCP-bootstrap impact in NC-MEASURE-00. Scoped per-call
+# as a variable-assignment prefix so it never leaks into other commands.
+# See PLAN-stabilization.md A5.
+NC_MCP_NONBLOCKING="${NC_MCP_NONBLOCKING:-0}"
+
 # Strip API keys from environment — force both CLIs to use subscription auth.
 # Claude CLI uses `claude login` session; Codex CLI uses ~/.codex/config.json.
 unset ANTHROPIC_API_KEY 2>/dev/null || true
@@ -167,7 +174,12 @@ call_claude() {
     local prompt="$1"; shift
     local tmpf="/tmp/nightcrawler-prompt.$$.$(date +%s%N)"
     printf '%s' "$prompt" > "$tmpf"
-    timeout "$tmo" claude -p "$@" < "$tmpf"
+    # A5: env-var prefix applies only to this one command — never leaks.
+    if [[ "$NC_MCP_NONBLOCKING" == "1" ]]; then
+        MCP_CONNECTION_NONBLOCKING=true timeout "$tmo" claude -p "$@" < "$tmpf"
+    else
+        timeout "$tmo" claude -p "$@" < "$tmpf"
+    fi
     local rc=$?
     rm -f "$tmpf"
     return $rc
@@ -240,12 +252,20 @@ call_claude_streamed() {
     q_acc=$(printf '%q' "$SCRIPTS/lib/stream-accumulator.py")
     q_env=$(printf '%q' "$envelope_out")
 
+    # A5: variable-assignment prefix applied only to the claude process
+    # inside the pipeline. Scoped to a single invocation — does not leak
+    # into the accumulator or any sibling process.
+    local mcp_prefix=""
+    if [[ "$NC_MCP_NONBLOCKING" == "1" ]]; then
+        mcp_prefix="MCP_CONNECTION_NONBLOCKING=true "
+    fi
+
     set +e
     # Pipeline runs under run_with_timeout.py so wall+idle apply to the
     # WHOLE group (claude + accumulator). pipefail so a claude crash
     # propagates its exit code instead of being masked by the accumulator.
     python3 "$SCRIPTS/run_with_timeout.py" "$wall" "$idle_arg" \
-        bash -c "set -o pipefail; claude -p $claude_args_q --output-format stream-json --verbose < $q_prompt_file 2>>$q_cli_err | python3 $q_acc --envelope-out $q_env 2>>$q_acc_err" \
+        bash -c "set -o pipefail; ${mcp_prefix}claude -p $claude_args_q --output-format stream-json --verbose < $q_prompt_file 2>>$q_cli_err | python3 $q_acc --envelope-out $q_env 2>>$q_acc_err" \
         >/dev/null
     local rc=$?
     set -e
