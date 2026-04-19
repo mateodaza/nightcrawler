@@ -149,6 +149,13 @@ RULES:
 - If you cannot articulate a concrete `required_change` (specific file/line or function), the concern belongs in `advisories`, not `blocking_issues`. REJECT with vague concerns will be coerced to APPROVED.
 - `irrelevant[]` enumerates things you considered and chose not to flag — this is calibration data, list 0–3 items max.
 - `complexity_tier` is your observation; the orchestrator owns loop iteration caps regardless.
+
+CONFIDENCE — use it honestly, not as hedging:
+- "high"   — you can cite the specific file/line/AC that justifies the verdict.
+- "medium" — you have a working theory but one important piece is inferred, not observed.
+- "low"    — the decisive evidence is not in the pack (e.g. the file the task centres on is missing), or you had to guess at intent.
+  REJECTED + confidence=low + no concrete blocking_issues will be coerced to APPROVED with an advisory.
+  Do not REJECT just because the pack was thin — say so in `what_would_change_my_mind` and advise instead.
 """.strip()
 
 
@@ -307,13 +314,24 @@ def parse_structured_verdict(content: str) -> dict:
     })
 
     # Coercion rule: REJECTED with empty blocking_issues is a vague rejection.
+    # F2: if confidence is also 'low', tag it separately — that signals the
+    # reviewer bailed on a thin pack rather than hedging on a hunch.
     if v2["verdict"] == "REJECTED" and not v2["blocking_issues"]:
         v2["verdict"] = "APPROVED"
+        is_low_conf = v2["confidence"] == "low"
+        rationale = (
+            "Coerced to APPROVED per contract — low-confidence rejection with no "
+            "concrete blocking_issues; likely a thin pack rather than a real blocker."
+            if is_low_conf else
+            "Coerced to APPROVED per contract — vague concerns must be advisories, not blockers."
+        )
         v2["advisories"] = v2["advisories"] + [{
             "note": "Auditor returned REJECTED with no concrete blocking_issues.",
-            "rationale": "Coerced to APPROVED per contract — vague concerns must be advisories, not blockers.",
+            "rationale": rationale,
         }]
         violations.append("vague_rejection_coerced")
+        if is_low_conf:
+            violations.append("low_confidence_unfounded_rejection")
 
     if violations:
         v2["contract_violations"] = violations

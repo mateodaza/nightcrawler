@@ -1602,7 +1602,7 @@ plan_loop() {
         iteration=$((iteration + 1))
 
         run_audit "$plan_file" "$task_file"
-        journal '{"event":"plan_audited","task_id":"'"$task_id"'","verdict":"'"$AUDIT_VERDICT"'","iteration":'"$iteration"'}'
+        journal '{"event":"plan_audited","task_id":"'"$task_id"'","verdict":"'"$AUDIT_VERDICT"'","iteration":'"$iteration"',"confidence":"'"${AUDIT_CONFIDENCE:-unknown}"'","complexity_tier":"'"${AUDIT_COMPLEXITY_TIER:-UNKNOWN}"'"}'
 
         if [[ "$AUDIT_VERDICT" == "APPROVED" ]]; then
             PLAN_AUDIT_MODE="approved"
@@ -2115,7 +2115,7 @@ Resume from here and finish the remaining work.")
 
         run_review "$plan_file"
         reviews_reached=$((reviews_reached + 1))
-        journal '{"event":"impl_reviewed","task_id":"'"$task_id"'","verdict":"'"$REVIEW_VERDICT"'","iteration":'"$iteration"'}'
+        journal '{"event":"impl_reviewed","task_id":"'"$task_id"'","verdict":"'"$REVIEW_VERDICT"'","iteration":'"$iteration"',"confidence":"'"${REVIEW_CONFIDENCE:-unknown}"'","complexity_tier":"'"${REVIEW_COMPLEXITY_TIER:-UNKNOWN}"'"}'
 
         if [[ "$REVIEW_VERDICT" != "APPROVED" ]]; then
             # Classify rejection

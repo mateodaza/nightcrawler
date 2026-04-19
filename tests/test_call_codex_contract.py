@@ -173,10 +173,65 @@ def test_persona_loader_reads_project_file() -> None:
            persona_camello[:200])
 
 
+def test_low_confidence_rejection_coerced() -> None:
+    """F2: REJECTED + confidence=low + empty blocking_issues should coerce
+    with a distinct 'low_confidence_unfounded_rejection' violation flag, so
+    the journal can distinguish 'thin pack' from 'hedging' in analysis later.
+    """
+    print("\n[test] REJECTED + confidence=low + empty blocking -> coerced, flagged as low-confidence")
+    src = json.dumps({
+        "verdict": "REJECTED",
+        "blocking_issues": [],
+        "advisories": [],
+        "irrelevant": [],
+        "complexity_tier": "STANDARD",
+        "confidence": "low",
+        "why_confident": "the pack did not contain the target file",
+        "what_would_change_my_mind": "access to apps/web/src/app/agent/page.tsx",
+        "schema_version": 2,
+    })
+    out = call_codex.parse_structured_verdict(src)
+    _check("verdict coerced to APPROVED", out["verdict"] == "APPROVED")
+    _check("vague_rejection_coerced still fires",
+           "vague_rejection_coerced" in out.get("contract_violations", []))
+    _check("low_confidence_unfounded_rejection also fires (F2 distinguisher)",
+           "low_confidence_unfounded_rejection" in out.get("contract_violations", []))
+    _check("advisory rationale mentions thin pack",
+           any("thin pack" in (a.get("rationale", "") or "").lower()
+               for a in out["advisories"]),
+           str(out["advisories"]))
+
+
+def test_medium_confidence_rejection_not_double_flagged() -> None:
+    """Guardrail: the existing vague_rejection_coerced path must keep working
+    without picking up the low-confidence flag when confidence is not 'low'.
+    """
+    print("\n[test] REJECTED + confidence=medium + empty blocking -> coerced WITHOUT low-conf flag")
+    src = json.dumps({
+        "verdict": "REJECTED",
+        "blocking_issues": [],
+        "advisories": [],
+        "irrelevant": [],
+        "complexity_tier": "STANDARD",
+        "confidence": "medium",
+        "why_confident": "a feeling",
+        "what_would_change_my_mind": "idk",
+        "schema_version": 2,
+    })
+    out = call_codex.parse_structured_verdict(src)
+    _check("verdict coerced to APPROVED", out["verdict"] == "APPROVED")
+    _check("vague_rejection_coerced fires",
+           "vague_rejection_coerced" in out.get("contract_violations", []))
+    _check("low_confidence_unfounded_rejection does NOT fire",
+           "low_confidence_unfounded_rejection" not in out.get("contract_violations", []))
+
+
 def main() -> int:
     test_approved_passthrough()
     test_rejected_concrete_preserved()
     test_vague_rejection_coerced()
+    test_low_confidence_rejection_coerced()
+    test_medium_confidence_rejection_not_double_flagged()
     test_fence_stripping()
     test_v1_fallback_rejected()
     test_v1_fallback_approved()
