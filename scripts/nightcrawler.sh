@@ -1363,7 +1363,7 @@ audit_plan_call() {
     local raw_output exit_code
     set +e
     raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" \
-        NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-}" \
+        NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-1}" \
         NC_LOG_AUDIT_PROMPT="${NC_LOG_AUDIT_PROMPT:-}" \
         NIGHTCRAWLER_STATE_PATH="$STATE_DIR" \
         timeout "$CODEX_CALL_TIMEOUT" \
@@ -1885,7 +1885,7 @@ review_impl() {
     local raw_output exit_code
     set +e
     raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" \
-        NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-}" \
+        NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-1}" \
         NC_LOG_AUDIT_PROMPT="${NC_LOG_AUDIT_PROMPT:-}" \
         NIGHTCRAWLER_STATE_PATH="$STATE_DIR" \
         timeout "$CODEX_CALL_TIMEOUT" \
