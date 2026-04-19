@@ -50,8 +50,10 @@ DEFAULT_TOTAL_BUDGET = (
 )
 
 # Per-file excerpt cap. Files above this are summarized (head 100 lines +
-# sentinel + tail 50 lines).
-PER_FILE_EXCERPT_CAP = 5000
+# sentinel + tail 50 lines). Kept well under FILE_EXCERPTS_BUDGET so no
+# single file can dominate the section — observed NC-390 (Apr 2026) where
+# a 5 KB summary evicted two decisive .tsx files before they were reached.
+PER_FILE_EXCERPT_CAP = 2500
 
 # Keyword discovery caps — keep grep bounded on large repos.
 MAX_KEYWORDS = 20
@@ -107,6 +109,17 @@ EXCLUDED_NAMES = {
     "uv.lock",
     "composer.lock",
     "Gemfile.lock",
+}
+
+# Orchestrator-owned bookkeeping files. These legitimately appear in
+# `git diff --name-only` for every nightcrawler task because the loop
+# updates them itself. In impl_review they crowd out the actual
+# implementation files, so we demote them to the lowest rank instead
+# of giving them diff_rank=1. Not excluded entirely — the reviewer
+# occasionally wants to see what was recorded.
+BOOKKEEPING_FILES = {
+    "PROGRESS.md",
+    "TASK_QUEUE.md",
 }
 
 # Extensions we treat as readable text. Non-matching files are filtered out of
@@ -611,6 +624,15 @@ def build_pack(
                 excluded.append(ExcludedCandidate(
                     norm, "excluded by path rule (vendor/build/state)"))
                 continue
+            # Bookkeeping files are orchestrator-owned — they appear in
+            # the diff for every task. Demote to lowest rank so real
+            # implementation files get budget first.
+            if Path(norm).name in BOOKKEEPING_FILES:
+                rank_map.append(
+                    (99, norm,
+                     "bookkeeping file (orchestrator-owned; demoted in impl_review)")
+                )
+                continue
             rank_map.append(
                 (diff_rank, norm, "appears in git diff (changed file)")
             )
@@ -661,12 +683,30 @@ def build_pack(
         )
         block = header + excerpt + "\n"
         if excerpts_used + len(block) > FILE_EXCERPTS_BUDGET:
-            excluded.append(ExcludedCandidate(
-                e.path,
-                f"skipped: file-excerpts budget exhausted "
-                f"({excerpts_used}/{FILE_EXCERPTS_BUDGET} bytes)",
-            ))
-            continue
+            # Truncate-to-fit: if at least ~500 bytes of slack remain,
+            # include a truncated version rather than dropping the entry
+            # outright. A half-file of a decisive .tsx beats a full file
+            # of noise. Below 500 bytes it's not worth the header overhead.
+            remaining = FILE_EXCERPTS_BUDGET - excerpts_used
+            if remaining < 500:
+                excluded.append(ExcludedCandidate(
+                    e.path,
+                    f"skipped: file-excerpts budget exhausted "
+                    f"({excerpts_used}/{FILE_EXCERPTS_BUDGET} bytes)",
+                ))
+                continue
+            truncated_marker = "\n... [TRUNCATED — pack budget]"
+            room_for_excerpt = remaining - len(header) - len(truncated_marker) - 1
+            if room_for_excerpt <= 0:
+                excluded.append(ExcludedCandidate(
+                    e.path,
+                    f"skipped: file-excerpts budget exhausted "
+                    f"({excerpts_used}/{FILE_EXCERPTS_BUDGET} bytes)",
+                ))
+                continue
+            excerpt = excerpt[:room_for_excerpt] + truncated_marker
+            block = header + excerpt + "\n"
+            summarized = True  # mark as summarized when budget-truncated
         excerpt_parts.append(block)
         e.bytes = len(block)
         e.excerpt = excerpt

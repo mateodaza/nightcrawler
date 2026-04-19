@@ -473,6 +473,105 @@ def test_budget_sub_section_isolated() -> None:
                "// small" in out["text"], "")
 
 
+def test_bookkeeping_files_demoted_in_impl_review() -> None:
+    """Orchestrator-owned PROGRESS.md/TASK_QUEUE.md in changed_files should
+    get the lowest rank so real implementation files aren't evicted by them.
+    Regression for NC-390 (Apr 2026) where impl_review pack was 100% PROGRESS.md.
+    """
+    print("\n[test] bookkeeping files demoted in impl_review (rank 99, not rank 1)")
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_project(Path(tmp), {
+            "src/component.tsx": "export const X = () => null;\n" * 20,
+            "PROGRESS.md": "# progress\n" * 50,
+            "TASK_QUEUE.md": "# queue\n" * 50,
+        })
+        pack = relevance_pack.build_pack(
+            task_text="## Task\nUpdate src/component.tsx to handle X.\n",
+            task_id="NC-TEST-BK",
+            phase="impl_review",
+            project_path=str(proj),
+            changed_files=["src/component.tsx", "PROGRESS.md", "TASK_QUEUE.md"],
+        )
+        by_path = _entries_by_path(pack["meta"])
+
+        _check("src/component.tsx is rank 1 (non-bookkeeping diff)",
+               by_path.get("src/component.tsx", {}).get("rank") == 1,
+               str(by_path.get("src/component.tsx")))
+
+        # Bookkeeping files either demoted (rank 99) or fully evicted by budget —
+        # either outcome satisfies the intent.
+        for bk in ("PROGRESS.md", "TASK_QUEUE.md"):
+            if bk in by_path:
+                _check(f"{bk} demoted to rank 99",
+                       by_path[bk]["rank"] == 99,
+                       f"got rank={by_path[bk]['rank']}")
+                _check(f"{bk} reason mentions bookkeeping",
+                       any("bookkeeping" in r for r in by_path[bk]["reasons"]),
+                       str(by_path[bk]["reasons"]))
+
+        paths_in_order = [e["file"] for e in pack["meta"]["entries"]]
+        if "PROGRESS.md" in paths_in_order:
+            _check("src/component.tsx ordered before PROGRESS.md",
+                   paths_in_order.index("src/component.tsx")
+                   < paths_in_order.index("PROGRESS.md"))
+
+
+def test_per_file_cap_prevents_single_file_domination() -> None:
+    """PER_FILE_EXCERPT_CAP now 2500 — three larger files should all fit
+    rather than one 5KB entry hogging the 7KB section budget.
+    Regression for NC-390 where en.json (5072B) evicted advisor/page.tsx
+    and test-chat-panel.tsx before they were reached.
+    """
+    print("\n[test] per-file cap lets 3 decisive files coexist")
+    big = "// filler keyword update handle component dismiss line\n" * 120
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_project(Path(tmp), {
+            "a.ts": big, "b.ts": big, "c.ts": big,
+        })
+        pack = relevance_pack.build_pack(
+            task_text=(
+                "## Task\nUpdate handle component dismiss.\n"
+                "## Files\n- a.ts\n- b.ts\n- c.ts\n"
+            ),
+            task_id="NC-TEST-CAP",
+            phase="plan_audit",
+            project_path=str(proj),
+        )
+        by_path = _entries_by_path(pack["meta"])
+        for name in ("a.ts", "b.ts", "c.ts"):
+            _check(f"{name} appears in pack (not evicted)",
+                   name in by_path,
+                   f"entries={list(by_path.keys())}")
+        for e in pack["meta"]["entries"]:
+            _check(f"{e['file']} excerpt respects 2500B cap (+header overhead)",
+                   e["bytes"] < 3000,
+                   f"got {e['bytes']}B")
+
+
+def test_truncate_to_fit_preserves_last_entry() -> None:
+    """When an entry would exceed remaining budget, truncate to fit rather
+    than drop — a half-file of a decisive .tsx beats a full file of noise.
+    """
+    print("\n[test] truncate-to-fit preserves last entry instead of all-or-nothing evict")
+    big = "// filler keyword update handle component dismiss line\n" * 120
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_project(Path(tmp), {
+            "a.ts": big, "b.ts": big, "c.ts": big, "d.ts": big,
+        })
+        pack = relevance_pack.build_pack(
+            task_text=(
+                "## Task\nUpdate handle component dismiss.\n"
+                "## Files\n- a.ts\n- b.ts\n- c.ts\n- d.ts\n"
+            ),
+            task_id="NC-TEST-TRUNC",
+            phase="plan_audit",
+            project_path=str(proj),
+        )
+        _check("TRUNCATED marker present in pack body",
+               "[TRUNCATED — pack budget]" in pack["text"],
+               pack["text"][-300:] if "TRUNCATED" not in pack["text"] else "")
+
+
 def main() -> int:
     test_task_files_rank1_plan_audit()
     test_inline_ref_picked_up()
@@ -486,6 +585,9 @@ def main() -> int:
     test_current_session_excluded_from_prior_findings()
     test_review_impl_picks_up_untracked_files()
     test_budget_sub_section_isolated()
+    test_bookkeeping_files_demoted_in_impl_review()
+    test_per_file_cap_prevents_single_file_domination()
+    test_truncate_to_fit_preserves_last_entry()
 
     print()
     if _FAIL:
