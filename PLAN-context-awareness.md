@@ -1,8 +1,30 @@
 # Plan: Pipeline Context Awareness
 
-> Status: DRAFT
+> Status: DRAFT (reviewed 2026-04-19 after Phase A + BCF — see compatibility pass below)
 > Date: March 9, 2026
 > Motivation: NC-221 (Camello) failed post-commit verification twice and locked — Sonnet re-implemented blind with zero error context. Broader audit shows multiple stages where useful information exists but isn't passed forward.
+
+---
+
+## Compatibility pass — 2026-04-19 (after Phase A + BCF)
+
+This plan predates Phase A (streaming/envelopes, shipped) and PLAN-phase-bcf.md (queue reconciliation + structured audit contract + grounded companion). Per-phase verdicts:
+
+| Phase / Gap | Verdict | Notes |
+|---|---|---|
+| **Phase 1 — Post-commit `verify_errors`** (D1) | **unchanged** | Streaming fixed blind timeouts *during* impl; did not fix blind re-implementation *after* post-commit revert. The `verify_errors.txt` plumbing still doesn't exist. Highest-value item in this plan and still first-class. |
+| **Phase 2 — Audit feedback → impl** (D2) | **rewrite to consume B0** | B0 replaces raw `AUDIT_FEEDBACK` text with a structured contract. Inject `advisories[]`, `why_confident`, `what_would_change_my_mind` into `implement_task` — *not* the old flat text. |
+| **Phase 3 — Full feedback history** (D3) | **unchanged (minor format update)** | BCF does not give revision loops intra-loop memory. `feedbacks[]` now holds structured B0 objects; rendering loop unchanged conceptually. |
+| **Phase 4 — Session learnings → Codex** (D4) | **tombstoned — merged into F1** | Not a standalone phase. Becomes an implementation note under F1 (include session learnings file as an always-present pack entry). Body below is a one-paragraph tombstone; detailed spec preserved in git history. |
+| **Phase 5 — Skip reasons in picker** (D5) | **trimmed — operator skips only** | C0 owns the shipped-task case. D5's remaining scope: operator-initiated skips (`skip NC-XXX <reason>` from Telegram or manual edits). Everything about the "already-done" case is removed. |
+| **Phase 6 — Richer learnings** (D6) | **trimmed — learning synthesis only** | Reduced to post-task learning synthesis that consumes D1's `verify_errors.txt` + B0's structured audit + F1's `relevance_pack.meta.json`. Not a broad learnings initiative. Depends on D1 + B0 + F1 landing first. |
+| **Phase 7 — Codebase orientation / `orient_codebase`** (D7) | **tombstoned — merged into F1** | Not a standalone phase. Becomes a "session-wide summary" cached once per session and prepended to every F1 pack. Body below is a one-paragraph tombstone; detailed spec preserved in git history. |
+| **Phase 8 — Hardcoded Solidity refs** | **retired** | Fully retired from this plan. B0's per-project `audit-persona.md` is the canonical fix. |
+| **Phase 9 — `NC_DEV_BRANCH` / multi-instance** (D9) | **unchanged** | Orthogonal to BCF. See also PLAN-v3.md Tier 3.3 (duplicate spec of the same feature) — consolidate the specification here, remove from v3 roadmap. |
+
+**First-class after BCF:** D1, D3, D5 (trimmed to operator skips), D9. **Rewritten to consume BCF outputs:** D2. **Trimmed:** D6 (narrowed to learning synthesis). **Tombstoned — merged into F1:** D4, D7. **Retired:** D8.
+
+**Ship order after BCF MVP (C0 + F1 + F5):** D1 first (standalone, highest value). Then D3 (no BCF dependency). Then D2 + D6 together (both need B0 to exist first). Then D9 (fully independent).
 
 ---
 
@@ -205,64 +227,24 @@ Same treatment for `revise_plan()` in `plan_loop()`.
 
 ---
 
-## Phase 4: Session learnings → Codex (Gap #4)
+## Phase 4: Session learnings → Codex — TOMBSTONE (merged into F1 on 2026-04-19)
 
-Codex auditor and reviewer operate in isolation — they don't see patterns from earlier tasks. If task 3 discovered "always validate i18n keys exist in both locales," the reviewer for task 5 should know that.
+Originally specced as a separate bolt-on to pipe session learnings into Codex audits. On review after BCF: not a standalone phase. The session's learnings file becomes one of the always-included entries in every F1 relevance pack. See `PLAN-phase-bcf.md` → Phase F1 for the canonical implementation.
 
-### Changes
-
-**`call_codex.py`** — accept `--learnings` flag:
-```python
-def audit_plan(plan_file, task_file, rules_file, project_path=None, learnings_file=None):
-    learnings = ""
-    if learnings_file and Path(learnings_file).exists():
-        learnings = Path(learnings_file).read_text()[:2000]
-
-    # Inject into prompt:
-    audit_prompt = f"""...
-SESSION LEARNINGS (patterns discovered in earlier tasks this session — factor these in):
-{learnings}
-
-MINI-PLAN TO AUDIT:
-..."""
-```
-
-Same for `review_impl()`.
-
-**`nightcrawler.sh`** — pass learnings file to call_codex.py:
-```bash
-# In audit_plan_call():
-python3 "$SCRIPTS/call_codex.py" audit-plan \
-    --plan "$plan_file" \
-    --task-file "$task_file" \
-    --rules "$STATE_DIR/RULES.md" \
-    --project "$PROJECT_PATH" \
-    --learnings "$LEARNINGS_FILE"
-
-# In review_impl():
-python3 "$SCRIPTS/call_codex.py" review-impl \
-    --project "$PROJECT_PATH" \
-    --plan "$plan_file" \
-    --rules "$STATE_DIR/RULES.md" \
-    --learnings "$LEARNINGS_FILE"
-```
-
-### Files modified
-- `scripts/call_codex.py`: `audit_plan()`, `review_impl()`, argparse
-- `scripts/nightcrawler.sh`: `audit_plan_call()`, `review_impl()`
+No action required from this plan. Detailed original spec preserved in git history.
 
 ---
 
-## Phase 5: Skip reasons in task picker (Gap #5)
+## Phase 5: Skip reasons in task picker (operator-initiated skips only)
 
-Currently the skip file is just task IDs. The picker sees "NC-221 was skipped" but not why. Adding the reason helps it avoid picking tasks that will fail for the same reason.
+**Scope narrowed 2026-04-19:** C0 (PLAN-phase-bcf.md) owns the "task is already shipped" case via deterministic `[ ]` → `[x]` reconciliation — not the skip file. D5's remaining scope is **operator-initiated skips**: when a human tells Nightcrawler to skip a task (via `skip NC-XXX <reason>` from Telegram or by editing `$CONTROL_DIR/skip` manually), capture and surface the reason so the picker avoids re-offering semantically-linked tasks.
 
 ### Changes
 
-**Skip file format** — change from bare IDs to `ID: reason`:
+**Skip file format** — change from bare IDs to `ID: reason` (operator skips only):
 ```bash
-# In main loop, when skipping a task:
-echo "$TASK_ID: post-commit verify failed 2x (build error in i18n keys)" >> "$CONTROL_DIR/skip"
+# When an operator issues a skip command:
+echo "$TASK_ID: $REASON" >> "$CONTROL_DIR/skip"
 ```
 
 **`pick_next_task()`** — already reads the skip file into the prompt. No change needed — the picker will naturally see the reasons.
@@ -270,209 +252,74 @@ echo "$TASK_ID: post-commit verify failed 2x (build error in i18n keys)" >> "$CO
 **Backward compat** — the task ID extraction regex (`grep -oP '^\S+'`) still works since the ID comes first.
 
 ### Files modified
-- `scripts/nightcrawler.sh`: all `echo "$TASK_ID" >> "$CONTROL_DIR/skip"` lines (~8 occurrences) — append reason
+- `scripts/nightcrawler.sh`: operator-skip call sites (exclude the post-commit-verify-failed auto-skip path — C0 covers that differently).
+- OpenClaw bot / Telegram command handler for `skip <id> <reason>` input.
 
 ---
 
-## Phase 6: Richer learnings (Gap #6)
+## Phase 6: Learning synthesis from BCF outputs (scope narrowed)
 
-Current learning prompt only sees diff stats. The real lessons come from *why* things failed — reviewer feedback, build errors, plan concerns.
+**Scope narrowed 2026-04-19:** reduced from a broad "richer learnings initiative" to **post-task learning synthesis** that consumes structured evidence the BCF pipeline already produces. Not a new context-gathering system. The learning prompt reads:
+
+- **D1 output:** `verify_errors.txt` (post-commit build/test failures, if any)
+- **B0 output:** the final-iteration structured audit/review — specifically `blocking_issues[]` (what was hard-rejected and fixed) and `irrelevant[]` (what the reviewer considered and chose to skip)
+- **F1 output:** the corresponding `relevance_pack.meta.json` (what the reviewer actually looked at)
+
+### Dependencies
+
+Must land after D1 (verify_errors plumbing), B0 (structured contract), and F1 (pack + meta). Until all three exist, this is a no-op phase.
 
 ### Changes
 
-**`capture_task_learning()`** — include failure/feedback context:
+**`capture_task_learning()`** — consume BCF artifacts rather than re-gathering context:
+
 ```bash
 capture_task_learning() {
     local task_id="$1" commit_hash="$2"
-    ...
-    # Gather richer context
     local task_dir="$SESSION_DIR/tasks/$task_id"
-    local extra_context=""
-    if [[ -f "$task_dir/audit_feedback.txt" ]]; then
-        extra_context="${extra_context}\nAudit feedback: $(head -c 500 "$task_dir/audit_feedback.txt")"
-    fi
-    if [[ -f "$task_dir/verify_errors.txt" ]]; then
-        extra_context="${extra_context}\nVerification errors (before fix): $(head -c 500 "$task_dir/verify_errors.txt")"
-    fi
-    # Journal entries for this task (rejections, reverts)
-    local task_events
-    task_events=$(grep "$task_id" "$SESSION_DIR/journal.jsonl" | grep -E 'rejected|revert|hard_block' | tail -3)
-    if [[ -n "$task_events" ]]; then
-        extra_context="${extra_context}\nPipeline events: $task_events"
-    fi
+
+    # Pull structured evidence produced by BCF phases (read-only — no re-scanning)
+    local verify_errors="" b0_audit="" f1_meta=""
+    [[ -f "$task_dir/verify_errors.txt" ]]       && verify_errors=$(head -c 500 "$task_dir/verify_errors.txt")
+    [[ -f "$task_dir/audit_final.json" ]]        && b0_audit=$(jq -c '{blocking_issues, irrelevant}' "$task_dir/audit_final.json")
+    [[ -f "$task_dir/relevance_pack.meta.json" ]] && f1_meta=$(jq -c '.entries | map({file,reason}) | .[0:8]' "$task_dir/relevance_pack.meta.json")
 
     local learning_prompt="You just completed task $task_id.
 
-Diff summary:
-$diff_stat
-${extra_context}
+Diff summary: $diff_stat
 
-Write ONE line (max 120 chars) capturing the most useful technical insight..."
-```
+Verification errors (before fix): ${verify_errors:-none}
+Structured audit (final iteration): ${b0_audit:-n/a}
+Reviewer reading list: ${f1_meta:-n/a}
 
-### Files modified
-- `scripts/nightcrawler.sh`: `capture_task_learning()`
-
----
-
-## Phase 7: Pre-session codebase orientation (Gap #7)
-
-**New concept:** Before picking the first task, run a lightweight Sonnet call that reads the codebase and produces a `session_context.md` — a summary of conventions, patterns, known issues, and architecture. This gets injected into every subsequent prompt as baseline awareness.
-
-This replaces the current pattern where Sonnet must discover conventions during each planning turn (wasting turns reading files it could have already summarized).
-
-### Changes
-
-**New function `orient_codebase()`:**
-```bash
-orient_codebase() {
-    local context_file="$SESSION_DIR/codebase_context.md"
-
-    local prompt="You are preparing context for an autonomous coding session on a ${PROJECT_DESC} project.
-
-Read the codebase and produce a CONCISE orientation document (max 80 lines) covering:
-
-1. KEY ARCHITECTURE: main entry points, how modules connect, data flow
-2. CONVENTIONS: naming patterns, import style, test patterns, error handling
-3. KNOWN ISSUES: any TODOs, FIXMEs, or incomplete implementations
-4. DEPENDENCY VERSIONS: framework versions, key library versions
-5. BUILD/TEST NOTES: anything non-obvious about the build or test setup
-
-MANDATORY READS:
-- .claude/CLAUDE.md (project conventions)
-- package.json / Cargo.toml / pyproject.toml (deps and scripts)
-- src/ directory structure
-- test/ directory structure
-- Any config files (tsconfig, foundry.toml, etc.)
-
-Be specific. Name files, functions, patterns. This document will be injected into every prompt for the rest of the session — make it count.
-
-Output ONLY the orientation document. No preamble."
-
-    log "Running codebase orientation..."
-    local raw_output exit_code
-    set +e
-    raw_output=$(cd "$PROJECT_PATH" && timeout 120 \
-        claude -p "$prompt" \
-            --model opus \
-            --output-format json \
-            --max-turns 3 2>/dev/null)
-    exit_code=$?
-    set -e
-
-    if [[ $exit_code -eq 0 ]]; then
-        local content
-        content=$(echo "$raw_output" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('result', ''))
-except:
-    print('')
-" 2>/dev/null)
-
-        if [[ -n "$content" && ${#content} -gt 100 ]]; then
-            echo "$content" > "$context_file"
-            log "Codebase orientation written (${#content} chars)"
-            log_claude_cli_cost "$raw_output" "orientation" "orientation"
-            return 0
-        fi
-    fi
-
-    log "Codebase orientation failed or empty — proceeding without"
-    return 0  # Non-fatal
+Write ONE line (max 120 chars) capturing the most useful technical insight this task produced. Prefer insights grounded in the audit's blocking_issues or irrelevant bucket over generic observations."
 }
 ```
 
-**New function `get_codebase_context()`:**
-```bash
-get_codebase_context() {
-    local context_file="$SESSION_DIR/codebase_context.md"
-    [[ -f "$context_file" ]] || return
-    local content
-    content=$(cat "$context_file" 2>/dev/null)
-    [[ -z "$content" ]] && return
-    echo "
-CODEBASE CONTEXT (from session orientation — use this as baseline knowledge):
-$content
-"
-}
-```
-
-**Injection points** — add `$(get_codebase_context)` to:
-- `plan_task()` prompt
-- `implement_task()` prompt
-- `revise_plan()` prompt
-- `revise_impl()` prompt
-
-**Call site** — in `main_loop()`, after baseline but before first `pick_next_task`:
-```bash
-# After baseline health check, before main while loop:
-orient_codebase
-```
-
-### Cost impact
-One extra Sonnet call per session (3 turns max, ~120s). Pays for itself by reducing file-reading turns in every subsequent plan/implement call.
-
 ### Files modified
-- `scripts/nightcrawler.sh`: new `orient_codebase()`, new `get_codebase_context()`, inject into 4 prompt functions, call in `main_loop()`
+- `scripts/nightcrawler.sh`: `capture_task_learning()` consumes BCF artifacts, no new context gathering.
 
 ---
 
-## Phase 8: Hardcoded "Solidity/Foundry" references (Gap #0 — discovered during audit)
+## Phase 7: Pre-session codebase orientation — TOMBSTONE (merged into F1 on 2026-04-19)
 
-`call_codex.py` has "Solidity/Foundry project" hardcoded in every prompt. This is wrong for Camello (Next.js/TypeScript) and any future project. Should use `PROJECT_DESC` from config.
+Originally specced as a standalone `orient_codebase()` producing a per-session `codebase_context.md` injected into every prompt. On review after BCF: not a standalone phase. Implemented instead as a "session-wide summary" cached once per session and prepended to every F1 relevance pack. Prevents two parallel context-builder projects (F1's selector + this one). See `PLAN-phase-bcf.md` → Phase F1 for the canonical implementation.
 
-### Changes
-
-**`nightcrawler.sh`** — pass project description to call_codex.py:
-```bash
-# In audit_plan_call() and review_impl():
-python3 "$SCRIPTS/call_codex.py" audit-plan \
-    --plan "$plan_file" \
-    --task-file "$task_file" \
-    --rules "$STATE_DIR/RULES.md" \
-    --project "$PROJECT_PATH" \
-    --project-desc "$PROJECT_DESC"
-```
-
-**`call_codex.py`** — accept `--project-desc` and use it in prompts:
-```python
-# Replace all "Solidity/Foundry project" with f"{project_desc} project"
-# Default: "software" if not provided
-```
-
-### Files modified
-- `scripts/call_codex.py`: all prompt strings, argparse
-- `scripts/nightcrawler.sh`: `audit_plan_call()`, `review_impl()`
+No action required from this plan. Detailed original spec preserved in git history.
 
 ---
 
-## Implementation Order
+## Phase 8: Hardcoded "Solidity/Foundry" references — RETIRED (2026-04-19)
 
-| Phase | Gap | Risk | Effort | Dependencies |
-|-------|-----|------|--------|-------------|
-| 1 | Post-commit error feedback | LOW | Small | None |
-| 2 | Audit feedback → impl | LOW | Small | None |
-| 3 | Full feedback history | LOW | Small | None |
-| 8 | Hardcoded Solidity refs | LOW | Small | None |
-| 5 | Skip reasons | LOW | Tiny | None |
-| 4 | Learnings → Codex | LOW | Medium | None |
-| 6 | Richer learnings | LOW | Small | Phase 1, 2 (uses their output files) |
-| 7 | Codebase orientation | MEDIUM | Medium | None (but adds 1 prompt/session cost) |
+Fully retired. Superseded by BCF B0, which replaces the hardcoded persona with per-project `config/projects/<project>/audit-persona.md`. See `PLAN-phase-bcf.md` → Phase B0.
 
-Phases 1-3, 5, 8 are independent — can be implemented in any order or parallel.
-Phase 6 depends on Phases 1-2 (reads their output files).
-Phase 7 is standalone but highest risk (new prompt, cost increase).
+No action required from this plan.
 
 ---
 
-## Testing
+## Implementation Order (superseded — see consolidated table below after Phase 9)
 
-1. **Syntax check**: `bash -n scripts/nightcrawler.sh` + `python3 -m py_compile scripts/call_codex.py`
-2. **Dry run**: `start.sh <project> --budget 1 --dry-run` — exercises plan + audit with new context
-3. **Single task**: `--budget 3` on a known-failing task (one that triggers post-commit revert) to verify error feedback flows
-4. **Full session**: `--budget 0` overnight, compare task completion rate vs previous sessions
+*Original per-phase table removed 2026-04-19 after the compatibility pass retired Phase 8 and tombstoned Phases 4 and 7. Single consolidated table lives after Phase 9.*
 
 ---
 
@@ -544,23 +391,26 @@ DEV_BRANCH="${NC_DEV_BRANCH:-nightcrawler/dev}"
 
 ---
 
-## Implementation Order
+## Implementation Order (post-2026-04-19 cut list)
 
 | Phase | Gap | Risk | Effort | Dependencies |
 |-------|-----|------|--------|-------------|
-| 1 | Post-commit error feedback | LOW | Small | None |
-| 2 | Audit feedback → impl | LOW | Small | None |
-| 3 | Full feedback history | LOW | Small | None |
-| 8 | Hardcoded Solidity refs | LOW | Small | None |
-| 5 | Skip reasons | LOW | Tiny | None |
-| 9 | Configurable dev branch | LOW | Small | None |
-| 4 | Learnings → Codex | LOW | Medium | None |
-| 6 | Richer learnings | LOW | Small | Phase 1, 2 (uses their output files) |
-| 7 | Codebase orientation | MEDIUM | Medium | None (but adds 1 prompt/session cost) |
+| 1 | Post-commit error feedback (verify_errors.txt) | LOW | Small | None |
+| 2 | Audit feedback → impl (consumes B0 `audit_final.json`) | LOW | Small | BCF B0 |
+| 3 | Full feedback history | LOW | Small | Phase 2 |
+| 5 | Operator-initiated skips (with reason) | LOW | Tiny | None |
+| 6 | Learning synthesis | LOW | Small | Phase 1, 2; BCF B0 + F1 |
+| 9 | Configurable dev branch (NC_DEV_BRANCH) | LOW | Small | None — canonical spec lives here |
 
-Phases 1-3, 5, 8, 9 are independent — can be implemented in any order or parallel.
-Phase 6 depends on Phases 1-2 (reads their output files).
-Phase 7 is standalone but highest risk (new prompt, cost increase).
+Phases 1, 5, 9 are independent — can be implemented in any order or parallel.
+Phase 2 depends on BCF B0 shipping first (needs the structured audit JSON).
+Phase 3 depends on Phase 2 (reuses the same JSON files).
+Phase 6 depends on Phases 1-2 and BCF B0+F1 (reads their output files).
+
+**Retired / tombstoned (not in this table):**
+- Phase 4 — merged into F1 relevance pack.
+- Phase 7 — merged into F1 (session-wide summary cached once per session).
+- Phase 8 — retired; superseded by BCF B0 per-project audit persona.
 
 ---
 
@@ -571,6 +421,8 @@ Phase 7 is standalone but highest risk (new prompt, cost increase).
 3. **Single task**: `--budget 3` on a known-failing task (one that triggers post-commit revert) to verify error feedback flows
 4. **Multi-instance**: Run two sessions with different `NC_DEV_BRANCH` values on the same repo — verify no branch collision
 5. **Full session**: `--budget 0` overnight, compare task completion rate vs previous sessions
+
+(Testing for tombstoned phases — 4/7/8 — is no longer relevant; see BCF for F1/B0 test coverage.)
 
 ---
 

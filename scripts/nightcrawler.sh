@@ -804,6 +804,254 @@ mark_task_in_progress() {
     sed -i "s/${task_id} \[ \]/${task_id} [~]/" "$queue"
 }
 
+# -----------------------------------------------------------------------------
+# Queue reconciliation (C0) — detect tasks marked [ ] or [~] in TASK_QUEUE.md
+# that were actually shipped on nightcrawler/dev. See PLAN-phase-bcf.md Phase C.
+#
+# All behavior is gated on NC_RECONCILE_QUEUE (default off). scan_shipped_tasks
+# itself is pure (no mutation, no side effects) and safe to call any time.
+#
+# Two defense layers to be wired on top:
+#   * reconcile_queue()        — pre-pick, mutates TASK_QUEUE.md en masse.
+#   * verify_task_not_shipped()— post-pick, rejects a single stale pick.
+# -----------------------------------------------------------------------------
+
+# scan_shipped_tasks — walk $(merge-base BASE_BRANCH nightcrawler/dev)..nightcrawler/dev
+# and emit one "<source>|<task_id>|<sha>" line per commit that references a task.
+# Source is one of:
+#   trailer   — Nightcrawler-Task: <ID> git trailer (canonical; C1.5)
+#   subject   — parenthesised ID in commit subject, e.g. "feat(NC-017):"
+#   task_line — "Task: <ID>" line in commit body (legacy convention)
+# Commits that reference no ID are skipped silently. Order: oldest → newest.
+# Prints nothing (and returns 0) when the range is empty or the merge-base
+# cannot be resolved. Never mutates anything.
+scan_shipped_tasks() {
+    local base="${BASE_BRANCH:-main}"
+    local dev_branch="nightcrawler/dev"
+    local range_start
+
+    if ! range_start=$(git -C "$PROJECT_PATH" merge-base "$base" "$dev_branch" 2>/dev/null); then
+        # No merge-base (dev branch missing, repo too young, etc.) — nothing to scan.
+        return 0
+    fi
+
+    # One git log call. Record separator: 0x1e (RS). Field separator: 0x00 (NUL).
+    # Fields per commit: hash, subject, Nightcrawler-Task trailer value(s), body.
+    # Using NUL-delimited fields lets subjects/bodies contain arbitrary text safely.
+    git -C "$PROJECT_PATH" log --reverse \
+        --pretty=format:'%H%x00%s%x00%(trailers:key=Nightcrawler-Task,valueonly)%x00%b%x1e' \
+        "${range_start}..${dev_branch}" 2>/dev/null | \
+    python3 -c '
+import sys, re
+data = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+ID_RE          = re.compile(r"[A-Z]+-[0-9A-Z]+")
+SUBJ_PAREN_RE  = re.compile(r"\(([A-Z]+-[0-9A-Z]+)\)")
+TASK_LINE_RE   = re.compile(r"^Task:\s+([A-Z]+-[0-9A-Z]+)", re.MULTILINE)
+for rec in data.split("\x1e"):
+    rec = rec.lstrip("\n")
+    if not rec:
+        continue
+    parts = rec.split("\x00")
+    if len(parts) < 4:
+        continue
+    sha, subject, trailer, body = parts[0], parts[1], parts[2], parts[3]
+    tid, src = None, None
+    if trailer.strip():
+        m = ID_RE.search(trailer)
+        if m:
+            tid, src = m.group(0), "trailer"
+    if tid is None:
+        m = SUBJ_PAREN_RE.search(subject)
+        if m:
+            tid, src = m.group(1), "subject"
+    if tid is None:
+        m = TASK_LINE_RE.search(body)
+        if m:
+            tid, src = m.group(1), "task_line"
+    if tid:
+        print(f"{src}|{tid}|{sha}")
+'
+}
+
+# is_task_reopened <task_id> <shipped_sha>
+# Returns 0 (truthy) if an escape hatch fires and the task should NOT be
+# auto-flipped to [x] — three cases:
+#   1. A later commit in merge-base..dev reverts the shipped commit
+#      (by subject "Revert \"[nightcrawler] feat(<ID>)" or body mention
+#      of the SHA via `This reverts commit <sha>`).
+#   2. The queue line carries a literal `@reopened` sentinel.
+#   3. `git blame TASK_QUEUE.md` shows the task's line was edited after
+#      the shipped commit (human manually flipped [x] → [ ]).
+# Returns 1 if the task is cleanly shipped and safe to mark [x].
+is_task_reopened() {
+    local task_id="$1" shipped_sha="$2"
+    local base="${BASE_BRANCH:-main}"
+    local dev_branch="nightcrawler/dev"
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+
+    # Hatch 1: revert commit in the same range. -F = fixed-string search so
+    # we don't have to regex-escape the literals with brackets + parens.
+    local range_start
+    if range_start=$(git -C "$PROJECT_PATH" merge-base "$base" "$dev_branch" 2>/dev/null); then
+        local rev_hit
+        rev_hit=$(git -C "$PROJECT_PATH" log "${range_start}..${dev_branch}" \
+            -F \
+            --grep="Revert \"[nightcrawler] feat(${task_id})" \
+            --grep="This reverts commit ${shipped_sha}" \
+            --pretty=format:'%H' 2>/dev/null | head -1)
+        [[ -n "$rev_hit" ]] && return 0
+    fi
+
+    # Hatch 2: explicit @reopened sentinel on the task header line.
+    if [[ -f "$queue" ]] && grep -qE "^#+[[:space:]]+${task_id}[[:space:]]+\[.\].*@reopened" "$queue"; then
+        return 0
+    fi
+
+    # Hatch 3: blame timestamp for the task line is newer than the shipped commit.
+    if [[ -f "$queue" ]]; then
+        local line_sha
+        line_sha=$(git -C "$PROJECT_PATH" blame --porcelain -- "$queue" 2>/dev/null | \
+            awk -v id="$task_id" '
+                /^[a-f0-9]{40}/ { current=$1; next }
+                /^\t/ {
+                    content=substr($0,2)
+                    # Match the task header line — ID followed by space + bracket.
+                    if (index(content, id " [") > 0) { print current; exit }
+                }
+            ')
+        if [[ -n "$line_sha" ]] && [[ "$line_sha" != "$shipped_sha" ]]; then
+            local line_ts shipped_ts
+            line_ts=$(git -C "$PROJECT_PATH" log -1 --pretty=format:'%ct' "$line_sha" 2>/dev/null || echo "")
+            shipped_ts=$(git -C "$PROJECT_PATH" log -1 --pretty=format:'%ct' "$shipped_sha" 2>/dev/null || echo "")
+            if [[ -n "$line_ts" && -n "$shipped_ts" ]] && (( line_ts > shipped_ts )); then
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
+}
+
+# reconcile_queue [--dry-run]
+# Scans shipped task IDs and flips matching [ ]/[~] entries in TASK_QUEUE.md
+# to [x]. Applies escape hatches via is_task_reopened. Commits the change
+# on nightcrawler/dev and emits queue_reconciled + queue_reconcile_summary
+# journal events. Gated on NC_RECONCILE_QUEUE=1.
+reconcile_queue() {
+    [[ "${NC_RECONCILE_QUEUE:-0}" == "1" ]] || return 0
+
+    local dry_run=false
+    [[ "${1:-}" == "--dry-run" ]] && dry_run=true
+
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+    [[ -f "$queue" ]] || return 0
+
+    local flipped=0 unchanged=0 skipped=0
+    declare -A already_flipped=()
+
+    local source task_id sha
+    while IFS='|' read -r source task_id sha; do
+        [[ -z "$task_id" ]] && continue
+        # Dedupe — multiple commits can reference the same ID; flip once.
+        [[ -n "${already_flipped[$task_id]:-}" ]] && continue
+
+        # Only consider tasks currently marked [ ] or [~].
+        if ! grep -qE "^#+[[:space:]]+${task_id}[[:space:]]+\[[ ~]\]" "$queue"; then
+            unchanged=$((unchanged + 1))
+            continue
+        fi
+
+        if is_task_reopened "$task_id" "$sha"; then
+            journal '{"event":"reconcile_skipped","task_id":"'"$task_id"'","commit":"'"$sha"'","reason":"reverted_or_reopened"}'
+            skipped=$((skipped + 1))
+            already_flipped[$task_id]=1
+            continue
+        fi
+
+        if $dry_run; then
+            log "[reconcile dry-run] would flip $task_id → [x] (source=$source, sha=${sha:0:12})"
+        else
+            # Exact match: task_id followed by space + bracket — space boundary
+            # prevents NC-38 from matching NC-386 because the queue always has
+            # whitespace + [ after the ID.
+            sed -i -E "s/${task_id} \[[ ~]\]/${task_id} [x]/" "$queue"
+            journal '{"event":"queue_reconciled","task_id":"'"$task_id"'","source":"'"$source"'","commit":"'"$sha"'","ts":"'"$(date -u +%FT%TZ)"'"}'
+        fi
+        already_flipped[$task_id]=1
+        flipped=$((flipped + 1))
+    done < <(scan_shipped_tasks)
+
+    # Commit the queue update if anything changed.
+    if (( flipped > 0 )) && ! $dry_run; then
+        (
+            cd "$PROJECT_PATH" && git add TASK_QUEUE.md 2>/dev/null
+            if ! git -C "$PROJECT_PATH" diff --cached --quiet -- TASK_QUEUE.md; then
+                git -C "$PROJECT_PATH" commit -qm "[nightcrawler] chore: reconcile queue — mark ${flipped} task(s) shipped
+
+Session: ${SESSION_ID:-manual}" || log "reconcile_queue: commit failed (non-fatal)"
+            fi
+        )
+    fi
+
+    if (( flipped > 0 )) || (( skipped > 0 )); then
+        journal '{"event":"queue_reconcile_summary","flipped":'"$flipped"',"unchanged":'"$unchanged"',"skipped":'"$skipped"',"ts":"'"$(date -u +%FT%TZ)"'"}'
+        log "reconcile_queue: flipped=$flipped unchanged=$unchanged skipped=$skipped (dry_run=$dry_run)"
+    fi
+}
+
+# verify_task_not_shipped <task_id>
+# Post-pick guard: checks whether the chosen task has already shipped on
+# nightcrawler/dev. Exit codes:
+#   0 — safe to work on (not shipped, OR shipped-then-reverted/reopened)
+#   1 — cleanly shipped; caller should re-pick without spending LLM tokens
+# On detecting a cleanly-shipped task, marks it [x] in TASK_QUEUE.md in-place,
+# commits that queue fix immediately, and emits a queue_drift_caught journal
+# event. This keeps the queue correction durable and avoids leaking it into a
+# later unrelated task commit.
+#
+# Gated on NC_RECONCILE_QUEUE=1 — off by default.
+verify_task_not_shipped() {
+    [[ "${NC_RECONCILE_QUEUE:-0}" == "1" ]] || return 0
+
+    local task_id="$1"
+    [[ -z "$task_id" ]] && return 0
+
+    local shipped_sha="" source=""
+    local scan_src scan_tid scan_sha
+    while IFS='|' read -r scan_src scan_tid scan_sha; do
+        if [[ "$scan_tid" == "$task_id" ]]; then
+            shipped_sha="$scan_sha"
+            source="$scan_src"
+            break
+        fi
+    done < <(scan_shipped_tasks)
+
+    [[ -z "$shipped_sha" ]] && return 0
+
+    # Shipped — but check escape hatches before declaring stale.
+    if is_task_reopened "$task_id" "$shipped_sha"; then
+        log "verify_task_not_shipped: $task_id shipped but reverted/reopened — proceeding"
+        return 0
+    fi
+
+    # Cleanly shipped: mark done in-place and signal caller to re-pick.
+    local queue="$PROJECT_PATH/TASK_QUEUE.md"
+    if [[ -f "$queue" ]]; then
+        sed -i -E "s/${task_id} \[[ ~]\]/${task_id} [x]/" "$queue"
+        (
+            cd "$PROJECT_PATH" && git add TASK_QUEUE.md 2>/dev/null
+            if ! git -C "$PROJECT_PATH" diff --cached --quiet -- TASK_QUEUE.md; then
+                git -C "$PROJECT_PATH" commit -qm "[nightcrawler] chore: reconcile queue — mark ${task_id} shipped
+
+Session: ${SESSION_ID:-manual}" || log "verify_task_not_shipped: queue commit failed (non-fatal)"
+            fi
+        )
+    fi
+    journal '{"event":"queue_drift_caught","task_id":"'"$task_id"'","commit":"'"$shipped_sha"'","source":"'"$source"'","ts":"'"$(date -u +%FT%TZ)"'"}'
+    log "verify_task_not_shipped: $task_id already shipped (sha=${shipped_sha:0:12}, source=$source) — re-picking"
+    return 1
+}
+
 append_to_progress() {
     local task_id="$1" degraded_note="${2:-}"
     local progress="$PROJECT_PATH/PROGRESS.md"
@@ -1912,6 +2160,10 @@ Cost: \$${TASK_COST}"
         commit_msg="${commit_msg}
 Note: $(echo -e "$degraded_note" | head -1)"
     fi
+    # C1.5 canonical trailer — kept last so git's trailer parser sees it as a
+    # trailer block. scan_shipped_tasks prefers this over subject/task_line.
+    commit_msg="${commit_msg}
+Nightcrawler-Task: $task_id"
 
     git commit -m "$commit_msg" >/dev/null
     local hash
@@ -2379,10 +2631,37 @@ $remaining tasks | Budget: $budget_label"
 
 main_loop() {
     while true; do
+        # C0 pre-pick: reconcile TASK_QUEUE.md against shipped commits on
+        # nightcrawler/dev. No-op unless NC_RECONCILE_QUEUE=1.
+        reconcile_queue || log "reconcile_queue returned non-zero (non-fatal)"
+
         # Pick next task
         TASK_ID=$(pick_next_task)
         if [[ -z "$TASK_ID" ]]; then
             log "No eligible tasks remaining"
+            break
+        fi
+
+        # C0 post-pick guard: re-pick up to 3x if the chosen task is already
+        # shipped. Reconcile should catch most cases; this is the hard stop.
+        local stale_picks=0
+        while (( stale_picks < 3 )); do
+            if verify_task_not_shipped "$TASK_ID"; then
+                break
+            fi
+            stale_picks=$((stale_picks + 1))
+            TASK_ID=$(pick_next_task)
+            if [[ -z "$TASK_ID" ]]; then
+                break
+            fi
+        done
+        if (( stale_picks >= 3 )); then
+            log "3 consecutive stale picks — queue out of sync, ending session"
+            escalate_urgent "WARNING ($PROJECT): 3 consecutive stale picks; check queue reconciliation"
+            break
+        fi
+        if [[ -z "$TASK_ID" ]]; then
+            log "No eligible tasks remaining (after stale-pick retries)"
             break
         fi
 

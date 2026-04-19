@@ -1,8 +1,34 @@
 # Nightcrawler v3 — Roadmap
 
-> Status: DRAFT
+> Status: DRAFT (reviewed 2026-04-19 after Phase A + BCF — see compatibility pass below)
 > Date: March 7, 2026
 > Previous: Generalization complete (v2). Clout (30 tasks) + Camello onboarded. Pipeline proven.
+
+---
+
+## Compatibility pass — 2026-04-19 (after Phase A + BCF)
+
+This roadmap predates Phase A (streaming/envelopes, shipped) and PLAN-phase-bcf.md (queue reconciliation + structured audit contract + grounded companion). Per-item verdicts:
+
+| Tier / Item | Verdict | Notes |
+|---|---|---|
+| **1.1 Planning skill** (E1.1) | **unchanged + teach BCF trailer** | Skill must teach the `Nightcrawler-Task:` commit trailer introduced by BCF C1.5. Otherwise skill-authored tasks won't reconcile properly. Also teach "keep ACs loose around orchestrator-owned files" to avoid the NC-SMOKE class of over-strict spec. |
+| **1.2 `nightcrawler update`** (E1.2) | **expand to include reconcile** | Merge BCF C2's `nightcrawler reconcile` into `update`'s sequence: pull → regen → deploy → **reconcile per project** → report. One command, both flavors of sync. Otherwise we ship two adjacent out-of-band commands. |
+| **1.3 Auto-PR after session** (E1.3) | **unchanged (enrichment opportunity)** | PR body can optionally aggregate `advisories[]` and `irrelevant[]` from the session's structured audit outputs (B0) as a "notes from review" section. Nice-to-have, not blocking. |
+| **2.1 Smarter failure notifications** (E2.1) | **rewrite to consume B0** | Pull `blocking_issues[].required_change` and `what_would_change_my_mind` directly from the structured contract instead of parsing raw feedback. Dramatically cleaner alert content. |
+| **2.2 Session dashboard** (E2.2) | **unchanged** | Will naturally render richer BCF data (tier, confidence, advisories, irrelevant, pack metadata) without architectural change. Just more interesting once BCF ships. |
+| **2.3 `nightcrawler history`** (E2.3) | **unchanged** | Same as 2.2 — consumes richer journal data passively. |
+| **3.1 GitHub Issues sync** (E3.1) | **unchanged** | Independent. If sync generates tasks, it should emit them in the dialect E1.1's skill teaches (including trailer and orchestrator-owned-file hygiene). |
+| **3.2 Spec-to-queue pipeline** (E3.2) | **unchanged** | Depends on E1.1. |
+| **3.3 Multi-instance / `NC_DEV_BRANCH`** (E3.3) | **deleted — see D9** | Removed from this plan 2026-04-19 to prevent duplicate branch-plumbing specs. Canonical spec lives in PLAN-context-awareness.md Phase 9. |
+| **3.4 Parallel orchestration** (E3.4) | **unchanged** | Independent of BCF. |
+
+**First-class after BCF:** all Tier 1 items (with updates), all Tier 2 items, Tier 3.1, 3.2, 3.4. **Consolidated out:** 3.3 (lives in D9). No item becomes fully obsolete; several items (1.2, 2.1) become more valuable once BCF's structured outputs exist to consume.
+
+**Dependencies on BCF:**
+- E1.1 depends on C1.5 (trailer convention must exist before the skill teaches it).
+- E1.2 depends on C0 + C2 (reconcile function must exist before `update` can call it).
+- E2.1 depends on B0 (structured contract must exist before alerts can consume it).
 
 ---
 
@@ -351,28 +377,9 @@ You: "Read TECHNICAL_SPEC_v1.md and generate the full task queue for the project
 
 The agent reads the spec, breaks it into phases, generates tasks with acceptance criteria and dependencies, flags MANUAL items. You review the whole thing, iterate, commit. Same skill, bigger input.
 
-### 3.3 Multi-instance support
+### 3.3 Multi-instance support — DELETED (2026-04-19)
 
-**Why:** Two concurrent Nightcrawler instances on the same repo (e.g., two VPSes, local + VPS) currently collide — they push to the same `nightcrawler/dev` branch and clobber each other. Workspace commands (`log`, `progress`, `cost`, `queue`) are also hardcoded to the original VPS paths, so they break on any other machine.
-
-**What's done (prerequisite — shipped March 2026):**
-- `generate-workspace.sh` outputs portable `__NC_SCRIPTS__`/`__NC_STATE_DIR__` placeholders instead of hardcoded paths
-- `deploy-workspace.sh` substitutes real paths at deploy time per machine
-- `nightcrawler.sh` writes project path to both `/tmp` (fast) and `$STATE_DIR` (survives reboots)
-- Recovery: `git pull && bash nightcrawler/scripts/deploy-workspace.sh`
-
-**Remaining (v3 scope):**
-
-**`NC_DEV_BRANCH`** config variable in `.nightcrawler/config.sh`:
-```bash
-NC_DEV_BRANCH="nightcrawler/dev-vps1"  # default: "nightcrawler/dev"
-```
-
-`nightcrawler.sh` and `start.sh` replace ~20 hardcoded `nightcrawler/dev` references with `${NC_DEV_BRANCH:-nightcrawler/dev}`. Backward compatible — unset means existing behavior.
-
-`nightcrawler-init.sh` adds the commented variable to generated config templates so new instances know it exists.
-
-**Naming options:** manual (`nightcrawler/dev-vps1`) for clarity, or `nightcrawler/dev-$(hostname -s)` for auto-differentiation per machine.
+Removed from this plan to avoid duplicate branch-plumbing specs. The canonical `NC_DEV_BRANCH` / multi-instance specification lives in `PLAN-context-awareness.md` → Phase 9 (D9). Do not reintroduce it here.
 
 ### 3.4 Parallel project orchestration
 
@@ -404,9 +411,10 @@ run-all --budget 10
 | 7 | GitHub Issues sync | Medium (external API) | ~100 lines | `gh` on VPS |
 | 8 | Spec-to-queue | Zero (same skill, bigger input) | 0 lines | Phase 1 |
 | 9 | Parallel orchestration | Medium (coordination logic) | ~120 lines | — |
-| 10 | `NC_DEV_BRANCH` configurable branch | Low (20 replacements + config var) | ~25 lines | workspace path fix (done) |
 
 Phases 1-3 are the priority. Everything else can wait until they're proven.
+
+*Row 10 (`NC_DEV_BRANCH`) removed 2026-04-19 — see PLAN-context-awareness.md Phase 9 for the canonical spec.*
 
 ---
 
