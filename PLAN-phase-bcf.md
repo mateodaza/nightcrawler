@@ -6,6 +6,26 @@
 
 ---
 
+## Shipped log
+
+Last updated 2026-04-19. Pull `git log --oneline` for the authoritative view.
+
+| Phase | What | Commit |
+|---|---|---|
+| C0 | Deterministic shipped-task guard (reconcile + post-pick) | earlier |
+| B0 | Structured auditor contract v2 (verdict / blocking_issues / advisories / irrelevant / confidence / complexity_tier) | earlier |
+| F1 | Relevance pack builder + default-on flip | `75003fc` |
+| F1 ops | `nc_pack_health.py` one-screen canary monitor | `c25175c` |
+| F2 | Structured confidence guidance + low-conf coerce flag + journal enrichment | `def1353` |
+| F1 fix | Ranker: demote bookkeeping in impl_review + per-file cap 2500 + truncate-to-fit | `cf1d86f` |
+
+**Phase BCF MVP gate (per ship order below):** C0 + F1 + F5. F5 is the last remaining
+MVP piece — F2/F3 were taken out of order because live probe evidence surfaced F2's
+signal as the higher-priority unblocker. F3, F4, F6, B4 are all pending, with F3/F4
+explicitly held for next-live-run evidence before implementation.
+
+---
+
 ## Guiding principle
 
 > **Confidence should come from local evidence and prior project knowledge, not from global reviewer personality.**
