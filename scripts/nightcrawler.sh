@@ -82,6 +82,23 @@ REVIEW_WALL=180 REVIEW_IDLE=60
 CODEX_CALL_TIMEOUT=180  # wall-clock safety net for Codex (has internal timeouts)
 CLAUDE_CLI_TIMEOUT=3600 # wall-clock safety net for Claude Code CLI (60min — Opus planning can be slow)
 
+# -----------------------------------------------------------------------------
+# Streamed-path timeouts (Phase A, A1+A2). Used only when NC_USE_STREAM=1.
+# Wall caps are per-stage so a stuck implement doesn't consume the plan budget.
+# Idle caps are opt-in (default 0 = disabled) while we verify heartbeat behavior.
+# See PLAN-stabilization.md Phase A for rationale.
+PLAN_WALL_TIMEOUT="${PLAN_WALL_TIMEOUT:-1200}"      # 20min — per plan turn
+IMPL_WALL_TIMEOUT="${IMPL_WALL_TIMEOUT:-2400}"      # 40min — per implement/revise turn
+REVIEW_WALL_TIMEOUT="${REVIEW_WALL_TIMEOUT:-600}"   # 10min — reserved for future use
+PLAN_IDLE_TIMEOUT="${PLAN_IDLE_TIMEOUT:-0}"         # 0 = disabled
+IMPL_IDLE_TIMEOUT="${IMPL_IDLE_TIMEOUT:-0}"         # 0 = disabled
+REVIEW_IDLE_TIMEOUT="${REVIEW_IDLE_TIMEOUT:-0}"     # 0 = disabled
+
+# Dark-launch gate: set NC_USE_STREAM=1 to route plan/implement/revise through
+# the stream-accumulator. Default 0 preserves the legacy `claude ... --output-format json`
+# path byte-for-byte so nightly runs are unaffected until we flip this on.
+NC_USE_STREAM="${NC_USE_STREAM:-0}"
+
 # Strip API keys from environment — force both CLIs to use subscription auth.
 # Claude CLI uses `claude login` session; Codex CLI uses ~/.codex/config.json.
 unset ANTHROPIC_API_KEY 2>/dev/null || true
@@ -155,6 +172,89 @@ call_claude() {
 run_timed() {
     local wall="$1" idle="$2"; shift 2
     python3 "$SCRIPTS/run_with_timeout.py" "$wall" "$idle" bash -c "$*"
+}
+
+# -----------------------------------------------------------------------------
+# call_claude_streamed — Phase A (A1, A2, A3).
+#
+# Runs `claude -p --output-format stream-json --verbose` piped through
+# scripts/lib/stream-accumulator.py, wrapped in run_with_timeout.py for
+# wall + idle safety. stderr is split INSIDE the pipeline to per-stream
+# log files so neither claude's warnings nor the accumulator's diagnostics
+# can corrupt the JSON envelope on stdout.
+#
+# Usage:
+#   call_claude_streamed <wall> <idle> <envelope_out> <cli_stderr> <acc_stderr> <prompt> [claude_args...]
+#
+# Emits the final envelope JSON on stdout so existing callers can keep
+# using `raw_output=$(call_claude_streamed ...)`. When the pipeline is
+# killed by timeout/SIGKILL, the envelope-out file on disk holds the
+# latest partial snapshot (atomically written by the accumulator) and
+# this function cats that file to stdout so the caller always gets a
+# parseable JSON — natural or partial.
+#
+# Exit codes:
+#   0   natural completion (accumulator saw a result event)
+#   2   partial envelope (stream ended before result event)
+#   124 wall timeout (run_with_timeout.py)
+#   125 idle timeout (run_with_timeout.py)
+#   other — claude CLI or accumulator failure
+#
+# Idle ≤0 disables the idle check (clamps to wall). Opt into idle by
+# setting PLAN_IDLE_TIMEOUT / IMPL_IDLE_TIMEOUT / REVIEW_IDLE_TIMEOUT > 0
+# once heartbeat behavior has been verified in production.
+call_claude_streamed() {
+    local wall="$1" idle="$2" envelope_out="$3" cli_stderr="$4" acc_stderr="$5"
+    local prompt="$6"
+    shift 6
+
+    local tmpf
+    tmpf="/tmp/nightcrawler-prompt.$$.$(date +%s%N)"
+    printf '%s' "$prompt" > "$tmpf"
+
+    # Idle ≤0 means disabled — clamp to wall so idle cannot fire before wall.
+    local idle_arg="$idle"
+    if [[ -z "$idle_arg" ]] || [[ "$idle_arg" -le 0 ]]; then
+        idle_arg="$wall"
+    fi
+
+    # Shell-quote each claude arg for the bash -c subshell.
+    local claude_args_q=""
+    local a
+    for a in "$@"; do
+        claude_args_q+=" $(printf '%q' "$a")"
+    done
+
+    mkdir -p "$(dirname "$envelope_out")" "$(dirname "$cli_stderr")" "$(dirname "$acc_stderr")"
+    : > "$cli_stderr"
+    : > "$acc_stderr"
+
+    local q_prompt_file q_cli_err q_acc_err q_acc q_env
+    q_prompt_file=$(printf '%q' "$tmpf")
+    q_cli_err=$(printf '%q' "$cli_stderr")
+    q_acc_err=$(printf '%q' "$acc_stderr")
+    q_acc=$(printf '%q' "$SCRIPTS/lib/stream-accumulator.py")
+    q_env=$(printf '%q' "$envelope_out")
+
+    set +e
+    # Pipeline runs under run_with_timeout.py so wall+idle apply to the
+    # WHOLE group (claude + accumulator). pipefail so a claude crash
+    # propagates its exit code instead of being masked by the accumulator.
+    python3 "$SCRIPTS/run_with_timeout.py" "$wall" "$idle_arg" \
+        bash -c "set -o pipefail; claude -p $claude_args_q --output-format stream-json --verbose < $q_prompt_file 2>>$q_cli_err | python3 $q_acc --envelope-out $q_env 2>>$q_acc_err" \
+        >/dev/null
+    local rc=$?
+    set -e
+
+    rm -f "$tmpf"
+
+    # Emit the envelope for the caller. Authoritative for both natural
+    # and partial exits — the accumulator writes it atomically.
+    if [[ -f "$envelope_out" ]]; then
+        cat "$envelope_out"
+    fi
+
+    return $rc
 }
 
 journal() {
@@ -819,21 +919,43 @@ Instructions:
 
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_plan_${task_id}_stderr.log"
+    local acc_stderr="$SESSION_DIR/claude_plan_${task_id}_acc_stderr.log"
+    local envelope_path="${LAST_CLAUDE_JSON_PATH:-$SESSION_DIR/last_claude.${task_id}.plan.json}"
     set +e
     local plan_model="${PLAN_MODEL:-sonnet}"
-    log "Planning with model: $plan_model"
-    raw_output=$(cd "$PROJECT_PATH" && \
-        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
-            --model "$plan_model" \
-            --output-format json \
-            ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
+    log "Planning with model: $plan_model (stream=$NC_USE_STREAM)"
+    if [[ "$NC_USE_STREAM" == "1" ]]; then
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude_streamed \
+                "$PLAN_WALL_TIMEOUT" "$PLAN_IDLE_TIMEOUT" \
+                "$envelope_path" "$claude_stderr" "$acc_stderr" \
+                "$prompt" \
+                --model "$plan_model" \
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS})
+    else
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
+                --model "$plan_model" \
+                --output-format json \
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
+    fi
     exit_code=$?
     set -e
 
     log_claude_cli_cost "$raw_output" "$task_id" "planning"
 
     if [[ $exit_code -ne 0 ]]; then
-        log "Plan command failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        # Stream-only exit codes (125 idle, 2 partial) gated behind the flag.
+        if [[ "$NC_USE_STREAM" == "1" ]]; then
+            case $exit_code in
+                124) log "Plan wall-timed-out (${PLAN_WALL_TIMEOUT}s). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                125) log "Plan idle-timed-out (${PLAN_IDLE_TIMEOUT}s). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                2)   log "Plan stream ended without completion. stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                *)   log "Plan command failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+            esac
+        else
+            log "Plan command failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        fi
         log "Claude CLI stdout (first 500): ${raw_output:0:500}"
         return 1
     fi
@@ -895,23 +1017,45 @@ Instructions:
 - Do NOT create or modify any source files.
 "
 
-    log "Revising plan (iteration $iteration)"
+    log "Revising plan (iteration $iteration, stream=$NC_USE_STREAM)"
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_planrev_${task_id}_${iteration}_stderr.log"
+    local acc_stderr="$SESSION_DIR/claude_planrev_${task_id}_${iteration}_acc_stderr.log"
+    local envelope_path="${LAST_CLAUDE_JSON_PATH:-$SESSION_DIR/last_claude.${task_id}.planrev.${iteration}.json}"
     set +e
     local plan_model="${PLAN_MODEL:-sonnet}"
-    raw_output=$(cd "$PROJECT_PATH" && \
-        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
-            --model "$plan_model" \
-            --output-format json \
-            ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
+    if [[ "$NC_USE_STREAM" == "1" ]]; then
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude_streamed \
+                "$PLAN_WALL_TIMEOUT" "$PLAN_IDLE_TIMEOUT" \
+                "$envelope_path" "$claude_stderr" "$acc_stderr" \
+                "$prompt" \
+                --model "$plan_model" \
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS})
+    else
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
+                --model "$plan_model" \
+                --output-format json \
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
+    fi
     exit_code=$?
     set -e
 
     log_claude_cli_cost "$raw_output" "$task_id" "plan-revision"
 
     if [[ $exit_code -ne 0 ]]; then
-        log "Plan revision failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        # Stream-only exit codes (125 idle, 2 partial) gated behind the flag.
+        if [[ "$NC_USE_STREAM" == "1" ]]; then
+            case $exit_code in
+                124) log "Plan revision wall-timed-out (${PLAN_WALL_TIMEOUT}s)" ;;
+                125) log "Plan revision idle-timed-out (${PLAN_IDLE_TIMEOUT}s)" ;;
+                2)   log "Plan revision stream ended without completion" ;;
+                *)   log "Plan revision failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+            esac
+        else
+            log "Plan revision failed (exit $exit_code). stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        fi
         return 1
     fi
 
@@ -1130,6 +1274,14 @@ plan_loop() {
     PLAN_AUDIT_MODE="approved"
     CONSECUTIVE_STOPS=0  # reset for this loop
 
+    # A6: on the streamed path only, parent owns the envelope path so we
+    # can recover partial output from disk if the subshell is killed
+    # before it can echo. On the legacy path we keep LAST_CLAUDE_JSON_PATH
+    # unset so flag-off behavior is byte-identical.
+    unset LAST_CLAUDE_JSON_PATH
+    if [[ "$NC_USE_STREAM" == "1" ]]; then
+        LAST_CLAUDE_JSON_PATH="$SESSION_DIR/last_claude.${task_id}.plan.json"
+    fi
     plan_file=$(plan_task "$task_file" "$task_id") || return 1
     [[ -z "$plan_file" ]] && return 1
 
@@ -1164,6 +1316,9 @@ plan_loop() {
             break
         fi
 
+        if [[ "$NC_USE_STREAM" == "1" ]]; then
+            LAST_CLAUDE_JSON_PATH="$SESSION_DIR/last_claude.${task_id}.planrev.${iteration}.json"
+        fi
         if ! revise_plan "$plan_file" "$AUDIT_FEEDBACK" "$iteration" "$task_id"; then
             log "Plan revision failed"
             feedbacks+=("Plan revision command failed")
@@ -1184,6 +1339,9 @@ plan_loop() {
 ---
 "
         done
+        if [[ "$NC_USE_STREAM" == "1" ]]; then
+            LAST_CLAUDE_JSON_PATH="$SESSION_DIR/last_claude.${task_id}.planrev.opus.json"
+        fi
         if revise_plan "$plan_file" "$all_feedback" "$iteration" "$task_id"; then
             # Run one more audit on the Opus plan
             run_audit "$plan_file" "$task_file"
@@ -1254,22 +1412,50 @@ Instructions:
     update_status "implementing $task_id"
     notify_normal "🔨 Implementing $task_id"
 
-    # Use timeout (not run_timed) — Claude Code CLI in JSON mode produces no
-    # intermediate output, so idle timeout would kill it prematurely.
+    # Legacy path: `timeout` wrapper (no idle timer — JSON mode produces no
+    # intermediate output, so idle would fire prematurely). Streamed path:
+    # run_with_timeout.py wraps claude | accumulator; heartbeats reset idle.
     # cd into project dir instead of --cwd (not supported on all CLI versions).
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_impl_${task_id}_stderr.log"
+    local acc_stderr="$SESSION_DIR/claude_impl_${task_id}_acc_stderr.log"
+    # Parent-owned envelope path: impl_loop sets LAST_CLAUDE_JSON_PATH before
+    # calling us so it can read the partial envelope from disk after a
+    # timeout. Fall back to a default if somehow unset.
+    local envelope_path="${LAST_CLAUDE_JSON_PATH:-$SESSION_DIR/last_claude.${task_id}.impl.unknown.json}"
     set +e
-    raw_output=$(cd "$project_path" && \
-        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
-            --model sonnet \
-            --output-format json \
-            ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
+    if [[ "$NC_USE_STREAM" == "1" ]]; then
+        raw_output=$(cd "$project_path" && \
+            call_claude_streamed \
+                "$IMPL_WALL_TIMEOUT" "$IMPL_IDLE_TIMEOUT" \
+                "$envelope_path" "$claude_stderr" "$acc_stderr" \
+                "$prompt" \
+                --model sonnet \
+                ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS})
+    else
+        raw_output=$(cd "$project_path" && \
+            call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
+                --model sonnet \
+                --output-format json \
+                ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
+    fi
     exit_code=$?
     set -e
 
     if [[ $exit_code -ne 0 ]]; then
-        log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        # Only the streamed path can emit 125 (idle) / 2 (partial stream);
+        # on the legacy path those codes mean something else, so keep the
+        # diagnostic generic there.
+        if [[ "$NC_USE_STREAM" == "1" ]]; then
+            case $exit_code in
+                124) log "Impl wall-timed-out (${IMPL_WALL_TIMEOUT}s). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                125) log "Impl idle-timed-out (${IMPL_IDLE_TIMEOUT}s). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                2)   log "Impl stream ended without completion. stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                *)   log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+            esac
+        else
+            log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        fi
         log "Claude CLI stdout (first 500): ${raw_output:0:500}"
     fi
 
@@ -1316,20 +1502,47 @@ Instructions:
     update_status "revising $TASK_ID (iteration $iteration)"
     notify_normal "🔄 Revising $TASK_ID (round $iteration)"
 
-    # Use timeout (not run_timed) — same reason as implement_task
+    # Legacy path: `timeout` wrapper (no idle timer — JSON mode produces no
+    # intermediate output, so idle would fire prematurely). Streamed path:
+    # run_with_timeout.py wraps claude | accumulator; heartbeats reset idle.
     local raw_output exit_code
     local claude_stderr="$SESSION_DIR/claude_rev_${TASK_ID}_${iteration}_stderr.log"
+    local acc_stderr="$SESSION_DIR/claude_rev_${TASK_ID}_${iteration}_acc_stderr.log"
+    # Parent-owned envelope path: impl_loop sets LAST_CLAUDE_JSON_PATH before
+    # calling us so it can read the partial envelope from disk after a
+    # timeout. Fall back to a default if somehow unset.
+    local envelope_path="${LAST_CLAUDE_JSON_PATH:-$SESSION_DIR/last_claude.${TASK_ID}.revimpl.${iteration}.json}"
     set +e
-    raw_output=$(cd "$PROJECT_PATH" && \
-        call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
-            --model sonnet \
-            --output-format json \
-            ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
+    if [[ "$NC_USE_STREAM" == "1" ]]; then
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude_streamed \
+                "$IMPL_WALL_TIMEOUT" "$IMPL_IDLE_TIMEOUT" \
+                "$envelope_path" "$claude_stderr" "$acc_stderr" \
+                "$prompt" \
+                --model sonnet \
+                ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS})
+    else
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
+                --model sonnet \
+                --output-format json \
+                ${IMPL_MAX_TURNS:+--max-turns $IMPL_MAX_TURNS} 2>"$claude_stderr")
+    fi
     exit_code=$?
     set -e
 
     if [[ $exit_code -ne 0 ]]; then
-        log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        # See implement_task — stream-only exit codes gated behind the flag.
+        if [[ "$NC_USE_STREAM" == "1" ]]; then
+            case $exit_code in
+                124) log "Revimpl wall-timed-out (${IMPL_WALL_TIMEOUT}s). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                125) log "Revimpl idle-timed-out (${IMPL_IDLE_TIMEOUT}s). stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                2)   log "Revimpl stream ended without completion. stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+                *)   log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)" ;;
+            esac
+        else
+            log "Claude CLI exited $exit_code. stderr: $(head -5 "$claude_stderr" 2>/dev/null)"
+        fi
         log "Claude CLI stdout (first 500): ${raw_output:0:500}"
     fi
 
@@ -1430,20 +1643,108 @@ impl_loop() {
     CONSECUTIVE_STOPS=0  # reset for this loop
     IMPL_REVIEW_MODE="approved"
     REVIEW_FEEDBACK=""
+    # Clear any stale envelope path from a prior loop — the streamed
+    # branch below will set it fresh per iteration; the legacy path
+    # never reads it.
+    unset LAST_CLAUDE_JSON_PATH
 
     while (( iteration < MAX_IMPL_ITERATIONS )); do
         iteration=$((iteration + 1))
 
-        if [[ $iteration -eq 1 ]]; then
-            if ! implement_task "$plan_file" "$PROJECT_PATH" "$task_id"; then
-                log "Implementation failed"
-                feedbacks+=("Implementation command failed")
-                continue
+        # A6: on the streamed path, parent owns the envelope path so we
+        # can recover partial output from disk even if the subshell is
+        # killed before it can echo. stream-accumulator.py writes the
+        # envelope atomically on every state change and on exit; on
+        # SIGKILL the last-written snapshot remains readable. The legacy
+        # path does not write an envelope, so we only set this when the
+        # flag is on — keeps NC_USE_STREAM=0 behavior byte-identical.
+        if [[ "$NC_USE_STREAM" == "1" ]]; then
+            if [[ $iteration -eq 1 ]]; then
+                LAST_CLAUDE_JSON_PATH="$SESSION_DIR/last_claude.${task_id}.impl.${iteration}.json"
+            else
+                LAST_CLAUDE_JSON_PATH="$SESSION_DIR/last_claude.${task_id}.revimpl.${iteration}.json"
             fi
+        fi
+
+        local impl_rc=0
+        if [[ $iteration -eq 1 ]]; then
+            set +e
+            implement_task "$plan_file" "$PROJECT_PATH" "$task_id"
+            impl_rc=$?
+            set -e
         else
-            if ! revise_impl "$plan_file" "${feedbacks[-1]}" "$iteration"; then
-                log "Revision failed"
-                feedbacks+=("Revision command failed")
+            set +e
+            revise_impl "$plan_file" "${feedbacks[-1]}" "$iteration"
+            impl_rc=$?
+            set -e
+        fi
+
+        if [[ $impl_rc -ne 0 ]]; then
+            if [[ "$NC_USE_STREAM" == "1" ]]; then
+                # Streamed-path recovery: on timeout / partial-stream
+                # exits, read whatever text the model produced from the
+                # envelope file and feed it back so the next iteration
+                # has context instead of flying blind. Claude sometimes
+                # finishes the work even when killed mid-stream; the
+                # partial envelope captures assistant text up to that
+                # point.
+                case $impl_rc in
+                    124|125|2)
+                        local partial_txt=""
+                        if [[ -f "$LAST_CLAUDE_JSON_PATH" ]]; then
+                            # Verify it's actually our envelope before
+                            # trusting .result — defends against a stale
+                            # file from a prior run sharing the path.
+                            partial_txt=$(python3 -c "
+import json, sys
+try:
+    e = json.load(open('$LAST_CLAUDE_JSON_PATH'))
+    if not e.get('_envelope'):
+        sys.exit(0)
+    r = e.get('result') or ''
+    print(r[:4000])
+except Exception as ex:
+    sys.stderr.write(f'partial extract failed: {ex}\n')
+" 2>/dev/null)
+                        fi
+                        local tag
+                        case $impl_rc in
+                            124) tag="wall-timeout" ;;
+                            125) tag="idle-timeout" ;;
+                            2)   tag="stream-ended-partial" ;;
+                        esac
+                        log "Implementation exited $impl_rc ($tag). Recovered ${#partial_txt} chars of partial output."
+                        if [[ -n "$partial_txt" ]]; then
+                            feedbacks+=("[$tag, iteration $iteration] Implementation was killed before completion. Partial model output recovered from stream envelope (first 4000 chars):
+---
+$partial_txt
+---
+Resume from here and finish the remaining work.")
+                        else
+                            feedbacks+=("[$tag, iteration $iteration] Implementation killed with no recoverable output. Retry with smaller scope or different approach.")
+                        fi
+                        journal '{"event":"impl_partial_recovered","task_id":"'"$task_id"'","iteration":'"$iteration"',"exit":'"$impl_rc"',"bytes":'"${#partial_txt}"'}'
+                        continue
+                        ;;
+                    *)
+                        log "Implementation failed (exit $impl_rc)"
+                        if [[ $iteration -eq 1 ]]; then
+                            feedbacks+=("Implementation command failed (exit $impl_rc)")
+                        else
+                            feedbacks+=("Revision command failed (exit $impl_rc)")
+                        fi
+                        continue
+                        ;;
+                esac
+            else
+                # Legacy path — preserve pre-A6 behavior exactly.
+                if [[ $iteration -eq 1 ]]; then
+                    log "Implementation failed"
+                    feedbacks+=("Implementation command failed")
+                else
+                    log "Revision failed"
+                    feedbacks+=("Revision command failed")
+                fi
                 continue
             fi
         fi
