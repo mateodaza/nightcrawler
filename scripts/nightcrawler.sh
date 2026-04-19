@@ -1417,8 +1417,39 @@ run_audit() {
         return 0
     fi
 
-    AUDIT_VERDICT=$(echo "$AUDIT_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verdict','REJECTED'))")
-    AUDIT_FEEDBACK=$(echo "$AUDIT_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('feedback',''))")
+    # B0 v2 contract: extract all fields in a single python invocation and emit
+    # shell-assignable lines. AUDIT_FEEDBACK remains populated (rendered from
+    # blocking_issues) so the existing check_impl_lock regex matcher keeps working.
+    local fields
+    fields=$(echo "$AUDIT_RAW" | python3 -c '
+import sys, json, shlex
+o = json.load(sys.stdin)
+def q(v):
+    return shlex.quote(str(v) if v is not None else "")
+v   = o.get("verdict", "REJECTED")
+fb  = o.get("feedback", "")
+sv  = o.get("schema_version", 1)
+ct  = o.get("complexity_tier", "UNKNOWN")
+cf  = o.get("confidence", "unknown")
+bi  = json.dumps(o.get("blocking_issues") or [])
+ad  = json.dumps(o.get("advisories") or [])
+cv  = ",".join(o.get("contract_violations") or [])
+print("AUDIT_VERDICT="             + q(v))
+print("AUDIT_FEEDBACK="             + q(fb))
+print("AUDIT_SCHEMA_VERSION="       + q(sv))
+print("AUDIT_COMPLEXITY_TIER="      + q(ct))
+print("AUDIT_CONFIDENCE="           + q(cf))
+print("AUDIT_BLOCKING_JSON="        + q(bi))
+print("AUDIT_ADVISORIES_JSON="      + q(ad))
+print("AUDIT_CONTRACT_VIOLATIONS="  + q(cv))
+')
+    eval "$fields"
+
+    # Fire a journal event for any contract violation — calibration telemetry.
+    if [[ -n "${AUDIT_CONTRACT_VIOLATIONS:-}" ]]; then
+        journal '{"event":"audit_contract_violation","phase":"audit","violations":"'"$AUDIT_CONTRACT_VIOLATIONS"'","schema_version":'"${AUDIT_SCHEMA_VERSION:-1}"',"ts":"'"$(date -u +%FT%TZ)"'"}'
+        log "audit_contract_violation: ${AUDIT_CONTRACT_VIOLATIONS} (schema=${AUDIT_SCHEMA_VERSION})"
+    fi
 }
 
 # Classify a review/audit rejection as hard_block or soft_reject.
@@ -1888,8 +1919,37 @@ run_review() {
         return 0
     fi
 
-    REVIEW_VERDICT=$(echo "$REVIEW_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verdict','REJECTED'))")
-    REVIEW_FEEDBACK=$(echo "$REVIEW_RAW" | python3 -c "import sys,json;print(json.load(sys.stdin).get('feedback',''))")
+    # B0 v2 contract: same extraction pattern as run_audit. REVIEW_FEEDBACK
+    # stays populated so the existing check_impl_lock regex matcher keeps working.
+    local fields
+    fields=$(echo "$REVIEW_RAW" | python3 -c '
+import sys, json, shlex
+o = json.load(sys.stdin)
+def q(v):
+    return shlex.quote(str(v) if v is not None else "")
+v   = o.get("verdict", "REJECTED")
+fb  = o.get("feedback", "")
+sv  = o.get("schema_version", 1)
+ct  = o.get("complexity_tier", "UNKNOWN")
+cf  = o.get("confidence", "unknown")
+bi  = json.dumps(o.get("blocking_issues") or [])
+ad  = json.dumps(o.get("advisories") or [])
+cv  = ",".join(o.get("contract_violations") or [])
+print("REVIEW_VERDICT="             + q(v))
+print("REVIEW_FEEDBACK="             + q(fb))
+print("REVIEW_SCHEMA_VERSION="       + q(sv))
+print("REVIEW_COMPLEXITY_TIER="      + q(ct))
+print("REVIEW_CONFIDENCE="           + q(cf))
+print("REVIEW_BLOCKING_JSON="        + q(bi))
+print("REVIEW_ADVISORIES_JSON="      + q(ad))
+print("REVIEW_CONTRACT_VIOLATIONS="  + q(cv))
+')
+    eval "$fields"
+
+    if [[ -n "${REVIEW_CONTRACT_VIOLATIONS:-}" ]]; then
+        journal '{"event":"audit_contract_violation","phase":"review","violations":"'"$REVIEW_CONTRACT_VIOLATIONS"'","schema_version":'"${REVIEW_SCHEMA_VERSION:-1}"',"ts":"'"$(date -u +%FT%TZ)"'"}'
+        log "audit_contract_violation: ${REVIEW_CONTRACT_VIOLATIONS} (schema=${REVIEW_SCHEMA_VERSION})"
+    fi
 }
 
 check_impl_lock() {
