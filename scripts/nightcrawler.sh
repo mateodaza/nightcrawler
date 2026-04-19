@@ -1358,12 +1358,18 @@ audit_plan_call() {
 
     local raw_output exit_code
     set +e
-    raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" timeout "$CODEX_CALL_TIMEOUT" \
+    raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" \
+        NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-}" \
+        NC_LOG_AUDIT_PROMPT="${NC_LOG_AUDIT_PROMPT:-}" \
+        NIGHTCRAWLER_STATE_PATH="$STATE_DIR" \
+        timeout "$CODEX_CALL_TIMEOUT" \
         python3 "$SCRIPTS/call_codex.py" audit-plan \
             --plan "$plan_file" \
             --task-file "$task_file" \
             --rules "$STATE_DIR/RULES.md" \
-            --project "$PROJECT_PATH")
+            --project "$PROJECT_PATH" \
+            --task-id "${TASK_ID:-unknown}" \
+            --session-dir "$SESSION_DIR")
     exit_code=$?
     set -e
 
@@ -1859,13 +1865,33 @@ Instructions:
 review_impl() {
     local plan_file="$1"
 
+    # F1: derive changed files from the working tree for the relevance pack.
+    # Includes untracked files — implementers frequently create new modules,
+    # and `git diff` alone would miss them, leaving a blind spot in the pack.
+    # Safe to compute unconditionally — call_codex.py ignores it when NC_RELEVANCE_PACK=0.
+    local changed_files=""
+    if command -v git >/dev/null 2>&1; then
+        changed_files=$(cd "$PROJECT_PATH" && {
+            git diff --name-only 2>/dev/null
+            git diff --staged --name-only 2>/dev/null
+            git ls-files --others --exclude-standard 2>/dev/null
+        } | sort -u | paste -sd, -)
+    fi
+
     local raw_output exit_code
     set +e
-    raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" timeout "$CODEX_CALL_TIMEOUT" \
+    raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" \
+        NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-}" \
+        NC_LOG_AUDIT_PROMPT="${NC_LOG_AUDIT_PROMPT:-}" \
+        NIGHTCRAWLER_STATE_PATH="$STATE_DIR" \
+        timeout "$CODEX_CALL_TIMEOUT" \
         python3 "$SCRIPTS/call_codex.py" review-impl \
             --project "$PROJECT_PATH" \
             --plan "$plan_file" \
-            --rules "$STATE_DIR/RULES.md")
+            --rules "$STATE_DIR/RULES.md" \
+            --task-id "${TASK_ID:-unknown}" \
+            --session-dir "$SESSION_DIR" \
+            --changed-files "$changed_files")
     exit_code=$?
     set -e
 

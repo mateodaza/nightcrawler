@@ -483,6 +483,74 @@ def _read_project_context(project_path: str) -> str:
 
 
 # =============================================================================
+# Relevance pack (F1) — replaces `_read_project_context` when flag is on
+# =============================================================================
+
+def _maybe_build_pack(*, project_path: str, task_text: str, task_id: str,
+                      phase: str, session_dir: str = None,
+                      changed_files: list = None) -> tuple:
+    """Build a relevance pack if NC_RELEVANCE_PACK=1; else return (None, None).
+
+    Returns (pack_text, meta_path). pack_text replaces project_context in the
+    assembled prompt; meta_path is the sidecar JSON for debugging (for stderr
+    log only — not passed to the model).
+    """
+    if os.environ.get("NC_RELEVANCE_PACK") != "1":
+        return None, None
+
+    # lib/ is a sibling directory of this file; ensure it's importable.
+    lib_dir = SCRIPTS_DIR
+    if str(lib_dir) not in sys.path:
+        sys.path.insert(0, str(lib_dir))
+    try:
+        from lib import relevance_pack  # type: ignore
+    except ImportError as exc:
+        print(f"NC_RELEVANCE_PACK=1 but lib/relevance_pack import failed: {exc}",
+              file=sys.stderr)
+        return None, None
+
+    artifact_dir = None
+    state_dir = os.environ.get("NIGHTCRAWLER_STATE_PATH")
+    if session_dir:
+        artifact_dir = str(Path(session_dir) / "relevance-packs")
+        # SESSION_DIR is <STATE_DIR>/sessions/<SESSION_ID> — recover state_dir
+        # if not passed explicitly via env.
+        if not state_dir:
+            try:
+                state_dir = str(Path(session_dir).resolve().parent.parent)
+            except OSError:
+                state_dir = None
+
+    try:
+        pack = relevance_pack.build_pack(
+            task_text=task_text,
+            task_id=task_id or "unknown",
+            phase=phase,
+            project_path=project_path or ".",
+            state_dir=state_dir,
+            artifact_dir=artifact_dir,
+            changed_files=changed_files,
+            current_session_dir=session_dir,
+        )
+    except Exception as exc:  # defensive — never let the pack break audits
+        print(f"relevance pack build failed ({exc}); falling back to project_context",
+              file=sys.stderr)
+        return None, None
+
+    return pack["text"], pack["artifacts"].get("meta_path")
+
+
+def _maybe_log_prompt(label: str, prompt: str) -> None:
+    """Dump the assembled prompt to stderr when NC_LOG_AUDIT_PROMPT=1."""
+    if os.environ.get("NC_LOG_AUDIT_PROMPT") != "1":
+        return
+    print(f"=== {label} prompt (NC_LOG_AUDIT_PROMPT=1, {len(prompt)} bytes) ===",
+          file=sys.stderr)
+    print(prompt, file=sys.stderr)
+    print(f"=== {label} prompt END ===", file=sys.stderr)
+
+
+# =============================================================================
 # Main commands
 # =============================================================================
 
@@ -497,29 +565,50 @@ def _emit(v2: dict, method: str, model: str, cost_usd: float,
     print(json.dumps(v2))
 
 
-def audit_plan(plan_file: str, task_file: str, rules_file: str, project_path: str = None):
+def audit_plan(plan_file: str, task_file: str, rules_file: str,
+               project_path: str = None, *,
+               task_id: str = None, session_dir: str = None):
     """Audit a mini-plan. Tries Codex CLI exec first, falls back to API."""
     plan = Path(plan_file).read_text()
     task = Path(task_file).read_text()
     rules = Path(rules_file).read_text() if Path(rules_file).exists() else "No project rules provided."
-    project_context = _read_project_context(project_path)
     persona = _load_audit_persona(project_path)
 
-    audit_prompt = f"""{persona}
+    # F1: relevance pack replaces _read_project_context when flag is on.
+    pack_text, pack_meta_path = _maybe_build_pack(
+        project_path=project_path,
+        task_text=task,
+        task_id=task_id,
+        phase="plan_audit",
+        session_dir=session_dir,
+    )
+    if pack_text is not None:
+        context_section = f"""PROJECT RULES:
+{rules}
 
-TASK REQUIREMENTS:
+{pack_text}"""
+        if pack_meta_path:
+            print(f"relevance_pack: meta sidecar at {pack_meta_path}", file=sys.stderr)
+    else:
+        project_context = _read_project_context(project_path)
+        context_section = f"""TASK REQUIREMENTS:
 {task}
 
 PROJECT RULES:
 {rules}
 
 PROJECT CONTEXT (spec, progress, existing code — use these to validate the plan):
-{project_context}
+{project_context}"""
+
+    audit_prompt = f"""{persona}
+
+{context_section}
 
 MINI-PLAN TO AUDIT:
 {plan}
 
 {_schema_instructions()}"""
+    _maybe_log_prompt("audit_plan", audit_prompt)
 
     # Try CLI first
     if codex_cli_available():
@@ -542,19 +631,13 @@ YOUR ROLE:
 
     user_prompt = f"""Audit this mini-plan against the task requirements and project rules.
 
-TASK REQUIREMENTS:
-{task}
-
-PROJECT RULES:
-{rules}
-
-PROJECT CONTEXT (spec, progress, existing code — use these to validate the plan):
-{project_context}
+{context_section}
 
 MINI-PLAN TO AUDIT:
 {plan}
 
 Return the v2 JSON object described above."""
+    _maybe_log_prompt("audit_plan (API fallback)", user_prompt)
 
     result = call_api(system_prompt, user_prompt)
     v2 = parse_structured_verdict(result["content"])
@@ -569,13 +652,18 @@ Return the v2 JSON object described above."""
 
 
 def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch: str = None,
-                diff_source: str = None, test_output_file: str = None):
+                diff_source: str = None, test_output_file: str = None, *,
+                task_id: str = None, session_dir: str = None,
+                changed_files: list = None):
     """Review implementation. Tries codex exec CLI first, falls back to API."""
     plan = Path(plan_file).read_text()
     rules = Path(rules_file).read_text() if Path(rules_file).exists() else "No project rules provided."
     persona = _load_audit_persona(project_path)
 
-    # Get diff for both CLI and API paths
+    # Get diff for both CLI and API paths. `git diff` / `git diff --staged`
+    # don't include untracked files, so we synthesize added-file diffs for any
+    # new modules the implementer created — otherwise the reviewer never sees
+    # their content.
     if diff_source:
         diff = Path(diff_source).read_text() if os.path.isfile(diff_source) else diff_source
     else:
@@ -592,12 +680,75 @@ def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch:
         except Exception:
             diff = "(could not read git diff)"
 
+        # Append synthesized added-file diffs for untracked files.
+        try:
+            untracked = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                capture_output=True, text=True, cwd=project_path, timeout=5,
+            ).stdout.splitlines()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            untracked = []
+        for rel in (u.strip() for u in untracked):
+            if not rel:
+                continue
+            fpath = Path(project_path) / rel
+            try:
+                if fpath.is_file():
+                    body = fpath.read_text(errors="replace")
+                else:
+                    continue
+            except OSError:
+                continue
+            # Cap per-file body to avoid blowing the diff budget on one huge file.
+            if len(body) > 20000:
+                body = body[:20000] + "\n... [untracked file body truncated]\n"
+            synth = [
+                f"diff --git a/{rel} b/{rel}",
+                "new file mode 100644",
+                "--- /dev/null",
+                f"+++ b/{rel}",
+            ]
+            for line in body.splitlines():
+                synth.append("+" + line)
+            diff = (diff or "") + "\n" + "\n".join(synth) + "\n"
+
     if len(diff) > 80000:
         diff = diff[:40000] + "\n\n... [TRUNCATED] ...\n\n" + diff[-40000:]
 
     test_output = ""
     if test_output_file and os.path.isfile(test_output_file):
         test_output = Path(test_output_file).read_text()
+
+    # F1: derive changed files from git if not passed explicitly.
+    # Only needed when relevance pack is on (cheap guard — skip the git call otherwise).
+    # Includes untracked files — symmetric with the diff-body synthesis above.
+    if changed_files is None and os.environ.get("NC_RELEVANCE_PACK") == "1":
+        changed_files = []
+        for args in (["git", "diff", "--name-only"],
+                     ["git", "diff", "--staged", "--name-only"],
+                     ["git", "ls-files", "--others", "--exclude-standard"]):
+            try:
+                rg = subprocess.run(args, capture_output=True, text=True,
+                                    cwd=project_path, timeout=5)
+                for ln in rg.stdout.splitlines():
+                    ln = ln.strip()
+                    if ln and ln not in changed_files:
+                        changed_files.append(ln)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+    pack_text, pack_meta_path = _maybe_build_pack(
+        project_path=project_path,
+        task_text=plan,  # review phase: the plan is the closest thing to "task text"
+        task_id=task_id,
+        phase="impl_review",
+        session_dir=session_dir,
+        changed_files=changed_files,
+    )
+    if pack_text is not None and pack_meta_path:
+        print(f"relevance_pack: meta sidecar at {pack_meta_path}", file=sys.stderr)
+
+    pack_block = f"\n\n{pack_text}\n" if pack_text else ""
 
     review_prompt = f"""{persona}
 
@@ -606,7 +757,7 @@ APPROVED PLAN:
 
 KEY RULES:
 {rules[:2000]}
-
+{pack_block}
 GIT DIFF:
 ```diff
 {diff[:30000]}
@@ -622,6 +773,7 @@ YOUR ROLE:
 - Reject only for real bugs, security issues, or deviations that affect correctness.
 
 {_schema_instructions()}"""
+    _maybe_log_prompt("review_impl", review_prompt)
 
     # Try CLI first
     if codex_cli_available():
@@ -649,7 +801,7 @@ APPROVED PLAN:
 
 PROJECT RULES:
 {rules}
-
+{pack_block}
 GIT DIFF (changes made):
 ```diff
 {diff}
@@ -661,6 +813,7 @@ TEST OUTPUT:
 ```
 
 Return the v2 JSON object described above."""
+    _maybe_log_prompt("review_impl (API fallback)", user_prompt)
 
     result = call_api(system_prompt, user_prompt)
     v2 = parse_structured_verdict(result["content"])
@@ -730,17 +883,37 @@ if __name__ == "__main__":
     parser.add_argument("--diff")
     parser.add_argument("--test-output")
     parser.add_argument("--base")
+    # F1 plumbing — required when NC_RELEVANCE_PACK=1; harmless otherwise.
+    parser.add_argument("--task-id", dest="task_id", default=None,
+                        help="Task ID (e.g. NC-042) — used as relevance pack key")
+    parser.add_argument("--session-dir", dest="session_dir", default=None,
+                        help="Nightcrawler SESSION_DIR — relevance packs & prior-findings scan root")
+    parser.add_argument("--changed-files", dest="changed_files", default=None,
+                        help="Comma-separated list of changed files (review phase only). "
+                             "If omitted, derived from `git diff --name-only`.")
 
     args = parser.parse_args()
+
+    changed_files_list = None
+    if args.changed_files:
+        changed_files_list = [f for f in (s.strip() for s in args.changed_files.split(","))
+                              if f]
 
     if args.test:
         test_connectivity()
     elif args.parse_test:
         parse_test()
     elif args.command == "audit-plan":
-        audit_plan(args.plan, args.task_file, args.rules, args.project)
+        audit_plan(
+            args.plan, args.task_file, args.rules, args.project,
+            task_id=args.task_id, session_dir=args.session_dir,
+        )
     elif args.command == "review-impl":
-        review_impl(args.project, args.plan, args.rules, args.base, args.diff, args.test_output)
+        review_impl(
+            args.project, args.plan, args.rules, args.base, args.diff, args.test_output,
+            task_id=args.task_id, session_dir=args.session_dir,
+            changed_files=changed_files_list,
+        )
     else:
         parser.print_help()
         sys.exit(1)
