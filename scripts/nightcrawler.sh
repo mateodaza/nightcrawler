@@ -60,9 +60,13 @@ BUILD_WALL=120 BUILD_IDLE=60
 TEST_WALL=300  TEST_IDLE=120
 MAX_PLAN_ITERATIONS=10          # plan audit soft-reject cap (hard blocks + convergence catch real problems)
 MAX_IMPL_ITERATIONS=10          # impl review soft-reject cap (hard blocks + convergence catch real problems)
-PLAN_MAX_TURNS=""               # empty = omit --max-turns (unlimited; timeout is the safety net)
-IMPL_MAX_TURNS=""               # empty = omit --max-turns (unlimited; timeout is the safety net)
-REPAIR_MAX_TURNS=""             # empty = omit --max-turns (unlimited; timeout is the safety net)
+# A4: cap per-call turns so the CLI exits naturally before the wall-clock
+# safety net fires. Defaults picked as ~2x observed successful-session
+# averages (see PLAN-stabilization.md A4). Override via env or project
+# config. Set to "" to restore pre-A4 unlimited behavior.
+PLAN_MAX_TURNS="${PLAN_MAX_TURNS:-15}"
+IMPL_MAX_TURNS="${IMPL_MAX_TURNS:-40}"
+REPAIR_MAX_TURNS="${REPAIR_MAX_TURNS:-}"  # empty = omit --max-turns (unlimited)
 VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
 
 # Load project config if it exists (can override BUILD_CMD, TEST_CMD, etc.)
