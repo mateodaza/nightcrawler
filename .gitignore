@@ -15,6 +15,10 @@
 # Python cache
 scripts/__pycache__/
 scripts/_pycache/
+scripts/lib/__pycache__/
+
+# Live smoke test output (populated when running scripts/lib/smoke-live.sh)
+scripts/lib/vps-test-out/
 
 # Don't ignore sessions — they're the audit trail
 # Don't ignore memory.md — it's persistent state
