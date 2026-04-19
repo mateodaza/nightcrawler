@@ -748,9 +748,13 @@ except:
         return
     fi
 
-    # Strip any extra text — model should return just the ID but be safe
+    # Strip any extra text — model should return just the ID but be safe.
+    # Regex supports multi-segment IDs (NC-F1-VALIDATE, CAM-F1-SMOKE-V2, …);
+    # legacy single-segment IDs (NC-385, CAM-001, NC-SMOKE) still match.
+    # Lowercase terminates a segment (e.g. "NC-SMOKE-v2" → "NC-SMOKE"), so the
+    # downstream task-body lookup can't be tricked by prose continuations.
     local task_id
-    task_id=$(echo "$answer" | grep -oE '[A-Z]+-[0-9A-Z]+' | head -1)
+    task_id=$(echo "$answer" | grep -oE '[A-Z]+-[0-9A-Z]+(-[0-9A-Z]+)*' | head -1)
 
     if [[ -z "$task_id" ]]; then
         log "pick_next_task: could not parse task ID from model response: $answer"
