@@ -1056,6 +1056,181 @@ Session: ${SESSION_ID:-manual}" || log "verify_task_not_shipped: queue commit fa
     return 1
 }
 
+# run_shipped_check <task_id> <task_file>
+# F5 companion-side existence check. No-ops unless NC_COMPANION_CHECK=1.
+#
+# Returns:
+#   0 — proceed with task (PARTIAL / NOT_SHIPPED / UNCERTAIN, or gate off)
+#   2 — task already shipped; caller should increment stale_picks + re-pick
+#
+# Side effects when enabled:
+#   * Writes $SESSION_DIR/tasks/$task_id/shipped_check.json (parsed verdict)
+#   * Journals a canonical `shipped_check_complete` event for every run
+#   * On SHIPPED: appends to $CONTROL_DIR/skip (grep -qx dedup), journals
+#     `shipped_check_skipped`, notifies
+#   * On PARTIAL: rewrites $task_file with injected preamble, preserves
+#     $task_file.original.md once, journals `shipped_check_partial_inject`,
+#     notifies
+#   * On NOT_SHIPPED / UNCERTAIN: journal-only, proceeds
+#
+# Failure modes (prompt build, claude call, parse failure) degrade to
+# UNCERTAIN + proceed rather than special-casing the control flow.
+run_shipped_check() {
+    [[ "${NC_COMPANION_CHECK:-0}" == "1" ]] || return 0
+
+    local task_id="$1"
+    local task_file="$2"
+
+    if [[ -z "$task_id" || -z "$task_file" ]]; then
+        log "run_shipped_check: task_id and task_file required — skipping"
+        return 0
+    fi
+    if [[ ! -f "$task_file" ]]; then
+        log "run_shipped_check: task file $task_file missing — skipping"
+        return 0
+    fi
+
+    local scripts_dir
+    scripts_dir="$(dirname "${BASH_SOURCE[0]}")"
+    local task_dir="$SESSION_DIR/tasks/$task_id"
+    mkdir -p "$task_dir"
+    local verdict_json="$task_dir/shipped_check.json"
+
+    local prompt_file shipped_stderr
+    prompt_file=$(mktemp -t shipped_check_prompt.XXXXXX 2>/dev/null) || {
+        log "run_shipped_check: mktemp failed — skipping"
+        return 0
+    }
+    shipped_stderr=$(mktemp -t shipped_check_stderr.XXXXXX 2>/dev/null) || {
+        rm -f "$prompt_file"
+        log "run_shipped_check: mktemp failed — skipping"
+        return 0
+    }
+
+    local degrade_violation=""
+    if ! python3 "$scripts_dir/shipped_check.py" build-prompt \
+            --task-id "$task_id" \
+            --task-file "$task_file" \
+            --project "$PROJECT_PATH" \
+            --session-dir "$SESSION_DIR" \
+            > "$prompt_file" 2>"$shipped_stderr"; then
+        degrade_violation="build_failed"
+    elif [[ ! -s "$prompt_file" ]]; then
+        degrade_violation="empty_prompt"
+    fi
+
+    local raw_output="" rc=0 answer=""
+    if [[ -z "$degrade_violation" ]]; then
+        local prompt
+        prompt=$(cat "$prompt_file")
+        raw_output=$(cd "$PROJECT_PATH" && \
+            call_claude 60 "$prompt" \
+                --model sonnet \
+                --output-format json \
+                --max-turns 1 2>>"$shipped_stderr")
+        rc=$?
+        if (( rc != 0 )) || [[ -z "$raw_output" ]]; then
+            degrade_violation="claude_call_failed"
+        else
+            answer=$(echo "$raw_output" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print((d.get("result") or "").strip())
+except Exception:
+    print("")
+' 2>/dev/null)
+        fi
+    fi
+
+    if [[ -z "$degrade_violation" ]]; then
+        if ! printf '%s' "$answer" | \
+                python3 "$scripts_dir/shipped_check.py" --parse-test \
+                > "$verdict_json" 2>>"$shipped_stderr"; then
+            degrade_violation="parse_failed"
+        fi
+    fi
+
+    if [[ -n "$degrade_violation" ]]; then
+        log "run_shipped_check: $degrade_violation — degrading to UNCERTAIN"
+        [[ -s "$shipped_stderr" ]] && log "$(tail -c 500 "$shipped_stderr")"
+        # Write a synthetic UNCERTAIN verdict so downstream tooling has the
+        # same file shape whether or not the pipeline ran end-to-end.
+        cat > "$verdict_json" <<EOF
+{"schema_version": 1, "verdict": "UNCERTAIN", "confidence": "unknown", "summary": "$degrade_violation", "evidence": [], "open_questions": [], "contract_violations": ["$degrade_violation"], "method": "degrade", "model": "none", "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
+EOF
+        journal '{"event":"shipped_check_complete","task_id":"'"$task_id"'","verdict":"UNCERTAIN","confidence":"unknown","violations":["'"$degrade_violation"'"],"evidence_count":0,"open_questions_count":0}'
+        rm -f "$prompt_file" "$shipped_stderr"
+        return 0
+    fi
+
+    # Happy path — extract fields for journaling and dispatch.
+    local summary_json
+    summary_json=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print("{\"verdict\":\"UNCERTAIN\",\"confidence\":\"unknown\",\"evidence_count\":0,\"open_questions_count\":0,\"violations\":[]}")
+    sys.exit(0)
+ev = d.get("evidence") or []
+oq = d.get("open_questions") or []
+viol = d.get("contract_violations") or []
+print(json.dumps({
+    "verdict": d.get("verdict", "UNCERTAIN"),
+    "confidence": d.get("confidence", "unknown"),
+    "evidence_count": len(ev),
+    "open_questions_count": len(oq),
+    "violations": viol,
+}))
+' "$verdict_json" 2>/dev/null)
+
+    local verdict confidence evidence_count open_questions_count violations_json
+    verdict=$(echo "$summary_json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verdict','UNCERTAIN'))" 2>/dev/null)
+    confidence=$(echo "$summary_json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('confidence','unknown'))" 2>/dev/null)
+    evidence_count=$(echo "$summary_json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('evidence_count',0))" 2>/dev/null)
+    open_questions_count=$(echo "$summary_json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('open_questions_count',0))" 2>/dev/null)
+    violations_json=$(echo "$summary_json" | python3 -c "import sys,json;print(json.dumps(json.load(sys.stdin).get('violations',[])))" 2>/dev/null)
+    verdict="${verdict:-UNCERTAIN}"
+    confidence="${confidence:-unknown}"
+    evidence_count="${evidence_count:-0}"
+    open_questions_count="${open_questions_count:-0}"
+    violations_json="${violations_json:-[]}"
+
+    journal '{"event":"shipped_check_complete","task_id":"'"$task_id"'","verdict":"'"$verdict"'","confidence":"'"$confidence"'","violations":'"$violations_json"',"evidence_count":'"$evidence_count"',"open_questions_count":'"$open_questions_count"'}'
+
+    rm -f "$prompt_file" "$shipped_stderr"
+
+    case "$verdict" in
+        SHIPPED)
+            mkdir -p "$CONTROL_DIR"
+            local skip_file="$CONTROL_DIR/skip"
+            touch "$skip_file"
+            if ! grep -qx "$task_id" "$skip_file"; then
+                printf '%s\n' "$task_id" >> "$skip_file"
+            fi
+            journal '{"event":"shipped_check_skipped","task_id":"'"$task_id"'","confidence":"'"$confidence"'","evidence_count":'"$evidence_count"'}'
+            notify_normal "🛈 $task_id: F5 SHIPPED verdict (conf=$confidence, evidence=$evidence_count) — skipping"
+            return 2
+            ;;
+        PARTIAL)
+            if python3 "$scripts_dir/shipped_check.py" inject-partial \
+                    --task-file "$task_file" \
+                    --verdict-json "$verdict_json" 2>/dev/null; then
+                journal '{"event":"shipped_check_partial_inject","task_id":"'"$task_id"'","confidence":"'"$confidence"'","evidence_count":'"$evidence_count"',"open_questions_count":'"$open_questions_count"'}'
+                notify_normal "🛈 $task_id: F5 PARTIAL verdict (conf=$confidence) — task_context augmented"
+            else
+                log "run_shipped_check: inject-partial failed — proceeding with original task_context"
+            fi
+            return 0
+            ;;
+        *)
+            # NOT_SHIPPED / UNCERTAIN / anything else — journal-only, proceed.
+            return 0
+            ;;
+    esac
+}
+
 append_to_progress() {
     local task_id="$1" degraded_note="${2:-}"
     local progress="$PROJECT_PATH/PROGRESS.md"
@@ -2732,18 +2907,47 @@ main_loop() {
             break
         fi
 
-        # C0 post-pick guard: re-pick up to 3x if the chosen task is already
-        # shipped. Reconcile should catch most cases; this is the hard stop.
+        # C0 + F5 post-pick guard: re-pick up to 3x if the chosen task is
+        # already shipped — either per C0's deterministic merge-base..dev
+        # scan OR per F5's companion-side LLM verdict. Same counter, same
+        # 3-strike stop (per Mateo's tweak #4: not a parallel mini-loop).
         local stale_picks=0
+        local task_file=""
+        local task_desc=""
         while (( stale_picks < 3 )); do
-            if verify_task_not_shipped "$TASK_ID"; then
-                break
+            if ! verify_task_not_shipped "$TASK_ID"; then
+                stale_picks=$((stale_picks + 1))
+                TASK_ID=$(pick_next_task)
+                if [[ -z "$TASK_ID" ]]; then
+                    break
+                fi
+                continue
             fi
-            stale_picks=$((stale_picks + 1))
-            TASK_ID=$(pick_next_task)
-            if [[ -z "$TASK_ID" ]]; then
-                break
+
+            # C0 passed — materialize task_context.md now so F5 can (a) build
+            # a relevance pack rooted on the real task text, and (b) augment
+            # task_context.md in place on PARTIAL. Snapshot task_desc from
+            # the clean file BEFORE F5 may prepend its block (otherwise the
+            # notification would quote the block header instead of the task
+            # title).
+            task_file="$SESSION_DIR/tasks/$TASK_ID/task_context.md"
+            mkdir -p "$(dirname "$task_file")"
+            extract_task_context "$TASK_ID" > "$task_file"
+            task_desc=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+[A-Z]+-[0-9]+\s+\[.\]\s*//' | head -c 72)
+
+            # F5 companion check (no-op unless NC_COMPANION_CHECK=1). On
+            # SHIPPED it returns 2 — treat as C0-style stale pick.
+            run_shipped_check "$TASK_ID" "$task_file"
+            local f5_rc=$?
+            if (( f5_rc == 2 )); then
+                stale_picks=$((stale_picks + 1))
+                TASK_ID=$(pick_next_task)
+                if [[ -z "$TASK_ID" ]]; then
+                    break
+                fi
+                continue
             fi
+            break
         done
         if (( stale_picks >= 3 )); then
             log "3 consecutive stale picks — queue out of sync, ending session"
@@ -2774,12 +2978,9 @@ main_loop() {
         journal '{"event":"task_start","task_id":"'"$TASK_ID"'"}'
         mark_task_in_progress "$TASK_ID"
 
-        # Write task context and extract description for notifications
-        local task_file="$SESSION_DIR/tasks/$TASK_ID/task_context.md"
-        mkdir -p "$(dirname "$task_file")"
-        extract_task_context "$TASK_ID" > "$task_file"
-        local task_desc
-        task_desc=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+[A-Z]+-[0-9]+\s+\[.\]\s*//' | head -c 72)
+        # task_file and task_desc already populated inside the stale-pick
+        # loop above (so F5's PARTIAL injection happens before downstream
+        # consumers read task_context.md). Nothing to do here.
 
         update_status "working on $TASK_ID: $task_desc"
         notify_normal "🆕 $TASK_ID: $task_desc
