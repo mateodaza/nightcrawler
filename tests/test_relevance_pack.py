@@ -548,6 +548,111 @@ def test_per_file_cap_prevents_single_file_domination() -> None:
                    f"got {e['bytes']}B")
 
 
+def test_shipped_check_same_selector_as_plan_audit() -> None:
+    """F5: shipped_check uses the same candidate selector as plan_audit.
+    ## Files entries → rank 1, inline refs → rank 2, etc. No diff signal."""
+    print("\n[test] shipped_check reuses plan_audit selector surface")
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_project(Path(tmp), {
+            "src/foo.ts": "export const foo = 1;\n",
+            "src/bar.ts": "export const bar = 2;\n",
+        })
+        task = """# NC-SHIP
+
+## Files
+- src/foo.ts
+
+## Acceptance Criteria
+- foo and bar both exported
+
+Also see src/bar.ts:10 for the existing bar binding.
+"""
+        out = relevance_pack.build_pack(
+            task_text=task, task_id="NC-S1", phase="shipped_check",
+            project_path=str(proj),
+        )
+        entries = _entries_by_path(out["meta"])
+        _check("src/foo.ts rank 1 (named in ## Files)",
+               entries.get("src/foo.ts", {}).get("rank") == 1,
+               str(entries.get("src/foo.ts")))
+        _check("src/bar.ts rank 2 (inline ref)",
+               entries.get("src/bar.ts", {}).get("rank") == 2,
+               str(entries.get("src/bar.ts")))
+        _check("phase label reads 'shipped check' in pack header",
+               "shipped check" in out["text"].splitlines()[0].lower(),
+               out["text"].splitlines()[0])
+
+
+def test_shipped_check_omits_prior_findings_and_audit_patterns() -> None:
+    """F5: shipped_check drops prior-findings + audit-patterns sections.
+    Reviewer complaints and style conventions are noise for the existence
+    question. Keeps the pack lean and focused on 'is this work present'."""
+    print("\n[test] shipped_check pack omits prior-findings + audit-patterns")
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_project(Path(tmp), {"src/a.ts": "// a\n"})
+        # Seed a prior finding that would be included for plan_audit.
+        state = Path(tmp) / "state"
+        sessions = state / "sessions"
+        sessions.mkdir(parents=True)
+        s = sessions / "sess-prior"
+        s.mkdir()
+        (s / "journal.jsonl").write_text(json.dumps({
+            "event": "audit_complete",
+            "project": proj.name,
+            "task_id": "NC-OLD",
+            "blocking_issues": [{"required_change": "LEAK_MARKER_X"}],
+        }) + "\n")
+
+        out = relevance_pack.build_pack(
+            task_text="## Files\n- src/a.ts\n",
+            task_id="NC-S2", phase="shipped_check",
+            project_path=str(proj),
+            state_dir=str(state),
+        )
+        _check("no 'Prior reviewer findings' section header",
+               "Prior reviewer findings" not in out["text"],
+               out["text"][-400:])
+        _check("no 'Area memory' section header",
+               "Area memory" not in out["text"],
+               out["text"][-400:])
+        _check("prior finding leak marker absent",
+               "LEAK_MARKER_X" not in out["text"],
+               out["text"][-400:])
+        _check("shipped-specific closing note present",
+               "SHIPPED only when" in out["text"]
+               or "functional intent is already present" in out["text"],
+               out["text"][-400:])
+
+
+def test_shipped_check_keeps_task_and_excerpts_and_git_history() -> None:
+    """F5: shipped_check still includes Task spec + Likely touched files +
+    Recent commits. Those are the load-bearing signals for existence."""
+    print("\n[test] shipped_check keeps Task + file excerpts + git-history sections")
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_project(Path(tmp), {"src/a.ts": "// SHIP_CANARY content\n"})
+        # Init git so the per-file log produces output.
+        subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=proj, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-qm", "SHIP_COMMIT_MSG"], cwd=proj, check=True)
+
+        out = relevance_pack.build_pack(
+            task_text="## Files\n- src/a.ts\n\n## AC\n- SHIP_CANARY exists",
+            task_id="NC-S3", phase="shipped_check",
+            project_path=str(proj),
+        )
+        text = out["text"]
+        _check("Task section header present", "## Task" in text)
+        _check("Likely touched files section present",
+               "## Likely touched files" in text)
+        _check("Recent commits section present",
+               "## Recent commits in this area" in text)
+        _check("file excerpt visible in pack", "SHIP_CANARY" in text)
+        _check("commit subject visible in pack",
+               "SHIP_COMMIT_MSG" in text, text[-600:])
+
+
 def test_truncate_to_fit_preserves_last_entry() -> None:
     """When an entry would exceed remaining budget, truncate to fit rather
     than drop — a half-file of a decisive .tsx beats a full file of noise.
@@ -587,6 +692,9 @@ def main() -> int:
     test_budget_sub_section_isolated()
     test_bookkeeping_files_demoted_in_impl_review()
     test_per_file_cap_prevents_single_file_domination()
+    test_shipped_check_same_selector_as_plan_audit()
+    test_shipped_check_omits_prior_findings_and_audit_patterns()
+    test_shipped_check_keeps_task_and_excerpts_and_git_history()
     test_truncate_to_fit_preserves_last_entry()
 
     print()

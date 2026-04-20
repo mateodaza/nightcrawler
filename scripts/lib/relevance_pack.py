@@ -595,7 +595,7 @@ def build_pack(
     Returns:
         {"text": str, "meta": dict, "artifacts": {"text_path", "meta_path"}}
     """
-    if phase not in ("plan_audit", "impl_review"):
+    if phase not in ("plan_audit", "impl_review", "shipped_check"):
         raise ValueError(f"unknown phase: {phase}")
 
     project = Path(project_path).resolve() if project_path else Path.cwd()
@@ -609,6 +609,9 @@ def build_pack(
         # Changed files = strongest signal. Task/spec are secondary.
         diff_rank, task_rank, inline_rank, spec_rank, kw_rank = 1, 2, 3, 4, 5
     else:
+        # plan_audit and shipped_check both use task-text signals only — no diff
+        # is available at fire time. Same selector surface (F5 deliberately
+        # reuses plan_audit's candidate selection; see PLAN-f5.md §Pack).
         diff_rank = None  # unused
         task_rank, inline_rank, spec_rank, kw_rank = 1, 2, 3, 4
 
@@ -724,25 +727,54 @@ def build_pack(
     kept_files = [e.path for e in entries if e.bytes > 0]
     git_section = _collect_git_history(project, kept_files, GIT_HISTORY_BUDGET)
 
-    # ---- prior findings (skip current session — see _collect_prior_findings) ----
-    prior_section = _collect_prior_findings(
-        state_dir, project, PRIOR_FINDINGS_BUDGET,
-        current_session_dir=current_session_dir,
-    )
-
-    # ---- audit-patterns (F4 dependency, graceful fallback) ----
-    patterns_rel, patterns_text = _load_audit_patterns(project.name)
-    if patterns_text and len(patterns_text) > AUDIT_PATTERNS_BUDGET:
-        patterns_text = (
-            patterns_text[:AUDIT_PATTERNS_BUDGET]
-            + "\n... [audit-patterns truncated]"
+    # ---- prior findings (skipped for shipped_check — reviewer complaints are
+    # about past plan/impl defects, not about whether this task is already in
+    # main; they just add noise to the existence question). ----
+    if phase == "shipped_check":
+        prior_section = ""
+    else:
+        prior_section = _collect_prior_findings(
+            state_dir, project, PRIOR_FINDINGS_BUDGET,
+            current_session_dir=current_session_dir,
         )
+
+    # ---- audit-patterns (F4 dependency, graceful fallback). Also skipped
+    # for shipped_check — style/audit conventions don't help decide existence. ----
+    if phase == "shipped_check":
+        patterns_rel, patterns_text = None, ""
+    else:
+        patterns_rel, patterns_text = _load_audit_patterns(project.name)
+        if patterns_text and len(patterns_text) > AUDIT_PATTERNS_BUDGET:
+            patterns_text = (
+                patterns_text[:AUDIT_PATTERNS_BUDGET]
+                + "\n... [audit-patterns truncated]"
+            )
 
     # ---- assemble ----
     phase_label = {
         "plan_audit": "plan audit",
         "impl_review": "impl review",
+        "shipped_check": "shipped check",
     }[phase]
+    if phase == "shipped_check":
+        closing_note = (
+            "NOTE: Your job is to determine whether this task's functional "
+            "intent is already present in the code above or in the referenced "
+            "commits. Ground every claim in a file path, line number, or "
+            "commit SHA. Return SHIPPED only when the intent is fully "
+            "satisfied, PARTIAL when some but not all is present, and "
+            "NOT_SHIPPED otherwise. If evidence is ambiguous, return "
+            "UNCERTAIN — do not guess."
+        )
+    else:
+        closing_note = (
+            "NOTE: Only comment on things supported by this pack — either by "
+            "direct reference to a file/commit/prior-finding, or by a direct "
+            "contradiction you can point to in the code. If you cannot ground "
+            "a concern in the pack or in the code, it belongs in advisories[] "
+            "at most."
+        )
+
     pieces = [
         f"RELEVANCE PACK for {task_id} ({phase_label})",
         "=" * 60,
@@ -756,20 +788,19 @@ def build_pack(
         "## Recent commits in this area",
         git_section if git_section else "(no git history available)",
         "",
-        "## Prior reviewer findings",
-        prior_section if prior_section
-        else "(no prior findings for this project in scanned sessions)",
-        "",
-        "## Area memory (audit-patterns.md)",
-        patterns_text if patterns_text
-        else "(no audit-patterns.md for this project yet — F4 not shipped)",
-        "",
-        "NOTE: Only comment on things supported by this pack — either by direct "
-        "reference to a file/commit/prior-finding, or by a direct contradiction "
-        "you can point to in the code. If you cannot ground a concern in the "
-        "pack or in the code, it belongs in advisories[] at most.",
-        "",
     ]
+    if phase != "shipped_check":
+        pieces += [
+            "## Prior reviewer findings",
+            prior_section if prior_section
+            else "(no prior findings for this project in scanned sessions)",
+            "",
+            "## Area memory (audit-patterns.md)",
+            patterns_text if patterns_text
+            else "(no audit-patterns.md for this project yet — F4 not shipped)",
+            "",
+        ]
+    pieces += [closing_note, ""]
     text = "\n".join(pieces)
 
     # ---- meta sidecar ----
