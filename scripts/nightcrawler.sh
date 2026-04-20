@@ -1099,6 +1099,12 @@ run_shipped_check() {
         return 0
     fi
 
+    # F5.4c: capture start millis so we can report latency_ms in the
+    # shipped_check_complete journal event. Intentionally AFTER arg
+    # validation — we don't want skipped invocations to contribute.
+    local shipped_start_ms
+    shipped_start_ms=$(date +%s%3N)
+
     local scripts_dir
     scripts_dir="$(dirname "${BASH_SOURCE[0]}")"
     local task_dir="$SESSION_DIR/tasks/$task_id"
@@ -1175,7 +1181,11 @@ except Exception:
         cat > "$verdict_json" <<EOF
 {"schema_version": 1, "verdict": "UNCERTAIN", "confidence": "unknown", "summary": "$degrade_violation", "evidence": [], "open_questions": [], "contract_violations": ["$degrade_violation"], "method": "degrade", "model": "none", "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
 EOF
-        journal '{"event":"shipped_check_complete","task_id":"'"$task_id"'","verdict":"UNCERTAIN","confidence":"unknown","violations":["'"$degrade_violation"'"],"evidence_count":0,"open_questions_count":0}'
+        local shipped_end_ms shipped_latency_ms shipped_ts
+        shipped_end_ms=$(date +%s%3N)
+        shipped_latency_ms=$(( shipped_end_ms - shipped_start_ms ))
+        shipped_ts=$(date -u +%FT%TZ)
+        journal '{"event":"shipped_check_complete","task_id":"'"$task_id"'","verdict":"UNCERTAIN","confidence":"unknown","violations":["'"$degrade_violation"'"],"evidence_count":0,"open_questions_count":0,"ts":"'"$shipped_ts"'","latency_ms":'"$shipped_latency_ms"'}'
         rm -f "$prompt_file" "$shipped_stderr"
         return 0
     fi
@@ -1213,7 +1223,12 @@ print(json.dumps({
     open_questions_count="${open_questions_count:-0}"
     violations_json="${violations_json:-[]}"
 
-    journal '{"event":"shipped_check_complete","task_id":"'"$task_id"'","verdict":"'"$verdict"'","confidence":"'"$confidence"'","violations":'"$violations_json"',"evidence_count":'"$evidence_count"',"open_questions_count":'"$open_questions_count"'}'
+    local shipped_end_ms shipped_latency_ms shipped_ts
+    shipped_end_ms=$(date +%s%3N)
+    shipped_latency_ms=$(( shipped_end_ms - shipped_start_ms ))
+    shipped_ts=$(date -u +%FT%TZ)
+
+    journal '{"event":"shipped_check_complete","task_id":"'"$task_id"'","verdict":"'"$verdict"'","confidence":"'"$confidence"'","violations":'"$violations_json"',"evidence_count":'"$evidence_count"',"open_questions_count":'"$open_questions_count"',"ts":"'"$shipped_ts"'","latency_ms":'"$shipped_latency_ms"'}'
 
     rm -f "$prompt_file" "$shipped_stderr"
 
@@ -1225,7 +1240,7 @@ print(json.dumps({
             if ! grep -qx "$task_id" "$skip_file"; then
                 printf '%s\n' "$task_id" >> "$skip_file"
             fi
-            journal '{"event":"shipped_check_skipped","task_id":"'"$task_id"'","confidence":"'"$confidence"'","evidence_count":'"$evidence_count"'}'
+            journal '{"event":"shipped_check_skipped","task_id":"'"$task_id"'","confidence":"'"$confidence"'","evidence_count":'"$evidence_count"',"ts":"'"$shipped_ts"'"}'
             notify_normal "🛈 $task_id: F5 SHIPPED verdict (conf=$confidence, evidence=$evidence_count) — skipping"
             return 2
             ;;
@@ -1233,7 +1248,7 @@ print(json.dumps({
             if python3 "$scripts_dir/shipped_check.py" inject-partial \
                     --task-file "$task_file" \
                     --verdict-json "$verdict_json" 2>/dev/null; then
-                journal '{"event":"shipped_check_partial_inject","task_id":"'"$task_id"'","confidence":"'"$confidence"'","evidence_count":'"$evidence_count"',"open_questions_count":'"$open_questions_count"'}'
+                journal '{"event":"shipped_check_partial_inject","task_id":"'"$task_id"'","confidence":"'"$confidence"'","evidence_count":'"$evidence_count"',"open_questions_count":'"$open_questions_count"',"ts":"'"$shipped_ts"'"}'
                 notify_normal "🛈 $task_id: F5 PARTIAL verdict (conf=$confidence) — task_context augmented"
             else
                 log "run_shipped_check: inject-partial failed — proceeding with original task_context"

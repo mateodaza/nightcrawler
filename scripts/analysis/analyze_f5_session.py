@@ -128,6 +128,8 @@ def analyze(session_dir: Path) -> dict[str, Any]:
             "violations": e.get("violations") or [],
             "evidence_count": e.get("evidence_count", 0),
             "open_questions_count": e.get("open_questions_count", 0),
+            "ts": e.get("ts"),
+            "latency_ms": e.get("latency_ms"),
             "model": verdict_file.get("model") or (tcost[0].get("model") if tcost else None),
             "input_tokens": tcost[0].get("input_tokens") if tcost else None,
             "output_tokens": tcost[0].get("output_tokens") if tcost else None,
@@ -140,6 +142,16 @@ def analyze(session_dir: Path) -> dict[str, Any]:
                 else "proceed"
             ),
         })
+
+    # Latency: F5.4c added latency_ms to shipped_check_complete. Older sessions
+    # (pre-F5.4c) will be missing it — filter those out so they don't poison
+    # the stats with zeros, and surface a count of missing samples.
+    latency_values = [e.get("latency_ms") for e in shipped_complete
+                      if isinstance(e.get("latency_ms"), (int, float))]
+    latency_missing = len(shipped_complete) - len(latency_values)
+    latency_quantiles = quantiles([float(v) for v in latency_values])
+    # Check against PLAN-f5.md's <20s (20000ms) target.
+    over_target = sum(1 for v in latency_values if v >= 20000)
 
     # Token stats for cost attribution checks.
     input_tokens = quantiles([c.get("input_tokens", 0) or 0 for c in f5_costs])
@@ -176,15 +188,13 @@ def analyze(session_dir: Path) -> dict[str, Any]:
             "input": {k: round(v, 1) for k, v in input_tokens.items()},
             "output": {k: round(v, 1) for k, v in output_tokens.items()},
         },
-        "per_task": per_task,
-        "limitations": {
-            "latency": (
-                "not measured: shipped_check_complete journal event has no "
-                "timestamp, and cost.jsonl timestamps conflate F5 with free "
-                "pre-F5 ops (C0 scan, pick_next_task). Add ts to the journal "
-                "event for v2."
-            ),
+        "latency_ms": {
+            "samples": len(latency_values),
+            "missing": latency_missing,  # shipped_check_complete events without latency_ms (pre-F5.4c)
+            "over_target_20s": over_target,
+            **{k: round(v, 1) for k, v in latency_quantiles.items()},
         },
+        "per_task": per_task,
     }
 
 
@@ -225,19 +235,33 @@ def render_text(rpt: dict[str, Any]) -> str:
     w(f"  output tokens: mean={ot['mean']:.0f}  p95={ot['p95']:.0f}  max={ot['max']:.0f}")
     w("")
 
+    lat = rpt["latency_ms"]
+    if lat["samples"] > 0:
+        w(f"Latency (ms): samples={lat['samples']}  mean={lat['mean']:.0f}  "
+          f"p50={lat['p50']:.0f}  p95={lat['p95']:.0f}  max={lat['max']:.0f}")
+        over = lat["over_target_20s"]
+        target_line = f"  over 20s target: {over}/{lat['samples']}"
+        if over == 0:
+            target_line += "  (clean: all F5 calls within PLAN-f5.md <20s budget)"
+        w(target_line)
+        if lat["missing"]:
+            w(f"  note: {lat['missing']} shipped_check_complete events missing "
+              f"latency_ms (pre-F5.4c session data)")
+    else:
+        w("Latency: no samples with latency_ms (pre-F5.4c session, or all events missing the field)")
+    w("")
+
     w("Per-task:")
     for t in rpt["per_task"]:
         tok = ""
         if t["input_tokens"] is not None:
             tok = f" in={t['input_tokens']} out={t['output_tokens']} ${t['cost_usd']:.5f}"
+        latf = f" {t['latency_ms']}ms" if t.get("latency_ms") is not None else ""
         viol = f" violations={t['violations']}" if t["violations"] else ""
         summary = f" | {t['summary']}" if t["summary"] else ""
         w(f"  {t['task_id']:<12} {t['verdict']:<12} conf={t['confidence']:<6} "
           f"ev={t['evidence_count']} oq={t['open_questions_count']} "
-          f"dispatch={t['dispatched']}{tok}{viol}{summary}")
-    w("")
-
-    w(f"Limitations: {rpt['limitations']['latency']}")
+          f"dispatch={t['dispatched']}{latf}{tok}{viol}{summary}")
     return "\n".join(out)
 
 
