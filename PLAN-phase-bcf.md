@@ -423,7 +423,7 @@ This split preserves the core property you want: **deterministic changes stay de
 - Synthesize a task whose AC is satisfied by existing code but with no matching commit subject (e.g., function exists, was landed under a different task ID) — F5 catches it, C0 doesn't.
 - On NC-SMOKE-style trivial tasks with zero existing code, F5 returns NOT_SHIPPED in one Sonnet call (<15s), no false positives.
 
-**Rollback:** `NC_COMPANION_CHECK=1`, default off until validated.
+**Rollback:** `NC_COMPANION_CHECK=0` to disable per-session. Default **on** as of 2026-04-20 after n=6 probe validation.
 
 ---
 
@@ -494,7 +494,7 @@ Auditor also returns `complexity_tier` in B0 contract; disagreements log `tier_m
 **Flags and defaults:**
 - `NC_RECONCILE_QUEUE` — off until one clean overnight, then on.
 - `NC_RELEVANCE_PACK` — off until F1 validated, then on (high-impact, low-risk).
-- `NC_COMPANION_CHECK` — off until F5 validated.
+- `NC_COMPANION_CHECK` — **on** by default (2026-04-20). Set to 0 to disable.
 - `NC_COMPLEXITY_TIER` — off until F6 validated.
 - `NC_PLAN_INFLATION_GUARD` — off until B4 validated.
 - B0/F2/F3/F4 aren't flagged — they're prompt + contract rewrites, rollback is `git revert` or schema_version bump.

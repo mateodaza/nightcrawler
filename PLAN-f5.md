@@ -3,7 +3,7 @@ plan: F5 — Shipped-task awareness (companion-side)
 status: draft v2 (review)
 phase: BCF / MVP
 depends_on: C0 (shipped), F1 (shipped), F2 (shipped)
-gated_by: NC_COMPANION_CHECK=1 (default off)
+gated_by: NC_COMPANION_CHECK (default on, set NC_COMPANION_CHECK=0 to disable). Validated 2026-04-20 on n=6 probes.
 ---
 
 **v2 changes from v1 review:**
@@ -297,8 +297,10 @@ exact text the planner/auditor saw is recoverable.
 
 ## Rollout
 
-- `NC_COMPANION_CHECK=1` env flag, default **off** across all config
-  files.
+- `NC_COMPANION_CHECK` env flag, default **on** (2026-04-20, post-F5.4d
+  cap + SLO revision). Set `NC_COMPANION_CHECK=0` to disable per-session.
+  Historically was default off until validated on n=6 probes — see commit
+  history for evolution (F5.4a/b/c/d + SLO commit 8f9dc8b).
 - Turn on for one session against camello as the first live probe.
 - Compare against F1 canary pattern: journal the 4 event types, inspect
   verdict distribution + confidence distribution + latency + cost.

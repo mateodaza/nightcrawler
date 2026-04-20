@@ -1066,7 +1066,7 @@ Session: ${SESSION_ID:-manual}" || log "verify_task_not_shipped: queue commit fa
 }
 
 # run_shipped_check <task_id> <task_file>
-# F5 companion-side existence check. No-ops unless NC_COMPANION_CHECK=1.
+# F5 companion-side existence check. Runs unless NC_COMPANION_CHECK=0.
 #
 # Returns:
 #   0 — proceed with task (PARTIAL / NOT_SHIPPED / UNCERTAIN, or gate off)
@@ -1085,7 +1085,7 @@ Session: ${SESSION_ID:-manual}" || log "verify_task_not_shipped: queue commit fa
 # Failure modes (prompt build, claude call, parse failure) degrade to
 # UNCERTAIN + proceed rather than special-casing the control flow.
 run_shipped_check() {
-    [[ "${NC_COMPANION_CHECK:-0}" == "1" ]] || return 0
+    [[ "${NC_COMPANION_CHECK:-1}" == "1" ]] || return 0
 
     local task_id="$1"
     local task_file="$2"
