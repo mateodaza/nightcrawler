@@ -1900,11 +1900,20 @@ implement_task() {
     local learnings
     learnings=$(get_session_learnings 2>/dev/null || true)
 
+    # If a previous attempt at this task passed review but failed post-commit
+    # build/test, splice the captured failure output into the prompt so this
+    # retry can address the root cause instead of replicating the same bug.
+    local retry_verify_block=""
+    local _rv_path; _rv_path=$(retry_verify_context_path "$task_id")
+    if [[ -s "$_rv_path" ]]; then
+        retry_verify_block=$'\n'"PREVIOUS POST-COMMIT VERIFICATION FAILURE (the previous attempt at this task was committed but failed build/test — the commit was reverted. Address the root cause shown below, not just the symptom lines):"$'\n'"$(cat "$_rv_path")"$'\n'
+    fi
+
     prompt="You are implementing a task for a ${PROJECT_DESC} project.
 
 PLAN (your primary source of truth — implement exactly this):
 ${plan}
-${learnings}
+${learnings}${retry_verify_block}
 RULES (coding standards — follow these for style and patterns):
 ${rules}
 
@@ -1993,6 +2002,15 @@ revise_impl() {
     local learnings
     learnings=$(get_session_learnings 2>/dev/null || true)
 
+    # If a previous attempt at this task was committed and failed post-commit
+    # verification, splice the captured failure into the prompt. The retry
+    # path re-enters impl_loop so revise_impl can also run under retry pressure.
+    local retry_verify_block=""
+    local _rv_path; _rv_path=$(retry_verify_context_path "$TASK_ID")
+    if [[ -s "$_rv_path" ]]; then
+        retry_verify_block=$'\n'"PREVIOUS POST-COMMIT VERIFICATION FAILURE (a prior attempt at this task was committed but failed build/test — the commit was reverted. Address the root cause below alongside the reviewer feedback):"$'\n'"$(cat "$_rv_path")"$'\n'
+    fi
+
     prompt="You are revising an implementation that was rejected by the code reviewer.
 
 PLAN (the approved design — your changes must still match this):
@@ -2000,7 +2018,7 @@ ${plan}
 
 REVIEWER FEEDBACK (iteration $iteration):
 ${feedback}
-${learnings}
+${learnings}${retry_verify_block}
 RULES (coding standards):
 ${rules}
 
@@ -2468,20 +2486,52 @@ Nightcrawler-Task: $task_id"
     echo "$hash"
 }
 
+# Path where verify_post_commit writes a summarized failure artifact that
+# implement_task/revise_impl splice into the retry prompt. Single, predictable,
+# per-task location so stale context can't leak into other tasks.
+retry_verify_context_path() {
+    local task_id="$1"
+    echo "$SESSION_DIR/tasks/$task_id/verify_retry_context.md"
+}
+
 verify_post_commit() {
-    local task_id="$1" commit_hash="$2"
+    local task_id="$1" commit_hash="$2" attempt="${3:-1}"
     cd "$PROJECT_PATH"
 
+    local task_dir="$SESSION_DIR/tasks/$task_id"
+    mkdir -p "$task_dir"
+    local verify_log="$task_dir/verify_attempt_${attempt}.log"
+    local retry_ctx; retry_ctx=$(retry_verify_context_path "$task_id")
+
     set +e
-    run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD
-    local b=$?
-    run_timed $TEST_WALL $TEST_IDLE $TEST_CMD
-    local t=$?
+    run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD 2>&1 | tee "$verify_log"
+    local b=${PIPESTATUS[0]}
+    run_timed $TEST_WALL $TEST_IDLE $TEST_CMD 2>&1 | tee -a "$verify_log"
+    local t=${PIPESTATUS[0]}
     set -e
 
     if [[ $b -ne 0 ]] || [[ $t -ne 0 ]]; then
+        # Build retry-context artifact: tail 200 lines, strip ANSI, hard-cap
+        # ~7KB of body (leaves room for header/fences inside the 8KB budget).
+        local body
+        body=$(tail -n 200 "$verify_log" | sed -E 's/\x1b\[[0-9;]*[mGKH]//g' | tail -c 7000)
+        {
+            echo "# Post-commit verification failure (attempt $attempt, commit ${commit_hash:0:8})"
+            echo
+            echo "Build exit: $b. Test exit: $t."
+            echo
+            echo '```'
+            echo "$body"
+            echo '```'
+        } > "$retry_ctx"
+        log "Verify failed for $task_id (attempt $attempt, build=$b test=$t). Retry context: $retry_ctx"
+        journal '{"event":"verify_failed","task_id":"'"$task_id"'","commit":"'"$commit_hash"'","attempt":'"$attempt"',"build_exit":'"$b"',"test_exit":'"$t"'}'
         return 1
     fi
+
+    # Success: clear any stale retry-context artifact so later runs / re-queues
+    # of this task_id can't splice in a prior failure's stderr.
+    rm -f "$retry_ctx" 2>/dev/null || true
 
     journal '{"event":"task_verified","task_id":"'"$task_id"'","commit":"'"$commit_hash"'"}'
     return 0
@@ -3100,7 +3150,7 @@ Remaining: $(count_tasks) tasks"
 
         # Post-commit verification
         local revert_count=0
-        if ! verify_post_commit "$TASK_ID" "$commit_hash"; then
+        if ! verify_post_commit "$TASK_ID" "$commit_hash" 1; then
             revert_count=$((revert_count + 1))
             if ! handle_post_commit_failure "$TASK_ID" "$commit_hash" "$revert_count"; then
                 escalate_urgent "LOCKED ($PROJECT): $TASK_ID post-commit verify failed 2x"
@@ -3123,7 +3173,7 @@ Remaining: $(count_tasks) tasks"
                 echo "$TASK_ID" >> "$CONTROL_DIR/skip"
                 continue
             fi
-            if ! verify_post_commit "$TASK_ID" "$commit_hash"; then
+            if ! verify_post_commit "$TASK_ID" "$commit_hash" 2; then
                 handle_post_commit_failure "$TASK_ID" "$commit_hash" 2
                 escalate_urgent "LOCKED ($PROJECT): $TASK_ID post-commit verify failed 2x after re-impl"
                 echo "$TASK_ID" >> "$CONTROL_DIR/skip"
