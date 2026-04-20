@@ -1132,6 +1132,13 @@ run_shipped_check() {
         if (( rc != 0 )) || [[ -z "$raw_output" ]]; then
             degrade_violation="claude_call_failed"
         else
+            # F5.3c P1 fix: the call succeeded, so this prompt MUST be
+            # counted against the session cap and logged to the cost ledger
+            # before we do anything else. Skipping this would hide F5 usage
+            # from PROMPT_COUNT / TASK_COST / TOTAL_COST. Parse failures
+            # later in the pipeline don't refund the prompt — the Claude
+            # subscription already billed it.
+            log_claude_cli_cost "$raw_output" "$task_id" "shipped_check"
             answer=$(echo "$raw_output" | python3 -c '
 import sys, json
 try:
@@ -2907,6 +2914,25 @@ main_loop() {
             break
         fi
 
+        # Budget gate (F5.3c P2 fix): hoisted ABOVE the stale-pick loop so
+        # F5's Claude hop is gated the same way plan/impl already were.
+        # Pre-F5 this check lived after the loop — harmless then because
+        # the loop was all free operations (C0 git scan), but F5 makes it
+        # the session's first expensive hop per iteration and we don't
+        # want to spend it when we're already at cap.
+        if ! budget_pre_check; then
+            log "Prompt cap reached (${PROMPT_COUNT}/${PROMPT_CAP}) — ending session"
+            notify_normal "Prompt cap reached (${PROMPT_COUNT}/${PROMPT_CAP}). Ending session."
+            break
+        fi
+
+        # Kill switch (also hoisted — no reason to start a stale-pick loop
+        # if the operator just asked us to stop).
+        if [[ -f "/tmp/nightcrawler-budget-kill" ]]; then
+            log "Kill switch active — ending session"
+            break
+        fi
+
         # C0 + F5 post-pick guard: re-pick up to 3x if the chosen task is
         # already shipped — either per C0's deterministic merge-base..dev
         # scan OR per F5's companion-side LLM verdict. Same counter, same
@@ -2959,18 +2985,10 @@ main_loop() {
             break
         fi
 
-        # Budget gate
-        if ! budget_pre_check; then
-            log "Prompt cap reached (${PROMPT_COUNT}/${PROMPT_CAP}) — ending session"
-            notify_normal "Prompt cap reached (${PROMPT_COUNT}/${PROMPT_CAP}). Ending session."
-            break
-        fi
-
-        # Kill switch
-        if [[ -f "/tmp/nightcrawler-budget-kill" ]]; then
-            log "Kill switch active — ending session"
-            break
-        fi
+        # Budget gate + kill switch already enforced above, before the
+        # stale-pick loop (F5.3c P2). No re-check here — anything that
+        # raced between the hoisted gate and here is caught by the
+        # end-of-task budget_pre_check.
 
         log "=== Starting task $TASK_ID ==="
         TASK_COST=0
