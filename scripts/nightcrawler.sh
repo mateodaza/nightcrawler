@@ -399,9 +399,18 @@ log_claude_cli_cost() {
 
     # Extract cost/tokens — Sonnet is free on Max but API-equivalent USD is a
     # useful reference metric for understanding how much work was done.
+    # task_id/phase are threaded via env vars (F5.4a fix) so cost.jsonl
+    # entries can be attributed to a specific phase — required for F5
+    # telemetry and broadly useful for per-phase cost audits.
     local cost_info
-    cost_info=$(echo "$raw_output" | python3 -c "
-import sys, json
+    cost_info=$(echo "$raw_output" | NC_TASK_ID="$task_id" NC_PHASE="$phase" python3 -c "
+import os, sys, json
+_task = os.environ.get('NC_TASK_ID') or None
+_phase = os.environ.get('NC_PHASE') or None
+def _attach(d):
+    if _task: d['task_id'] = _task
+    if _phase: d['phase'] = _phase
+    return d
 try:
     data = json.load(sys.stdin)
     cost = data.get('total_cost_usd', data.get('cost_usd', data.get('cost', 0)))
@@ -411,9 +420,9 @@ try:
         + usage.get('cache_read_input_tokens', 0)
     out = usage.get('output_tokens', 0)
     model = list(data.get('modelUsage', {}).keys())[0] if data.get('modelUsage') else data.get('model', 'unknown')
-    print(json.dumps({'cost_usd': cost, 'input_tokens': inp, 'output_tokens': out, 'model': model, 'source': 'claude'}))
+    print(json.dumps(_attach({'cost_usd': cost, 'input_tokens': inp, 'output_tokens': out, 'model': model, 'source': 'claude'})))
 except:
-    print(json.dumps({'cost_usd': 0, 'input_tokens': 0, 'output_tokens': 0, 'model': 'unknown', 'source': 'claude'}))
+    print(json.dumps(_attach({'cost_usd': 0, 'input_tokens': 0, 'output_tokens': 0, 'model': 'unknown', 'source': 'claude'})))
 " 2>/dev/null)
 
     local cost
