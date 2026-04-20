@@ -1,17 +1,34 @@
 #!/usr/bin/env python3
 """
-shipped_check.py — F5 companion-side existence check (Codex CLI primary, API fallback).
+shipped_check.py — F5 companion-side existence check (parser + prompt emitter).
 
-Runs BEFORE the planner to decide whether a backlog task's functional intent
-is already satisfied by code on the active branch. The orchestrator uses the
-verdict to skip, re-scope, or proceed normally.
+This module has two responsibilities and nothing else:
+
+1. `build-prompt` subcommand — assemble the F1 relevance pack in
+   phase="shipped_check" mode, combine it with the persona prompt and the v1
+   JSON schema instructions, and emit the full prompt body to stdout. The
+   bash orchestrator owns the actual LLM call (see nightcrawler.sh F5.3 wiring
+   — `call_claude 60 "$prompt" --model sonnet --output-format json --max-turns 1`).
+
+2. `parse_shipped_verdict(content) / --parse-test` — normalize a model response
+   into the v1 contract shape with conservative coercion rules. SHIPPED is the
+   aggressive verdict (it makes the orchestrator SKIP the task entirely), so
+   the parser biases hard toward UNCERTAIN: SHIPPED without evidence or with
+   less-than-high confidence is downgraded with a `contract_violations` tag.
 
 Usage:
-    shipped_check.py check --task-id <id> --task-file <path> --project <path> \\
-        [--session-dir <path>]
-    shipped_check.py --parse-test   (read response from stdin, emit parsed JSON; no LLM)
-    shipped_check.py --test         (validate Codex CLI or API connectivity; delegates
-                                     to call_codex.test_connectivity)
+    shipped_check.py build-prompt --task-id <id> --task-file <path> \\
+        --project <path> [--session-dir <path>]
+    shipped_check.py --parse-test   (read response from stdin, emit parsed JSON)
+
+Why parser + emitter (not orchestrator):
+The previous shape of this file invoked `call_codex.codex_cli_exec` / `call_api`
+directly. That exercised a different model, budget, and failure surface than
+the F5 plan and cost assumptions were built around. The orchestrator (bash)
+now drives the call via the same `call_claude` path as every other Claude
+hop, keeping budget, retry, streaming, and cost accounting unified. This
+file stays pure: no network, no subprocess, no env assumptions beyond the
+pack builder's own.
 
 Output (v1 contract, schema_version: 1):
     {
@@ -30,37 +47,24 @@ Output (v1 contract, schema_version: 1):
             | "shipped_low_confidence_coerced"
         ],
 
-        // Metadata:
-        "method": "cli" | "api" | "test",
-        "model": "...",
-        "cost_usd": ...,
-        "input_tokens": ..., "output_tokens": ...
+        // Metadata stamped by --parse-test:
+        "method": "parse-test",
+        "model": "parse-test",
+        "cost_usd": 0.0,
+        "input_tokens": 0, "output_tokens": 0
     }
-
-Design notes:
-- Reuses the F1 relevance-pack builder with `phase="shipped_check"` (task spec
-  + likely files + per-file git history, no prior-findings or audit-patterns).
-- The prompt body lives in scripts/prompts/shipped_check.md so it can be edited
-  without code changes. If the file is missing, an inline fallback is used and
-  a warning is printed to stderr (the orchestrator should not crash just
-  because the prompt file was deleted).
-- Safety coercions bias toward UNCERTAIN — a false SHIPPED skips the task
-  outright, a false NOT_SHIPPED only costs one planner round. SHIPPED requires
-  confidence="high" AND non-empty evidence[]; violations are coerced to
-  UNCERTAIN with a contract_violations tag.
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-
-import call_codex  # noqa: E402
 
 SCHEMA_VERSION = 1
 PROMPT_PATH = SCRIPTS_DIR / "prompts" / "shipped_check.md"
@@ -79,6 +83,61 @@ confidence="high" — a false SHIPPED loses work; a false NOT_SHIPPED only costs
 one planner round.
 """
 
+
+# ---------------------------------------------------------------------------
+# JSON extraction — inlined from call_codex so this module stays
+# self-contained. Kept byte-identical to the call_codex version so any bug
+# fixes there should be mirrored here (and vice versa); divergence would
+# cause parse_shipped_verdict and the auditor to disagree on the same input.
+# ---------------------------------------------------------------------------
+
+_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
+
+
+def _extract_json_object(content: str):
+    """Return the first parseable JSON object in content, or None.
+
+    Handles responses that wrap JSON in ```json ... ``` fences or in prose.
+    Strategy: strip fences, then try progressively larger candidate slices
+    starting at the first '{' and working outward.
+    """
+    if not content:
+        return None
+
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\n?", "", stripped)
+        stripped = re.sub(r"\n?```\s*$", "", stripped)
+
+    # Fast path — whole thing is JSON
+    try:
+        obj = json.loads(stripped)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    # Slow path — find the largest {...} block that parses
+    m = _JSON_OBJECT_RE.search(stripped)
+    if not m:
+        return None
+    candidate = m.group(0)
+    while candidate:
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        candidate = candidate[:-1]
+        if len(candidate) < 2:
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembly
+# ---------------------------------------------------------------------------
 
 def _load_prompt_body() -> str:
     """Read scripts/prompts/shipped_check.md; fall back to an inline stub."""
@@ -125,6 +184,58 @@ RULES:
 """.strip()
 
 
+def _build_shipped_pack(task_text: str, task_id: str, project_path: str,
+                        session_dir: str = None) -> dict:
+    """Assemble the F1 relevance pack in shipped_check mode. Returns the dict
+    from relevance_pack.build_pack (keys: text, meta, artifacts)."""
+    lib_dir = SCRIPTS_DIR
+    if str(lib_dir) not in sys.path:
+        sys.path.insert(0, str(lib_dir))
+    from lib import relevance_pack  # type: ignore
+
+    artifact_dir = None
+    state_dir = os.environ.get("NIGHTCRAWLER_STATE_PATH")
+    if session_dir:
+        artifact_dir = str(Path(session_dir) / "relevance-packs")
+        if not state_dir:
+            try:
+                state_dir = str(Path(session_dir).resolve().parent.parent)
+            except OSError:
+                state_dir = None
+
+    return relevance_pack.build_pack(
+        task_text=task_text,
+        task_id=task_id or "unknown",
+        phase="shipped_check",
+        project_path=project_path or ".",
+        state_dir=state_dir,
+        artifact_dir=artifact_dir,
+        current_session_dir=session_dir,
+    )
+
+
+def assemble_prompt(task_text: str, task_id: str, project_path: str,
+                    session_dir: str = None) -> str:
+    """Combine persona + pack + schema into a single prompt body. Pure string
+    assembly — no LLM call. The bash orchestrator owns the call."""
+    pack = _build_shipped_pack(task_text, task_id, project_path, session_dir)
+    pack_meta_path = pack["artifacts"].get("meta_path")
+    if pack_meta_path:
+        print(f"shipped_check pack meta: {pack_meta_path}", file=sys.stderr)
+
+    prompt_body = _load_prompt_body()
+    return f"""{prompt_body}
+
+{pack["text"]}
+
+{_schema_instructions()}"""
+
+
+# ---------------------------------------------------------------------------
+# Parser — the invariant piece. Everything above is prompt shaping; this is
+# the contract F5.3 depends on for verdict normalization.
+# ---------------------------------------------------------------------------
+
 def _empty() -> dict:
     """Shape of an empty-but-valid v1 response (default = UNCERTAIN)."""
     return {
@@ -148,7 +259,7 @@ def parse_shipped_verdict(content: str) -> dict:
 
     Always returns a dict with all v1 fields populated.
     """
-    obj = call_codex._extract_json_object(content or "")
+    obj = _extract_json_object(content or "")
     violations: list = []
 
     if obj is None or not isinstance(obj, dict):
@@ -218,145 +329,62 @@ def parse_shipped_verdict(content: str) -> dict:
     return out
 
 
-def _build_shipped_pack(task_text: str, task_id: str, project_path: str,
-                        session_dir: str = None) -> dict:
-    """Assemble the F1 relevance pack in shipped_check mode. Returns the dict
-    from relevance_pack.build_pack (keys: text, meta, artifacts)."""
-    lib_dir = SCRIPTS_DIR
-    if str(lib_dir) not in sys.path:
-        sys.path.insert(0, str(lib_dir))
-    from lib import relevance_pack  # type: ignore
+# ---------------------------------------------------------------------------
+# CLI entry points
+# ---------------------------------------------------------------------------
 
-    artifact_dir = None
-    state_dir = os.environ.get("NIGHTCRAWLER_STATE_PATH")
-    if session_dir:
-        artifact_dir = str(Path(session_dir) / "relevance-packs")
-        if not state_dir:
-            try:
-                state_dir = str(Path(session_dir).resolve().parent.parent)
-            except OSError:
-                state_dir = None
-
-    return relevance_pack.build_pack(
-        task_text=task_text,
-        task_id=task_id or "unknown",
-        phase="shipped_check",
-        project_path=project_path or ".",
-        state_dir=state_dir,
-        artifact_dir=artifact_dir,
-        current_session_dir=session_dir,
-    )
-
-
-def _emit(parsed: dict, *, method: str, model: str,
-          cost_usd: float, input_tokens: int = 0,
-          output_tokens: int = 0) -> None:
-    """Write the final JSON to stdout with metadata attached."""
-    parsed["method"] = method
-    parsed["model"] = model
-    parsed["cost_usd"] = cost_usd
-    parsed["input_tokens"] = input_tokens
-    parsed["output_tokens"] = output_tokens
+def _emit_parse_result(parsed: dict) -> None:
+    """Stamp parse-test metadata and print one JSON line. Kept in sync with
+    the bash wrapper's expectations — the call_claude layer supplies its own
+    method/model/cost metadata when it invokes the parser."""
+    parsed["method"] = "parse-test"
+    parsed["model"] = "parse-test"
+    parsed["cost_usd"] = 0.0
+    parsed["input_tokens"] = 0
+    parsed["output_tokens"] = 0
     print(json.dumps(parsed))
 
 
-def _maybe_log_prompt(prompt: str) -> None:
-    """Dump the assembled shipped_check prompt to stderr when NC_LOG_SHIPPED_PROMPT=1.
-    Mirrors the NC_LOG_AUDIT_PROMPT pattern from call_codex."""
-    if os.environ.get("NC_LOG_SHIPPED_PROMPT") != "1":
-        return
-    print(f"=== shipped_check prompt (NC_LOG_SHIPPED_PROMPT=1, {len(prompt)} bytes) ===",
-          file=sys.stderr)
-    print(prompt, file=sys.stderr)
-    print("=== shipped_check prompt END ===", file=sys.stderr)
-
-
-def run_check(task_id: str, task_file: str, project_path: str,
-              session_dir: str = None) -> None:
-    """Run the shipped_check against a single task. Emits parsed JSON to stdout."""
-    task_text = Path(task_file).read_text()
+def build_prompt_cli(task_id: str, task_file: str, project_path: str,
+                     session_dir: str = None) -> None:
+    """Assemble the prompt and write it to stdout for the bash caller."""
+    try:
+        task_text = Path(task_file).read_text()
+    except OSError as exc:
+        print(f"shipped_check: cannot read task file {task_file}: {exc}",
+              file=sys.stderr)
+        sys.exit(2)
 
     try:
-        pack = _build_shipped_pack(task_text, task_id, project_path, session_dir)
-    except Exception as exc:  # defensive — never let the pack break the check
-        print(f"shipped_check: pack build failed ({exc}); emitting UNCERTAIN",
-              file=sys.stderr)
-        out = _empty()
-        out["contract_violations"] = ["pack_build_failed"]
-        out["summary"] = f"pack build failed: {exc}"
-        _emit(out, method="test", model="pack-failure", cost_usd=0.0)
-        return
+        prompt = assemble_prompt(task_text, task_id, project_path, session_dir)
+    except Exception as exc:  # defensive — nightcrawler.sh treats non-zero as skip-check
+        print(f"shipped_check: prompt assembly failed ({exc})", file=sys.stderr)
+        sys.exit(3)
 
-    pack_meta_path = pack["artifacts"].get("meta_path")
-    if pack_meta_path:
-        print(f"shipped_check pack meta: {pack_meta_path}", file=sys.stderr)
-
-    prompt_body = _load_prompt_body()
-    prompt = f"""{prompt_body}
-
-{pack["text"]}
-
-{_schema_instructions()}"""
-    _maybe_log_prompt(prompt)
-
-    # Try Codex CLI first (gpt-5.4), same as the auditor pipeline.
-    if call_codex.codex_cli_available():
-        cli_result = call_codex.codex_cli_exec(prompt, project_path)
-        if cli_result.get("content") and not cli_result.get("error"):
-            parsed = parse_shipped_verdict(cli_result["content"])
-            _emit(parsed, method="cli", model=cli_result.get("model", "gpt-5.4"),
-                  cost_usd=0.0)
-            return
-        print(f"shipped_check: CLI failed ({cli_result.get('error', 'unknown')}); "
-              "falling back to API", file=sys.stderr)
-
-    # API fallback.
-    system_prompt = (
-        "You are the Nightcrawler shipped-task checker. Decide whether a task's "
-        "functional intent is already present in the code shown in the user "
-        "message. Return a single JSON object per the schema — no prose.\n\n"
-        + _schema_instructions()
-    )
-    try:
-        api_result = call_codex.call_api(system_prompt, prompt)
-    except Exception as exc:
-        print(f"shipped_check: API call failed ({exc}); emitting UNCERTAIN",
-              file=sys.stderr)
-        out = _empty()
-        out["contract_violations"] = ["api_call_failed"]
-        out["summary"] = f"API call failed: {exc}"
-        _emit(out, method="test", model="api-failure", cost_usd=0.0)
-        return
-
-    parsed = parse_shipped_verdict(api_result["content"])
-    _emit(
-        parsed,
-        method=api_result["method"],
-        model=api_result["model"],
-        cost_usd=api_result["cost_usd"],
-        input_tokens=api_result.get("input_tokens", 0),
-        output_tokens=api_result.get("output_tokens", 0),
-    )
+    sys.stdout.write(prompt)
+    if not prompt.endswith("\n"):
+        sys.stdout.write("\n")
 
 
 def parse_test() -> None:
     """Read a response from stdin, emit parsed v1 JSON. No LLM call."""
     content = sys.stdin.read()
     parsed = parse_shipped_verdict(content)
-    _emit(parsed, method="test", model="parse-test", cost_usd=0.0)
+    _emit_parse_result(parsed)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="F5 shipped-task check (Nightcrawler companion)"
+        description="F5 shipped-task check — parser + prompt emitter "
+                    "(the bash orchestrator owns the LLM call)"
     )
-    parser.add_argument("command", nargs="?", choices=["check"], default=None)
+    parser.add_argument("command", nargs="?",
+                        choices=["build-prompt"], default=None,
+                        help="build-prompt: assemble persona + pack + schema "
+                             "and emit to stdout")
     parser.add_argument("--parse-test", action="store_true", dest="parse_test",
                         help="Read a response body from stdin and emit parsed "
                              "v1 JSON (no LLM call)")
-    parser.add_argument("--test", action="store_true",
-                        help="Validate Codex CLI/API connectivity "
-                             "(delegates to call_codex.test_connectivity)")
     parser.add_argument("--task-id", dest="task_id", default=None)
     parser.add_argument("--task-file", dest="task_file", default=None)
     parser.add_argument("--project", dest="project", default=None)
@@ -366,12 +394,11 @@ if __name__ == "__main__":
 
     if args.parse_test:
         parse_test()
-    elif args.test:
-        call_codex.test_connectivity()
-    elif args.command == "check":
+    elif args.command == "build-prompt":
         if not (args.task_id and args.task_file and args.project):
-            parser.error("check requires --task-id, --task-file, --project")
-        run_check(args.task_id, args.task_file, args.project, args.session_dir)
+            parser.error("build-prompt requires --task-id, --task-file, --project")
+        build_prompt_cli(args.task_id, args.task_file, args.project,
+                         args.session_dir)
     else:
         parser.print_help()
         sys.exit(1)

@@ -280,6 +280,78 @@ def test_schema_version_non_int_falls_back() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Architectural invariants — shipped_check.py is parser + prompt emitter.
+# No LLM call path, no call_codex coupling. F5.3's nightcrawler.sh owns the
+# model call via the shared call_claude helper.
+# ---------------------------------------------------------------------------
+
+def test_module_does_not_import_call_codex() -> None:
+    """Regression for Codex audit P1 #1: the previous shape imported
+    call_codex and invoked codex_cli_exec/call_api directly, which meant F5
+    was silently running through the OpenAI auditor path instead of the
+    planned Sonnet path. Keep the module free of that import so a refactor
+    drift can't quietly reintroduce it."""
+    print("\n[test] shipped_check does not import call_codex")
+    src = Path(shipped_check.__file__).read_text()
+    lines = src.splitlines()
+    import_lines = [ln for ln in lines
+                    if ln.strip().startswith(("import ", "from "))]
+    _check("no 'import call_codex' in module source",
+           not any("call_codex" in ln for ln in import_lines),
+           str([ln for ln in import_lines if "call_codex" in ln]))
+    _check("no run_check() orchestrator function",
+           not hasattr(shipped_check, "run_check"),
+           "found shipped_check.run_check — should live in bash, not python")
+
+
+def test_build_prompt_emits_pack_persona_and_schema() -> None:
+    """`build-prompt` must emit a prompt string containing: the persona
+    block (from scripts/prompts/shipped_check.md or the inline fallback),
+    the F1 relevance pack header, and the v1 JSON schema RESPONSE FORMAT
+    instructions. The bash caller feeds this straight to `call_claude`."""
+    import tempfile
+    print("\n[test] assemble_prompt emits persona + pack + schema instructions")
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = Path(tmp) / "proj"
+        proj.mkdir()
+        (proj / "src").mkdir()
+        (proj / "src" / "a.ts").write_text("// BUILD_PROMPT_CANARY\n")
+        task_file = proj / "task.md"
+        task_file.write_text(
+            "# NC-BP\n\n## Files\n- src/a.ts\n\n## AC\n- canary exists\n"
+        )
+
+        prompt = shipped_check.assemble_prompt(
+            task_text=task_file.read_text(),
+            task_id="NC-BP",
+            project_path=str(proj),
+            session_dir=None,
+        )
+        _check("prompt is non-trivial in size", len(prompt) > 500,
+               f"{len(prompt)} bytes")
+        _check("prompt includes shipped_check persona language",
+               "shipped-task checker" in prompt.lower()
+               or "NOT_SHIPPED" in prompt,
+               prompt[:300])
+        _check("prompt embeds the relevance pack header",
+               "RELEVANCE PACK for NC-BP" in prompt,
+               prompt[:400])
+        _check("prompt embeds the Task section from the pack",
+               "## Task" in prompt, prompt[:600])
+        _check("prompt embeds the Likely touched files section",
+               "## Likely touched files" in prompt, prompt[:600])
+        _check("prompt shows the canary excerpt from src/a.ts",
+               "BUILD_PROMPT_CANARY" in prompt, prompt[-400:])
+        _check("prompt ends with v1 schema RESPONSE FORMAT block",
+               "RESPONSE FORMAT" in prompt
+               and "schema_version" in prompt,
+               prompt[-500:])
+        _check("prompt requires SHIPPED+evidence+high-confidence",
+               "evidence[]" in prompt and "high" in prompt,
+               prompt[-500:])
+
+
+# ---------------------------------------------------------------------------
 # Sanity: prompt file is shipped alongside the script.
 # ---------------------------------------------------------------------------
 
@@ -313,6 +385,8 @@ def main() -> int:
     test_malformed_evidence_list_sanitized()
     test_unknown_confidence_normalised()
     test_schema_version_non_int_falls_back()
+    test_module_does_not_import_call_codex()
+    test_build_prompt_emits_pack_persona_and_schema()
     test_prompt_file_present_and_non_empty()
 
     print()
