@@ -19,6 +19,7 @@ This module has two responsibilities and nothing else:
 Usage:
     shipped_check.py build-prompt --task-id <id> --task-file <path> \\
         --project <path> [--session-dir <path>]
+    shipped_check.py inject-partial --task-file <path> --verdict-json <path>
     shipped_check.py --parse-test   (read response from stdin, emit parsed JSON)
 
 Why parser + emitter (not orchestrator):
@@ -330,6 +331,156 @@ def parse_shipped_verdict(content: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# PARTIAL injection — rewrite task_context.md with a preamble block when the
+# shipped_check returns PARTIAL. The original spec is snapshotted to
+# task_context.original.md on first call and left alone on subsequent calls
+# (so retries / resume don't clobber the first-seen spec).
+# ---------------------------------------------------------------------------
+
+_PARTIAL_INSTRUCTION = (
+    "Planner and auditor: extend existing work; already-satisfied ACs are "
+    "'shipped — verify only'."
+)
+
+
+def format_partial_block(verdict_obj: dict) -> str:
+    """Return the PARTIAL preamble block (no trailing original spec).
+
+    Shape:
+        ## Shipped-task check: <VERDICT>
+
+        **Summary:** <one or two sentences>
+
+        **Evidence:**
+        - (file) `path:line` — excerpt
+        - (commit) `sha` — subject
+
+        **Open questions:**
+        - q1
+        - q2
+
+        Planner and auditor: extend existing work; already-satisfied ACs are
+        'shipped — verify only'.
+
+        ---
+
+    Empty evidence[] / open_questions[] sections are omitted entirely rather
+    than rendered as empty headers, so the block stays readable when the
+    model returns a sparse verdict.
+    """
+    verdict = str(verdict_obj.get("verdict", "UNCERTAIN") or "UNCERTAIN")
+    summary = str(verdict_obj.get("summary", "") or "").strip()
+    evidence = verdict_obj.get("evidence") or []
+    open_questions = verdict_obj.get("open_questions") or []
+
+    lines: list = []
+    lines.append(f"## Shipped-task check: {verdict}")
+    lines.append("")
+
+    if summary:
+        lines.append(f"**Summary:** {summary}")
+        lines.append("")
+
+    if isinstance(evidence, list) and evidence:
+        rendered: list = []
+        for e in evidence:
+            if not isinstance(e, dict):
+                continue
+            etype = str(e.get("type", "") or "").strip()
+            ref = str(e.get("ref", "") or "").strip()
+            excerpt = str(e.get("excerpt", "") or "").strip()
+            parts: list = []
+            if etype:
+                parts.append(f"({etype})")
+            if ref:
+                parts.append(f"`{ref}`")
+            if excerpt:
+                parts.append(f"— {excerpt}")
+            if parts:
+                rendered.append("- " + " ".join(parts))
+        if rendered:
+            lines.append("**Evidence:**")
+            lines.extend(rendered)
+            lines.append("")
+
+    if isinstance(open_questions, list) and open_questions:
+        rendered_q: list = []
+        for q in open_questions:
+            q_str = str(q).strip()
+            if q_str:
+                rendered_q.append(f"- {q_str}")
+        if rendered_q:
+            lines.append("**Open questions:**")
+            lines.extend(rendered_q)
+            lines.append("")
+
+    lines.append(_PARTIAL_INSTRUCTION)
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _original_snapshot_path(task_file: Path) -> Path:
+    """task_context.md → task_context.original.md (stem + '.original' + suffix)."""
+    suffix = task_file.suffix or ".md"
+    stem = task_file.stem or "task"
+    return task_file.with_name(f"{stem}.original{suffix}")
+
+
+def inject_partial_cli(task_file: str, verdict_json: str) -> None:
+    """Read verdict_json, snapshot task_file → <stem>.original<suffix> (only
+    if absent), and rewrite task_file with the PARTIAL block prepended to the
+    original spec.
+
+    Idempotency contract (matches feedback: "preserve original only once"):
+    - First call: copies current task_file → .original.md, writes block + original.
+    - Subsequent calls: reads from .original.md (ignoring whatever's currently
+      in task_file), rewrites task_file with fresh block + original. The
+      .original.md snapshot is never overwritten.
+    """
+    task_path = Path(task_file)
+    if not task_path.exists():
+        print(f"shipped_check: task file {task_file} not found",
+              file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        verdict_obj = json.loads(Path(verdict_json).read_text())
+    except (OSError, ValueError) as exc:
+        print(f"shipped_check: cannot read verdict JSON {verdict_json}: {exc}",
+              file=sys.stderr)
+        sys.exit(2)
+
+    original_path = _original_snapshot_path(task_path)
+
+    if not original_path.exists():
+        try:
+            original_text = task_path.read_text()
+            original_path.write_text(original_text)
+        except OSError as exc:
+            print(f"shipped_check: cannot snapshot original task file: {exc}",
+                  file=sys.stderr)
+            sys.exit(3)
+    else:
+        try:
+            original_text = original_path.read_text()
+        except OSError as exc:
+            print(f"shipped_check: cannot read original snapshot "
+                  f"{original_path}: {exc}", file=sys.stderr)
+            sys.exit(3)
+
+    block = format_partial_block(verdict_obj)
+    try:
+        task_path.write_text(block + original_text)
+    except OSError as exc:
+        print(f"shipped_check: cannot write augmented task file "
+              f"{task_path}: {exc}", file=sys.stderr)
+        sys.exit(3)
+
+
+# ---------------------------------------------------------------------------
 # CLI entry points
 # ---------------------------------------------------------------------------
 
@@ -379,9 +530,13 @@ if __name__ == "__main__":
                     "(the bash orchestrator owns the LLM call)"
     )
     parser.add_argument("command", nargs="?",
-                        choices=["build-prompt"], default=None,
+                        choices=["build-prompt", "inject-partial"],
+                        default=None,
                         help="build-prompt: assemble persona + pack + schema "
-                             "and emit to stdout")
+                             "and emit to stdout. "
+                             "inject-partial: rewrite --task-file with the "
+                             "PARTIAL preamble from --verdict-json (snapshots "
+                             "original to <stem>.original<suffix> once).")
     parser.add_argument("--parse-test", action="store_true", dest="parse_test",
                         help="Read a response body from stdin and emit parsed "
                              "v1 JSON (no LLM call)")
@@ -389,6 +544,9 @@ if __name__ == "__main__":
     parser.add_argument("--task-file", dest="task_file", default=None)
     parser.add_argument("--project", dest="project", default=None)
     parser.add_argument("--session-dir", dest="session_dir", default=None)
+    parser.add_argument("--verdict-json", dest="verdict_json", default=None,
+                        help="Path to parsed shipped_check verdict JSON "
+                             "(inject-partial only)")
 
     args = parser.parse_args()
 
@@ -399,6 +557,10 @@ if __name__ == "__main__":
             parser.error("build-prompt requires --task-id, --task-file, --project")
         build_prompt_cli(args.task_id, args.task_file, args.project,
                          args.session_dir)
+    elif args.command == "inject-partial":
+        if not (args.task_file and args.verdict_json):
+            parser.error("inject-partial requires --task-file and --verdict-json")
+        inject_partial_cli(args.task_file, args.verdict_json)
     else:
         parser.print_help()
         sys.exit(1)

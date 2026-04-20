@@ -352,6 +352,166 @@ def test_build_prompt_emits_pack_persona_and_schema() -> None:
 
 
 # ---------------------------------------------------------------------------
+# inject-partial — task_context.md augmentation on PARTIAL verdicts.
+# ---------------------------------------------------------------------------
+
+def test_inject_partial_block_format() -> None:
+    """inject-partial writes a block with header, summary, evidence,
+    open-questions, the one-line planner/auditor instruction, --- separator,
+    then the original task spec preserved below."""
+    import tempfile
+    print("\n[test] inject-partial produces the 6-part PARTIAL block")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        task_file = tmpdir / "task_context.md"
+        original_spec = "# NC-42 [P] Do thing\n\n## AC\n- AC-1 handler works\n"
+        task_file.write_text(original_spec)
+
+        verdict = {
+            "schema_version": 1,
+            "verdict": "PARTIAL",
+            "confidence": "medium",
+            "summary": "AC-1 already landed in handlers.ts",
+            "evidence": [
+                {"type": "file", "ref": "src/handlers.ts:10",
+                 "excerpt": "export function handle(req)"},
+            ],
+            "open_questions": ["Does AC-2 still need a tenant check?"],
+        }
+        vj = tmpdir / "verdict.json"
+        vj.write_text(json.dumps(verdict))
+
+        shipped_check.inject_partial_cli(str(task_file), str(vj))
+        out = task_file.read_text()
+
+        _check("header present",
+               "## Shipped-task check: PARTIAL" in out, out[:200])
+        _check("summary present",
+               "AC-1 already landed in handlers.ts" in out, out[:400])
+        _check("evidence header present",
+               "**Evidence:**" in out, out[:500])
+        _check("evidence bullet rendered",
+               "src/handlers.ts:10" in out and "handle(req)" in out,
+               out[:600])
+        _check("open_questions header present",
+               "**Open questions:**" in out, out[:700])
+        _check("open_questions bullet rendered",
+               "Does AC-2 still need a tenant check?" in out, out[:800])
+        _check("planner/auditor instruction present",
+               "Planner and auditor: extend existing work" in out, out[-400:])
+        _check("separator present",
+               "\n---\n" in out, out[-200:])
+        _check("original spec preserved at end",
+               original_spec.strip() in out, out[-400:])
+        _check("block precedes separator precedes original spec",
+               out.index("## Shipped-task check")
+               < out.index("\n---\n")
+               < out.index("# NC-42"))
+
+
+def test_inject_partial_preserves_original_once() -> None:
+    """On first call, task_context.original.md is created as a snapshot of
+    the first-seen task spec. Subsequent calls (retries, resume) must NOT
+    overwrite .original.md — it stays pinned to the first-seen content even
+    if task_context.md has since been augmented."""
+    import tempfile
+    print("\n[test] inject-partial preserves .original.md once (retry-safe)")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        task_file = tmpdir / "task_context.md"
+        first_spec = "FIRST-SPEC\n\n- original AC line\n"
+        task_file.write_text(first_spec)
+
+        verdict = {"verdict": "PARTIAL", "summary": "s",
+                   "evidence": [], "open_questions": []}
+        vj = tmpdir / "verdict.json"
+        vj.write_text(json.dumps(verdict))
+
+        shipped_check.inject_partial_cli(str(task_file), str(vj))
+        original_path = tmpdir / "task_context.original.md"
+        _check(".original.md created on first call",
+               original_path.exists(), str(original_path))
+        _check(".original.md contains first-seen spec",
+               original_path.read_text() == first_spec,
+               repr(original_path.read_text())[:200])
+        _check("task_context.md contains first spec after first call",
+               first_spec.strip() in task_file.read_text())
+
+        # Simulate a second inject (retry / resume). At this point
+        # task_context.md already has a block prepended. Running inject-partial
+        # again must rebuild from .original.md, NOT from the augmented file.
+        shipped_check.inject_partial_cli(str(task_file), str(vj))
+        _check(".original.md unchanged on second call",
+               original_path.read_text() == first_spec)
+
+        # Retry output should still contain exactly one copy of the original
+        # spec — not the first-call augmented file appended onto itself.
+        rewritten = task_file.read_text()
+        _check("retried task_context contains exactly one copy of first spec",
+               rewritten.count("FIRST-SPEC") == 1,
+               f"count={rewritten.count('FIRST-SPEC')}")
+        _check("retried task_context has exactly one block header",
+               rewritten.count("## Shipped-task check:") == 1,
+               f"count={rewritten.count('## Shipped-task check:')}")
+
+
+def test_inject_partial_sparse_verdict() -> None:
+    """Sparse verdicts (empty evidence[] / open_questions[]) should still
+    produce a readable block — the empty sub-sections are omitted rather than
+    rendered as bare '**Evidence:**\n' headers."""
+    import tempfile
+    print("\n[test] inject-partial omits empty subsections on sparse verdict")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        task_file = tmpdir / "task_context.md"
+        task_file.write_text("# NC-99\n\nbody\n")
+
+        verdict = {"verdict": "PARTIAL", "summary": "", "evidence": [],
+                   "open_questions": []}
+        vj = tmpdir / "verdict.json"
+        vj.write_text(json.dumps(verdict))
+
+        shipped_check.inject_partial_cli(str(task_file), str(vj))
+        out = task_file.read_text()
+
+        _check("header still present",
+               "## Shipped-task check: PARTIAL" in out, out[:200])
+        _check("no empty Evidence header",
+               "**Evidence:**" not in out, out[:300])
+        _check("no empty Open questions header",
+               "**Open questions:**" not in out, out[:300])
+        _check("instruction line still present",
+               "Planner and auditor: extend existing work" in out, out[:400])
+        _check("separator still present", "\n---\n" in out, out[:400])
+        _check("original body preserved",
+               "body" in out and "# NC-99" in out, out[-200:])
+
+
+def test_inject_partial_block_format_standalone() -> None:
+    """format_partial_block() is a pure function — no file IO. Verifies the
+    block shape independent of the CLI wrapper (so bash integration tests can
+    assert against the same invariant without touching the filesystem)."""
+    print("\n[test] format_partial_block is pure and covers all sections")
+    block = shipped_check.format_partial_block({
+        "verdict": "PARTIAL",
+        "summary": "sum",
+        "evidence": [{"type": "commit", "ref": "abc123",
+                      "excerpt": "feat: thing"}],
+        "open_questions": ["q?"],
+    })
+    _check("pure-function block has header",
+           "## Shipped-task check: PARTIAL" in block, block[:120])
+    _check("pure-function block has summary", "**Summary:** sum" in block,
+           block[:300])
+    _check("pure-function block has evidence entry",
+           "(commit)" in block and "abc123" in block, block[:400])
+    _check("pure-function block has open_questions entry",
+           "- q?" in block, block[:500])
+    _check("pure-function block ends with ---",
+           block.rstrip().endswith("---"), repr(block[-100:]))
+
+
+# ---------------------------------------------------------------------------
 # Sanity: prompt file is shipped alongside the script.
 # ---------------------------------------------------------------------------
 
@@ -387,6 +547,10 @@ def main() -> int:
     test_schema_version_non_int_falls_back()
     test_module_does_not_import_call_codex()
     test_build_prompt_emits_pack_persona_and_schema()
+    test_inject_partial_block_format()
+    test_inject_partial_preserves_original_once()
+    test_inject_partial_sparse_verdict()
+    test_inject_partial_block_format_standalone()
     test_prompt_file_present_and_non_empty()
 
     print()
