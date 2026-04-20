@@ -351,6 +351,45 @@ def test_build_prompt_emits_pack_persona_and_schema() -> None:
                prompt[-500:])
 
 
+
+
+# ---------------------------------------------------------------------------
+# F5.4d — response-size caps in the schema instructions. Live probe data
+# (n=3) showed shipped_check latency tracked output tokens, not pack size;
+# these caps are the primary quality-preserving lever against the <20s
+# budget. See feedback_f5_tuning_levers.md.
+# ---------------------------------------------------------------------------
+
+def test_prompt_includes_response_size_caps() -> None:
+    """shipped_check prompt must instruct the model to cap evidence[] at 3,
+    open_questions[] at 2, and keep summary + excerpts terse. Prompt-level
+    caps are the first lever because latency scales with output tokens."""
+    import tempfile
+    print("\n[test] schema instructions include response-size caps")
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = Path(tmp) / "proj"
+        proj.mkdir()
+        task_file = proj / "task.md"
+        task_file.write_text("# NC-CAP\n\n## AC\n- x\n")
+        prompt = shipped_check.assemble_prompt(
+            task_text=task_file.read_text(),
+            task_id="NC-CAP",
+            project_path=str(proj),
+            session_dir=None,
+        )
+        _check("prompt caps evidence[] at 3",
+               "Maximum 3 `evidence[]`" in prompt,
+               prompt[-800:])
+        _check("prompt caps open_questions[] at 2",
+               "Maximum 2 `open_questions[]`" in prompt,
+               prompt[-800:])
+        _check("prompt instructs summary to one sentence by default",
+               "one sentence" in prompt,
+               prompt[-800:])
+        _check("prompt instructs excerpts to be short",
+               "short line" in prompt or "not a code block" in prompt,
+               prompt[-800:])
+
 # ---------------------------------------------------------------------------
 # inject-partial — task_context.md augmentation on PARTIAL verdicts.
 # ---------------------------------------------------------------------------
@@ -547,6 +586,7 @@ def main() -> int:
     test_schema_version_non_int_falls_back()
     test_module_does_not_import_call_codex()
     test_build_prompt_emits_pack_persona_and_schema()
+    test_prompt_includes_response_size_caps()
     test_inject_partial_block_format()
     test_inject_partial_preserves_original_once()
     test_inject_partial_sparse_verdict()

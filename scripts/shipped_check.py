@@ -163,11 +163,11 @@ markdown fences, no preamble.
 {{
   "verdict": "SHIPPED" | "PARTIAL" | "NOT_SHIPPED" | "UNCERTAIN",
   "confidence": "high" | "medium" | "low",
-  "summary": "one or two sentences — what you observed",
+  "summary": "one sentence — two only if ambiguity requires it",
   "evidence": [
     {{"type": "file" | "commit",
       "ref": "path/to/file:42  OR  <commit-sha>",
-      "excerpt": "the specific line or commit subject that grounds this point"}}
+      "excerpt": "one short line — not a code block"}}
   ],
   "open_questions": ["specific checks the planner should verify"],
   "schema_version": {SCHEMA_VERSION}
@@ -181,6 +181,13 @@ RULES:
 - NOT_SHIPPED: nothing in the pack satisfies the task.
 - UNCERTAIN: evidence ambiguous, pack thin, or task underspecified. PREFER
   UNCERTAIN OVER GUESSING.
+- KEEP IT TERSE — this check runs before every planner pass and its
+  latency is the verdict you feel:
+  * Maximum 3 `evidence[]` entries; cite only the most load-bearing ones.
+  * Maximum 2 `open_questions[]`; pick the decisive ones the planner needs.
+  * Each `excerpt` is one short line — the `ref` is what grounds the
+    claim, not a code block.
+  * `summary` is one sentence; two only if genuine ambiguity requires it.
 - Never include prose outside the JSON object.
 """.strip()
 
