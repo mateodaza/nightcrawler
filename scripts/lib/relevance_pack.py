@@ -406,17 +406,29 @@ def _read_excerpt(project: Path, rel: str,
     return summary, len(summary), True
 
 
-def _collect_git_history(project: Path, files: List[str], budget: int) -> str:
-    """`git log -5 --oneline -- <file>` for each kept file, aggregated under
-    the section budget. Stops cleanly when budget is exhausted."""
+def _collect_git_history(project: Path, files: List[str], budget: int,
+                         *, depth: int = 5,
+                         all_branches: bool = False) -> str:
+    """`git log -<depth> [--all] --oneline -- <file>` for each kept file,
+    aggregated under the section budget. Stops cleanly when budget is exhausted.
+
+    The `all_branches` flag is required for shipped_check: F5 exists to catch
+    work that landed on a side branch or before the current merge-base, and
+    current-branch-only log can't see either. plan_audit / impl_review keep
+    the narrower default to avoid polluting their packs with unrelated WIP
+    branches."""
     if not files or budget <= 0:
         return ""
     out_parts: List[str] = []
     used = 0
+    base_args = ["git", "log", f"-{int(depth)}"]
+    if all_branches:
+        base_args.append("--all")
+    base_args.append("--oneline")
     for f in files:
         try:
             proc = subprocess.run(
-                ["git", "log", "-5", "--oneline", "--", f],
+                base_args + ["--", f],
                 cwd=str(project),
                 capture_output=True,
                 text=True,
@@ -438,6 +450,66 @@ def _collect_git_history(project: Path, files: List[str], budget: int) -> str:
         out_parts.append(block)
         used += len(block)
     return "\n".join(out_parts)
+
+
+# Budget for the shipped_check "Recent commits matching task intent" section.
+# Lives inside the existing GIT_HISTORY_BUDGET envelope — this is the half
+# dedicated to repo-wide keyword matches. Per-file history gets the other half.
+INTENT_COMMITS_BUDGET = 1000
+# How many recent commits to scan repo-wide for task-intent matching.
+INTENT_COMMITS_SCAN = 50
+# Per-file history depth used only by shipped_check. plan_audit/impl_review
+# keep the default depth=5 (see _collect_git_history). Deeper here because
+# F5 is looking for a specific landing that may not be the most recent
+# touch in the file's history.
+SHIPPED_CHECK_HISTORY_DEPTH = 20
+
+
+def _collect_intent_commits(project: Path, keywords: List[str],
+                            budget: int) -> str:
+    """F5-only: scan the last N commits across all branches, keep the ones
+    whose subject overlaps the task keyword set.
+
+    This is the cross-task / pre-merge-base detector. C0 already greps for
+    the exact task_id in commit messages over merge-base..dev, but can't see
+    commits that (a) implement the task intent without naming the task_id,
+    or (b) landed before the dev branch's merge-base with main. F5 covers
+    both by searching the task's semantic keyword set against recent repo
+    activity.
+
+    Returns a rendered section body (newline-separated `<sha> <subject>`
+    lines) or empty string if no keywords / no matches / git fails.
+    """
+    if not keywords or budget <= 0:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["git", "log", f"-{INTENT_COMMITS_SCAN}", "--all", "--oneline"],
+            cwd=str(project),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+
+    lowered_keywords = {k.lower() for k in keywords}
+    matches: List[str] = []
+    for line in proc.stdout.splitlines():
+        subject_lower = line.lower()
+        # A single keyword match is enough — these are already noise-filtered
+        # terms from AC/requirements sections.
+        hits = [k for k in lowered_keywords if k in subject_lower]
+        if hits:
+            matches.append(f"{line}  [matches: {', '.join(sorted(hits)[:4])}]")
+    if not matches:
+        return ""
+    joined = "\n".join(matches)
+    if len(joined) > budget:
+        joined = joined[:budget] + "\n... [intent commits truncated]"
+    return joined
 
 
 def _collect_prior_findings(state_dir: Optional[str],
@@ -725,7 +797,25 @@ def build_pack(
 
     # ---- git history (only for files that made it into excerpts) ----
     kept_files = [e.path for e in entries if e.bytes > 0]
-    git_section = _collect_git_history(project, kept_files, GIT_HISTORY_BUDGET)
+    if phase == "shipped_check":
+        # F5 needs deeper history across all branches — a feature that ships
+        # on a side branch or lands before the current merge-base is exactly
+        # what shipped_check is designed to catch, and current-branch-only
+        # `git log -5` can't see it. Split the existing GIT_HISTORY_BUDGET:
+        # per-file history gets half, repo-wide intent-commits gets the other.
+        per_file_budget = max(GIT_HISTORY_BUDGET - INTENT_COMMITS_BUDGET, 0)
+        git_section = _collect_git_history(
+            project, kept_files, per_file_budget,
+            depth=SHIPPED_CHECK_HISTORY_DEPTH, all_branches=True,
+        )
+        intent_section = _collect_intent_commits(
+            project, keywords, INTENT_COMMITS_BUDGET,
+        )
+    else:
+        git_section = _collect_git_history(
+            project, kept_files, GIT_HISTORY_BUDGET,
+        )
+        intent_section = ""
 
     # ---- prior findings (skipped for shipped_check — reviewer complaints are
     # about past plan/impl defects, not about whether this task is already in
@@ -789,7 +879,18 @@ def build_pack(
         git_section if git_section else "(no git history available)",
         "",
     ]
-    if phase != "shipped_check":
+    if phase == "shipped_check":
+        # Cross-task / pre-merge-base detector. Surfaces commits on any
+        # branch whose subject line overlaps the task's semantic keywords,
+        # even when those commits never touched the files the selector chose.
+        pieces += [
+            "## Recent commits matching task intent",
+            intent_section if intent_section
+            else "(no keyword-matching commits found in the last "
+                 f"{INTENT_COMMITS_SCAN} across all branches)",
+            "",
+        ]
+    else:
         pieces += [
             "## Prior reviewer findings",
             prior_section if prior_section

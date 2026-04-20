@@ -653,6 +653,108 @@ def test_shipped_check_keeps_task_and_excerpts_and_git_history() -> None:
                "SHIP_COMMIT_MSG" in text, text[-600:])
 
 
+def test_shipped_check_sees_commits_on_other_branches() -> None:
+    """F5 P1: shipped_check per-file history must use --all so a feature
+    that landed on a side branch (or before merge-base) is still visible.
+    Regression for Codex audit finding: old _collect_git_history was
+    current-branch-only `git log -5`, which was exactly the blind spot
+    F5 exists to cover."""
+    print("\n[test] shipped_check: commit on side branch is visible (--all)")
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_project(Path(tmp), {"src/a.ts": "// initial\n"})
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=proj, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-qm", "MAIN_BASE"], cwd=proj, check=True)
+        # Land the "feature" on a side branch that main never merges.
+        subprocess.run(["git", "checkout", "-q", "-b", "feat/sidebranch"],
+                       cwd=proj, check=True)
+        (proj / "src" / "a.ts").write_text("// updated on side branch\n")
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-qm",
+                        "SIDEBRANCH_CANARY_SUBJECT"], cwd=proj, check=True)
+        # Switch back so "current branch" does NOT contain the canary commit.
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=proj, check=True)
+
+        out = relevance_pack.build_pack(
+            task_text="## Files\n- src/a.ts\n\n## AC\n- update exists",
+            task_id="NC-S-SIDE", phase="shipped_check",
+            project_path=str(proj),
+        )
+        _check("side-branch commit subject reaches shipped_check pack",
+               "SIDEBRANCH_CANARY_SUBJECT" in out["text"],
+               out["text"][-800:])
+
+        # And plan_audit (narrower default) should NOT see it — that's the
+        # whole reason we pass all_branches=True only for shipped_check.
+        out_plan = relevance_pack.build_pack(
+            task_text="## Files\n- src/a.ts\n\n## AC\n- update exists",
+            task_id="NC-S-SIDE", phase="plan_audit",
+            project_path=str(proj),
+        )
+        _check("plan_audit keeps current-branch-only history (no leak)",
+               "SIDEBRANCH_CANARY_SUBJECT" not in out_plan["text"],
+               out_plan["text"][-400:])
+
+
+def test_shipped_check_intent_commits_section() -> None:
+    """F5 P1: shipped_check pack includes a 'Recent commits matching task
+    intent' section that surfaces commits on any branch whose subject
+    overlaps the task's keyword set — even when those commits don't touch
+    any of the selector-picked files."""
+    print("\n[test] shipped_check: intent-keyword commit surfaces in new section")
+    with tempfile.TemporaryDirectory() as tmp:
+        # Selector-picked file is src/unrelated.ts. The 'shipped' evidence
+        # lives on a *different* file that the selector won't pick, but the
+        # commit subject overlaps the task's AC keyword set.
+        proj = _make_project(Path(tmp), {
+            "src/unrelated.ts": "// placeholder\n",
+            "src/shipped_feature.ts": "// implementation body\n",
+        })
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=proj, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=proj, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        # Keyword 'tenant_isolation' will appear in task AC below.
+        subprocess.run(["git", "commit", "-qm",
+                        "feat: enforce tenant_isolation on leads endpoint"],
+                       cwd=proj, check=True)
+
+        out = relevance_pack.build_pack(
+            task_text=(
+                "# NC-INTENT\n\n"
+                "## Files\n- src/unrelated.ts\n\n"
+                "## Acceptance Criteria\n"
+                "- tenant_isolation is enforced on the leads endpoint\n"
+            ),
+            task_id="NC-INTENT", phase="shipped_check",
+            project_path=str(proj),
+        )
+        text = out["text"]
+        _check("intent-commits section header present",
+               "## Recent commits matching task intent" in text,
+               text[-600:])
+        _check("keyword-matching commit subject appears in section",
+               "tenant_isolation" in text and "leads endpoint" in text,
+               text[-600:])
+        _check("matches-annotation shown next to commit",
+               "[matches:" in text, text[-600:])
+
+        # plan_audit and impl_review must NOT grow this section.
+        out_plan = relevance_pack.build_pack(
+            task_text=(
+                "## Files\n- src/unrelated.ts\n\n"
+                "## AC\n- tenant_isolation enforced\n"
+            ),
+            task_id="NC-INTENT", phase="plan_audit",
+            project_path=str(proj),
+        )
+        _check("plan_audit does NOT include intent-commits section",
+               "Recent commits matching task intent" not in out_plan["text"],
+               out_plan["text"][-300:])
+
+
 def test_truncate_to_fit_preserves_last_entry() -> None:
     """When an entry would exceed remaining budget, truncate to fit rather
     than drop — a half-file of a decisive .tsx beats a full file of noise.
@@ -695,6 +797,8 @@ def main() -> int:
     test_shipped_check_same_selector_as_plan_audit()
     test_shipped_check_omits_prior_findings_and_audit_patterns()
     test_shipped_check_keeps_task_and_excerpts_and_git_history()
+    test_shipped_check_sees_commits_on_other_branches()
+    test_shipped_check_intent_commits_section()
     test_truncate_to_fit_preserves_last_entry()
 
     print()
