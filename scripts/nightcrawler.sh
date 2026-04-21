@@ -2547,6 +2547,87 @@ retry_verify_context_path() {
     echo "$SESSION_DIR/tasks/$task_id/verify_retry_context.md"
 }
 
+# Extract a bounded, diagnostic-prioritized section from a log file.
+# Emits first-matching diagnostic lines (compile/test error signatures) before
+# the tail so the implementer sees the actionable error without scrolling.
+# Output is capped independently: diag_cap + tail_cap bytes each, ANSI-stripped.
+#
+# Usage: _retry_section_body <log_path> <diag_cap> <tail_cap>
+_retry_section_body() {
+    local log="$1" diag_cap="$2" tail_cap="$3"
+    if [[ ! -s "$log" ]]; then
+        echo "(no output)"
+        return 0
+    fi
+    local stripped
+    stripped=$(sed -E 's/\x1b\[[0-9;]*[mGKH]//g' "$log")
+
+    local diag
+    diag=$(grep -E 'error TS[0-9]+|TS[0-9]{4}|Error:|Exception|ELIFECYCLE|FAIL |failed with exit code' <<< "$stripped" \
+        | head -n 20 | tail -c "$diag_cap" || true)
+
+    local tail_body
+    tail_body=$(tail -n 200 <<< "$stripped" | tail -c "$tail_cap")
+
+    if [[ -n "$diag" ]]; then
+        echo "Diagnostic lines:"
+        echo "$diag"
+        echo
+        echo "Tail:"
+    fi
+    echo "$tail_body"
+}
+
+# Write the retry-context artifact with separate, independently-capped build
+# and test sections. Failed section(s) go FIRST so the implementer reads the
+# actionable error before any passing output. A noisy test-phase cannot drown
+# out a build failure (previous single-tail design had that failure mode,
+# reproduced live on NC-402 / 2026-04-21).
+#
+# Usage: write_retry_context <retry_ctx_path> <task_id> <commit_hash> <attempt>
+#                            <build_log> <build_exit> <test_log> <test_exit>
+write_retry_context() {
+    local retry_ctx="$1" task_id="$2" commit_hash="$3" attempt="$4"
+    local build_log="$5" build_exit="$6"
+    local test_log="$7" test_exit="$8"
+
+    local build_body test_body
+    build_body=$(_retry_section_body "$build_log" 1024 3072)
+    test_body=$(_retry_section_body "$test_log"  1024 2048)
+
+    # Order: any failed phase first (build before test when both failed),
+    # then any passing phase. Implementer sees the actionable error up top.
+    local order=()
+    if [[ $build_exit -ne 0 ]]; then order+=("build"); fi
+    if [[ $test_exit  -ne 0 ]]; then order+=("test");  fi
+    if [[ $build_exit -eq 0 ]]; then order+=("build"); fi
+    if [[ $test_exit  -eq 0 ]]; then order+=("test");  fi
+
+    {
+        echo "# Post-commit verification failure (attempt $attempt, commit ${commit_hash:0:8})"
+        echo
+        echo "Build exit: $build_exit. Test exit: $test_exit."
+        echo
+        local phase status exit body
+        for phase in "${order[@]}"; do
+            if [[ "$phase" == "build" ]]; then
+                exit=$build_exit
+                body="$build_body"
+            else
+                exit=$test_exit
+                body="$test_body"
+            fi
+            if [[ $exit -eq 0 ]]; then status="passed"; else status="failed"; fi
+            echo "## $phase ($status, exit $exit)"
+            echo
+            echo '```'
+            echo "$body"
+            echo '```'
+            echo
+        done
+    } > "$retry_ctx"
+}
+
 verify_post_commit() {
     local task_id="$1" commit_hash="$2" attempt="${3:-1}"
     cd "$PROJECT_PATH"
@@ -2554,29 +2635,23 @@ verify_post_commit() {
     local task_dir="$SESSION_DIR/tasks/$task_id"
     mkdir -p "$task_dir"
     local verify_log="$task_dir/verify_attempt_${attempt}.log"
+    local build_log="$task_dir/verify_build_attempt_${attempt}.log"
+    local test_log="$task_dir/verify_test_attempt_${attempt}.log"
     local retry_ctx; retry_ctx=$(retry_verify_context_path "$task_id")
 
+    # Truncate in case a prior attempt left partial content at these paths.
+    : > "$verify_log"; : > "$build_log"; : > "$test_log"
+
     set +e
-    run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD 2>&1 | tee "$verify_log"
+    run_timed $BUILD_WALL $BUILD_IDLE $BUILD_CMD 2>&1 | tee "$build_log" >> "$verify_log"
     local b=${PIPESTATUS[0]}
-    run_timed $TEST_WALL $TEST_IDLE $TEST_CMD 2>&1 | tee -a "$verify_log"
+    run_timed $TEST_WALL $TEST_IDLE $TEST_CMD 2>&1 | tee "$test_log" >> "$verify_log"
     local t=${PIPESTATUS[0]}
     set -e
 
     if [[ $b -ne 0 ]] || [[ $t -ne 0 ]]; then
-        # Build retry-context artifact: tail 200 lines, strip ANSI, hard-cap
-        # ~7KB of body (leaves room for header/fences inside the 8KB budget).
-        local body
-        body=$(tail -n 200 "$verify_log" | sed -E 's/\x1b\[[0-9;]*[mGKH]//g' | tail -c 7000)
-        {
-            echo "# Post-commit verification failure (attempt $attempt, commit ${commit_hash:0:8})"
-            echo
-            echo "Build exit: $b. Test exit: $t."
-            echo
-            echo '```'
-            echo "$body"
-            echo '```'
-        } > "$retry_ctx"
+        write_retry_context "$retry_ctx" "$task_id" "$commit_hash" "$attempt" \
+            "$build_log" "$b" "$test_log" "$t"
         log "Verify failed for $task_id (attempt $attempt, build=$b test=$t). Retry context: $retry_ctx"
         journal '{"event":"verify_failed","task_id":"'"$task_id"'","commit":"'"$commit_hash"'","attempt":'"$attempt"',"build_exit":'"$b"',"test_exit":'"$t"'}'
         return 1
