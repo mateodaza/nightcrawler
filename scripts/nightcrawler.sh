@@ -2754,8 +2754,16 @@ execute_recovery() {
 
     if [[ ${#recovery_expected[@]} -gt 0 ]]; then
         git add -- "${recovery_expected[@]}"
-        git commit -m "[nightcrawler] recovery: reconcile session $RECOVERY_SESSION_ID"
-        log "RECOVERY: Committed recovery mutations"
+        # Recovery sed (e.g. [~]→[ ]) may byte-for-byte cancel the aborted
+        # session's mark — yielding an empty staged diff. git commit would
+        # exit 1 ("nothing to commit, working tree clean") and kill the script
+        # under set -e. Check the staged diff first; skip the commit if empty.
+        if ! git -C "$PROJECT_PATH" diff --cached --quiet; then
+            git commit -m "[nightcrawler] recovery: reconcile session $RECOVERY_SESSION_ID"
+            log "RECOVERY: Committed recovery mutations"
+        else
+            log "RECOVERY: No net changes to commit (mutations canceled out)"
+        fi
     fi
 }
 
