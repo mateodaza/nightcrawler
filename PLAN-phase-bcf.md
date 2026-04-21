@@ -429,7 +429,11 @@ This split preserves the core property you want: **deterministic changes stay de
 
 ### F6 — Task-type modes (companion stance) [subsumes prior B2]
 
-**Problem.** The prior B2 (complexity tier) only changed loop iteration counts. What Mateo correctly surfaced: different task types need different **stances**, not just different iteration counts.
+**Problem.** Two failure modes motivate this:
+
+1. *Prior framing (B2):* different task types need different **stances**, not just different iteration counts. TRIVIAL tasks get architectural pushback they don't need; RISKY tasks get advisory treatment when strict review is warranted.
+
+2. *New evidence from NC-397 (2026-04-21):* without orchestrator-owned tier authority at task pickup, the auditor re-negotiates complexity implicitly via rejection + re-audit cycles. NC-397 burned 5 plan iterations at $12.19 total, with the audited `complexity_tier` oscillating STANDARD → RISKY → RISKY → RISKY → STANDARD across iterations. The expensive phase is plan/audit calibration, not post-impl review churn. See `project_f6_planner_thrash_evidence.md`.
 
 **Change.** Three modes, dispatched by `complexity_tier`:
 
@@ -456,11 +460,22 @@ Tier derivation (cheap pre-LLM heuristic in bash, same as prior B2):
 
 Auditor also returns `complexity_tier` in B0 contract; disagreements log `tier_mismatch`.
 
+**Slice plan:**
+
+- **F6a (observe-only):** Ship `derive_complexity_tier()` + `task_tier` journal event per task (with a `signals` object capturing which inputs drove the classification) + `tier_mismatch` logging vs the auditor-returned tier. No behavior change — audit stance and loop caps unchanged. Purpose: validate the heuristic against real traffic before any stance change ships. Rollback: purely additive.
+- **F6b (stance + caps):** Wire the stance prompts per the tier table and tier-specific loop caps. Requires ≥3 sessions of F6a data to tune the heuristic and confirm `tier_mismatch` rate is tolerable.
+
 **Files:** `scripts/nightcrawler.sh` (`derive_complexity_tier()`), audit prompt assembly adds stance block based on tier.
 
-**Acceptance:**
-- Replay NC-SMOKE with F1+F4+F6 → TRIVIAL, companion mode, plan approved iter 1, impl approved iter 1, wall time <5 min.
+**Acceptance (F6a, observe-only):**
+- `task_tier` journal event written for every task with derived tier, including a `signals` object (e.g. `{ac_count, listed_files, keywords}`) so future debugging can see why the heuristic picked the tier.
+- `tier_mismatch` event written when auditor-returned tier differs from orchestrator's.
+- F6a does not intentionally alter planner/auditor prompts, loop caps, or dispatch behavior; any cost or iteration movement is treated as noise unless traced to the patch.
+
+**Acceptance (F6b, stance + caps):**
+- Replay NC-SMOKE with F1+F4+F6 → TRIVIAL, companion mode, plan approved iter 1, impl approved iter 1, wall time <5 min, cost <$3.
 - Synthesize a schema-migration task → RISKY, strict bar, any medium advisory promoted to blocking.
+- No tier oscillation across plan iterations on any single task (the NC-397 failure mode).
 - Journal has `task_tier` + `stance_applied` events per task.
 
 **Rollback:** `NC_COMPLEXITY_TIER=1`, off → everyone gets STANDARD.
