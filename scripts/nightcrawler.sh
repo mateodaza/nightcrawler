@@ -1262,6 +1262,42 @@ print(json.dumps({
     esac
 }
 
+# F6a (observe-only): derive complexity tier heuristically from task body.
+# Sets globals TASK_DERIVED_TIER and TASK_TIER_SIGNALS_JSON. Pure telemetry —
+# downstream prompts, loop caps, and dispatch remain unchanged by this value.
+# Py module: scripts/lib/complexity_tier.py. See PLAN-phase-bcf.md F6a.
+derive_complexity_tier() {
+    local task_file="$1"
+    TASK_DERIVED_TIER=""
+    TASK_TIER_SIGNALS_JSON='{}'
+    [[ -f "$task_file" ]] || {
+        log "derive_complexity_tier: missing task_file '$task_file' — skipping"
+        return 0
+    }
+    local scripts_dir
+    scripts_dir="$(dirname "${BASH_SOURCE[0]}")"
+    local out
+    if ! out=$(python3 "$scripts_dir/lib/complexity_tier.py" < "$task_file" 2>/dev/null); then
+        log "derive_complexity_tier: classifier failed — skipping"
+        return 0
+    fi
+    # Parse {"tier":"...","signals":{...}} without jq — classifier emits compact JSON.
+    local parsed
+    parsed=$(python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    print(d.get("tier",""))
+    print(json.dumps(d.get("signals",{}), separators=(",",":")))
+except Exception:
+    print("")
+    print("{}")
+' <<<"$out")
+    TASK_DERIVED_TIER=$(printf '%s\n' "$parsed" | sed -n '1p')
+    TASK_TIER_SIGNALS_JSON=$(printf '%s\n' "$parsed" | sed -n '2p')
+    [[ -z "$TASK_TIER_SIGNALS_JSON" ]] && TASK_TIER_SIGNALS_JSON='{}'
+}
+
 append_to_progress() {
     local task_id="$1" degraded_note="${2:-}"
     local progress="$PROJECT_PATH/PROGRESS.md"
@@ -1810,6 +1846,13 @@ plan_loop() {
         run_audit "$plan_file" "$task_file"
         journal '{"event":"plan_audited","task_id":"'"$task_id"'","verdict":"'"$AUDIT_VERDICT"'","iteration":'"$iteration"',"confidence":"'"${AUDIT_CONFIDENCE:-unknown}"'","complexity_tier":"'"${AUDIT_COMPLEXITY_TIER:-UNKNOWN}"'"}'
 
+        # F6a (observe-only): log mismatch between orchestrator-derived tier
+        # and auditor-returned tier. Both sides must be non-empty and not
+        # UNKNOWN to count — otherwise it's a missing-signal, not a disagreement.
+        if [[ -n "$TASK_DERIVED_TIER" && -n "$AUDIT_COMPLEXITY_TIER"               && "$AUDIT_COMPLEXITY_TIER" != "UNKNOWN"               && "$TASK_DERIVED_TIER" != "$AUDIT_COMPLEXITY_TIER" ]]; then
+            journal '{"event":"tier_mismatch","task_id":"'"$task_id"'","phase":"plan","iteration":'"$iteration"',"derived":"'"$TASK_DERIVED_TIER"'","returned":"'"$AUDIT_COMPLEXITY_TIER"'"}'
+        fi
+
         if [[ "$AUDIT_VERDICT" == "APPROVED" ]]; then
             PLAN_AUDIT_MODE="approved"
             journal '{"event":"plan_approved","task_id":"'"$task_id"'"}'
@@ -2340,6 +2383,13 @@ Resume from here and finish the remaining work.")
         run_review "$plan_file"
         reviews_reached=$((reviews_reached + 1))
         journal '{"event":"impl_reviewed","task_id":"'"$task_id"'","verdict":"'"$REVIEW_VERDICT"'","iteration":'"$iteration"',"confidence":"'"${REVIEW_CONFIDENCE:-unknown}"'","complexity_tier":"'"${REVIEW_COMPLEXITY_TIER:-UNKNOWN}"'"}'
+
+        # F6a (observe-only): log mismatch between orchestrator-derived tier
+        # and reviewer-returned tier. Both sides must be non-empty and not
+        # UNKNOWN to count.
+        if [[ -n "$TASK_DERIVED_TIER" && -n "$REVIEW_COMPLEXITY_TIER"               && "$REVIEW_COMPLEXITY_TIER" != "UNKNOWN"               && "$TASK_DERIVED_TIER" != "$REVIEW_COMPLEXITY_TIER" ]]; then
+            journal '{"event":"tier_mismatch","task_id":"'"$task_id"'","phase":"review","iteration":'"$iteration"',"derived":"'"$TASK_DERIVED_TIER"'","returned":"'"$REVIEW_COMPLEXITY_TIER"'"}'
+        fi
 
         if [[ "$REVIEW_VERDICT" != "APPROVED" ]]; then
             # Classify rejection
@@ -3073,6 +3123,15 @@ main_loop() {
         # task_file and task_desc already populated inside the stale-pick
         # loop above (so F5's PARTIAL injection happens before downstream
         # consumers read task_context.md). Nothing to do here.
+
+        # F6a (observe-only): classify task into TRIVIAL/STANDARD/RISKY and
+        # journal once per task. Derived AFTER F5 may have augmented task_file.
+        # No downstream behavior change — used for telemetry + tier_mismatch
+        # comparison against auditor/reviewer verdicts.
+        derive_complexity_tier "$task_file"
+        if [[ -n "$TASK_DERIVED_TIER" ]]; then
+            journal '{"event":"task_tier","task_id":"'"$TASK_ID"'","tier":"'"$TASK_DERIVED_TIER"'","signals":'"$TASK_TIER_SIGNALS_JSON"'}'
+        fi
 
         update_status "working on $TASK_ID: $task_desc"
         notify_normal "🆕 $TASK_ID: $task_desc
