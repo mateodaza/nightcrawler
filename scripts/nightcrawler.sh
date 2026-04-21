@@ -1295,7 +1295,10 @@ except Exception:
 ' <<<"$out")
     TASK_DERIVED_TIER=$(printf '%s\n' "$parsed" | sed -n '1p')
     TASK_TIER_SIGNALS_JSON=$(printf '%s\n' "$parsed" | sed -n '2p')
-    [[ -z "$TASK_TIER_SIGNALS_JSON" ]] && TASK_TIER_SIGNALS_JSON='{}'
+    if [[ -z "$TASK_TIER_SIGNALS_JSON" ]]; then
+        TASK_TIER_SIGNALS_JSON='{}'
+    fi
+    return 0
 }
 
 append_to_progress() {
