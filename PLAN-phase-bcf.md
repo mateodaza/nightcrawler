@@ -8,7 +8,7 @@
 
 ## Shipped log
 
-Last updated 2026-04-19. Pull `git log --oneline` for the authoritative view.
+Last updated 2026-04-21. Pull `git log --oneline` for the authoritative view.
 
 | Phase | What | Commit |
 |---|---|---|
@@ -18,6 +18,12 @@ Last updated 2026-04-19. Pull `git log --oneline` for the authoritative view.
 | F1 ops | `nc_pack_health.py` one-screen canary monitor | `c25175c` |
 | F2 | Structured confidence guidance + low-conf coerce flag + journal enrichment | `def1353` |
 | F1 fix | Ranker: demote bookkeeping in impl_review + per-file cap 2500 + truncate-to-fit | `cf1d86f` |
+| F5 | Shipped-task awareness (companion-side): parser + prompt + orchestrator wiring + `NC_COMPANION_CHECK` default-on + latency SLO revised to p50≤20s/p95≤25s | `55978a2` (tip of F5.x chain) |
+| F6a | Observe-only complexity tier classifier + `task_tier` journal event + `return 0` safety fix | `ef986f4` |
+| F6b.1 | Classifier tune: section-strip, negation window, ≥2-kw gate (reduces false-RISKY from boilerplate sections) | `768f34c` |
+| F6b.2a | Tier authority in plan/audit/review prompt headers (stance-only; no cap changes). Shared `tier_stance.sh`, `--tier-stance-file` plumbed through `call_codex.py`, `stance_applied` journal event, `signals.branch` in telemetry, `scripts/tier-check.sh` dry-run wrapper | `0fcc305` |
+| F6b.2a ops | `scripts/f6-read.sh` observation reader (tier-mismatch rate, stance coverage, plan-iter-by-tier, RISKY UI-polish-shape heuristic, planner-compliance probe) | (this commit) |
+| ops | Codex CLI auth pre-flight at startup (`codex login status`) — fast, token-free; skips round-trip test and pages on unauthed (task #51) | (this commit) |
 
 **Phase BCF MVP gate (per ship order below):** C0 + F1 + F5. F5 is the last remaining
 MVP piece — F2/F3 were taken out of order because live probe evidence surfaced F2's
@@ -462,8 +468,10 @@ Auditor also returns `complexity_tier` in B0 contract; disagreements log `tier_m
 
 **Slice plan:**
 
-- **F6a (observe-only):** Ship `derive_complexity_tier()` + `task_tier` journal event per task (with a `signals` object capturing which inputs drove the classification) + `tier_mismatch` logging vs the auditor-returned tier. No behavior change — audit stance and loop caps unchanged. Purpose: validate the heuristic against real traffic before any stance change ships. Rollback: purely additive.
-- **F6b (stance + caps):** Wire the stance prompts per the tier table and tier-specific loop caps. Requires ≥3 sessions of F6a data to tune the heuristic and confirm `tier_mismatch` rate is tolerable.
+- **F6a (observe-only):** Ship `derive_complexity_tier()` + `task_tier` journal event per task (with a `signals` object capturing which inputs drove the classification) + `tier_mismatch` logging vs the auditor-returned tier. No behavior change — audit stance and loop caps unchanged. Purpose: validate the heuristic against real traffic before any stance change ships. Rollback: purely additive. **Shipped 52ee3e6 (+ ef986f4 safety fix).**
+- **F6b.1 (classifier tune, shipped):** Classifier refinements after F6a observation surfaced false-RISKY from sectioned task bodies: section-strip on boilerplate sections, negation-window filtering on keyword matches, and a ≥2-kw gate for the default RISKY branch (`ge_2_keywords`). Five branches exposed via `signals.branch`: `ge_2_keywords | kw_plus_multifile | solo_kw_demote | small_trivial | default_standard`. **Shipped 768f34c.**
+- **F6b.2a (stance only, shipped):** Tier + signals injected into plan, revise-plan, audit, and review prompt headers via shared `scripts/lib/tier_stance.sh`. Stance file rendered once per task to `$SESSION_DIR/tasks/<id>/tier_stance.md`, consumed by bash-side prompts directly and plumbed through `call_codex.py` via `--tier-stance-file` for auditor/reviewer use. `stance_applied` journal event fires per phase (plan, plan-revise, audit, review). `scripts/tier-check.sh` dry-run wrapper lets operators sample tier on a task body without running a session. **Still no loop-cap changes.** **Shipped 0fcc305.**
+- **F6b.2b (stance + caps, pending):** Tier-specific loop caps (e.g. TRIVIAL plan=1, impl=1; RISKY no cap change). Gated on one natural-traffic observation batch on 0fcc305+ (task #74) confirming stance authority helps without causing RISKY false-strictness on UI-polish tasks.
 
 **Files:** `scripts/nightcrawler.sh` (`derive_complexity_tier()`), audit prompt assembly adds stance block based on tier.
 
@@ -478,7 +486,7 @@ Auditor also returns `complexity_tier` in B0 contract; disagreements log `tier_m
 - No tier oscillation across plan iterations on any single task (the NC-397 failure mode).
 - Journal has `task_tier` + `stance_applied` events per task.
 
-**Rollback:** `NC_COMPLEXITY_TIER=1`, off → everyone gets STANDARD.
+**Rollback:** F6a + F6b.1 + F6b.2a are shipped unflagged (prompt-header + telemetry only, no behavior dispatch). To rollback, `git revert` the specific commit(s). F6b.2b will ship behind `NC_TIER_CAPS` so cap changes can be toggled per session without a revert.
 
 ---
 
@@ -510,7 +518,7 @@ Auditor also returns `complexity_tier` in B0 contract; disagreements log `tier_m
 - `NC_RECONCILE_QUEUE` — off until one clean overnight, then on.
 - `NC_RELEVANCE_PACK` — off until F1 validated, then on (high-impact, low-risk).
 - `NC_COMPANION_CHECK` — **on** by default (2026-04-20). Set to 0 to disable.
-- `NC_COMPLEXITY_TIER` — off until F6 validated.
+- `NC_TIER_CAPS` — off until F6b.2b validated. F6a + F6b.1 + F6b.2a (classifier + stance headers) are unflagged, always on.
 - `NC_PLAN_INFLATION_GUARD` — off until B4 validated.
 - B0/F2/F3/F4 aren't flagged — they're prompt + contract rewrites, rollback is `git revert` or schema_version bump.
 

@@ -2992,34 +2992,64 @@ startup() {
         log "WARNING: No .claude/ directory in project — Claude Code CLI may not have project context"
     fi
 
-    # 12. Codex connectivity test (retry 3x, degrade if unavailable)
-    log "Testing Codex connectivity"
-    local codex_test="" codex_rc=1 codex_attempt
-    for codex_attempt in 1 2 3; do
-        set +e
-        codex_test=$(OPENAI_API_KEY="$_OPENAI_KEY" python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
-        codex_rc=$?
-        set -e
-        if [[ $codex_rc -eq 0 ]]; then
-            break
-        fi
-        log "RETRY: Codex connectivity test attempt $codex_attempt/3 failed (exit $codex_rc)"
-        [[ $codex_attempt -lt 3 ]] && sleep 10
-    done
-
-    if [[ $codex_rc -ne 0 ]]; then
-        log "WARN: Codex connectivity test failed after 3 attempts — starting in degraded mode"
+    # 11.5. Codex CLI auth pre-flight (task #51).
+    # Fast, token-free auth probe BEFORE the full round-trip test below.
+    # Motivation: the orchestrator previously discovered an unauthed Codex only
+    # when the first audit call failed — burning a plan iteration + time before
+    # degrading. `codex login status` exits 0 with "Logged in using ChatGPT"
+    # when authed, non-zero (and prints a reason) when not. Separating the
+    # auth probe from the round-trip probe gives a more actionable message
+    # on Telegram ("re-run codex login") and skips the round-trip when it
+    # would obviously fail.
+    log "Checking Codex CLI auth (codex login status)"
+    local codex_auth_out codex_auth_rc
+    set +e
+    codex_auth_out=$(codex login status 2>&1)
+    codex_auth_rc=$?
+    set -e
+    if [[ $codex_auth_rc -ne 0 ]]; then
+        log "WARN: codex login status failed (exit $codex_auth_rc): $codex_auth_out"
         CODEX_DEGRADED=true
-        escalate_urgent "WARNING ($PROJECT): Codex unreachable at startup — running without auditor"
+        escalate_urgent "URGENT ($PROJECT): Codex CLI unauthed at startup — run 'codex login' on the VPS. Running without auditor/reviewer until fixed."
     else
-        local codex_ready
-        codex_ready=$(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('ready',False))" 2>/dev/null || echo "False")
-        if [[ "$codex_ready" != "True" ]]; then
-            log "WARN: Codex not ready — starting in degraded mode"
+        # One-line success marker; full output goes only to the log.
+        log "Codex CLI auth OK: $(echo "$codex_auth_out" | head -1)"
+    fi
+
+    # 12. Codex connectivity test (retry 3x, degrade if unavailable).
+    # Skip when the auth pre-flight already tripped degraded mode — the
+    # round-trip would just repeat the same failure and burn tokens.
+    if [[ "$CODEX_DEGRADED" == "true" ]]; then
+        log "Skipping Codex connectivity round-trip (auth pre-flight already degraded)"
+    else
+        log "Testing Codex connectivity"
+        local codex_test="" codex_rc=1 codex_attempt
+        for codex_attempt in 1 2 3; do
+            set +e
+            codex_test=$(OPENAI_API_KEY="$_OPENAI_KEY" python3 "$SCRIPTS/call_codex.py" --test 2>/dev/null)
+            codex_rc=$?
+            set -e
+            if [[ $codex_rc -eq 0 ]]; then
+                break
+            fi
+            log "RETRY: Codex connectivity test attempt $codex_attempt/3 failed (exit $codex_rc)"
+            [[ $codex_attempt -lt 3 ]] && sleep 10
+        done
+
+        if [[ $codex_rc -ne 0 ]]; then
+            log "WARN: Codex connectivity test failed after 3 attempts — starting in degraded mode"
             CODEX_DEGRADED=true
-            escalate_urgent "WARNING ($PROJECT): Codex not ready at startup — running without auditor"
+            escalate_urgent "WARNING ($PROJECT): Codex unreachable at startup — running without auditor"
         else
-            log "Codex ready (primary: $(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('primary','unknown'))" 2>/dev/null))"
+            local codex_ready
+            codex_ready=$(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('ready',False))" 2>/dev/null || echo "False")
+            if [[ "$codex_ready" != "True" ]]; then
+                log "WARN: Codex not ready — starting in degraded mode"
+                CODEX_DEGRADED=true
+                escalate_urgent "WARNING ($PROJECT): Codex not ready at startup — running without auditor"
+            else
+                log "Codex ready (primary: $(echo "$codex_test" | python3 -c "import sys,json;print(json.load(sys.stdin).get('primary','unknown'))" 2>/dev/null))"
+            fi
         fi
     fi
 
