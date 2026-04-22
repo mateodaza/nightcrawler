@@ -67,6 +67,12 @@ MAX_IMPL_ITERATIONS=10          # impl review soft-reject cap (hard blocks + con
 # averages (see PLAN-stabilization.md A4). Override via env or project
 # config. Set to "" to restore pre-A4 unlimited behavior.
 PLAN_MAX_TURNS="${PLAN_MAX_TURNS:-15}"
+# Plan-phase tool deny-list. Planning Claude must not be able to mutate
+# repo state or exit via ExitPlanMode (both caused 0-char stdout + LOCKED
+# on NC-418 across two runs — see sessions 20260422-144319 / 20260422-202632).
+# Exploration tools (Read/Grep/Glob/Agent) remain allowed. Override via env
+# if future task shapes need different restrictions.
+PLAN_DISALLOWED_TOOLS="${PLAN_DISALLOWED_TOOLS:-ExitPlanMode,Write,Edit,NotebookEdit,Bash,TodoWrite}"
 IMPL_MAX_TURNS="${IMPL_MAX_TURNS:-40}"
 REPAIR_MAX_TURNS="${REPAIR_MAX_TURNS:-}"  # empty = omit --max-turns (unlimited)
 VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
@@ -1465,13 +1471,15 @@ Instructions:
                 "$envelope_path" "$claude_stderr" "$acc_stderr" \
                 "$prompt" \
                 --model "$plan_model" \
-                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS})
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} \
+                ${PLAN_DISALLOWED_TOOLS:+--disallowed-tools "$PLAN_DISALLOWED_TOOLS"})
     else
         raw_output=$(cd "$PROJECT_PATH" && \
             call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
                 --model "$plan_model" \
                 --output-format json \
-                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} \
+                ${PLAN_DISALLOWED_TOOLS:+--disallowed-tools "$PLAN_DISALLOWED_TOOLS"} 2>"$claude_stderr")
     fi
     exit_code=$?
     set -e
@@ -1588,13 +1596,15 @@ Instructions:
                 "$envelope_path" "$claude_stderr" "$acc_stderr" \
                 "$prompt" \
                 --model "$plan_model" \
-                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS})
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} \
+                ${PLAN_DISALLOWED_TOOLS:+--disallowed-tools "$PLAN_DISALLOWED_TOOLS"})
     else
         raw_output=$(cd "$PROJECT_PATH" && \
             call_claude "$CLAUDE_CLI_TIMEOUT" "$prompt" \
                 --model "$plan_model" \
                 --output-format json \
-                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} 2>"$claude_stderr")
+                ${PLAN_MAX_TURNS:+--max-turns $PLAN_MAX_TURNS} \
+                ${PLAN_DISALLOWED_TOOLS:+--disallowed-tools "$PLAN_DISALLOWED_TOOLS"} 2>"$claude_stderr")
     fi
     exit_code=$?
     set -e
