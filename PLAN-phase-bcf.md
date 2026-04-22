@@ -8,7 +8,7 @@
 
 ## Shipped log
 
-Last updated 2026-04-22. Pull `git log --oneline` for the authoritative view.
+Last updated 2026-04-22 (plan tool-surface fix). Pull `git log --oneline` for the authoritative view.
 
 | Phase | What | Commit |
 |---|---|---|
@@ -25,7 +25,8 @@ Last updated 2026-04-22. Pull `git log --oneline` for the authoritative view.
 | F6b.2a ops | `scripts/f6-read.sh` observation reader (tier-mismatch rate, stance coverage, plan-iter-by-tier, RISKY UI-polish-shape heuristic, planner-compliance probe) | `6b865e3` |
 | ops | Codex CLI auth pre-flight at startup (`codex login status`) — fast, token-free; skips round-trip test and pages on unauthed (task #51) | `6b865e3` |
 | B4.1 | Plan inflation guard (observe-only): rev-over-rev size deltas + exact-hash blocker repeats via `scripts/lib/plan_inflation.py`, per-task `plan_history.jsonl`, `plan_inflation_detected` journal event, reader wired into `f6-read.sh`. Default-on; no steering yet (B4.2). | `b2d772f` |
-| B4.2 | Plan inflation steer (flag-gated): `render_steer_prompt()` in `scripts/lib/plan_inflation.py` with two branches (repeat/size+repeat: preserve unrelated sections unchanged, targeted patch; size-only: last 3 blocker subjects + prior size ±10% unless justified). `nightcrawler.sh` gates `--steer-out` on `NC_PLAN_INFLATION_GUARD=1`; `revise_plan` prepends steer block after tier stance. `plan_steer_applied` journal event. Default off. | (this commit) |
+| B4.2 | Plan inflation steer (flag-gated): `render_steer_prompt()` in `scripts/lib/plan_inflation.py` with two branches (repeat/size+repeat: preserve unrelated sections unchanged, targeted patch; size-only: last 3 blocker subjects + prior size ±10% unless justified). `nightcrawler.sh` gates `--steer-out` on `NC_PLAN_INFLATION_GUARD=1`; `revise_plan` prepends steer block after tier stance. `plan_steer_applied` journal event. Default off. | `d4c6be9` |
+| fix(plan) | Restrict write-capable tools during planning: `PLAN_DISALLOWED_TOOLS` (default `ExitPlanMode,Write,Edit,NotebookEdit,Bash,TodoWrite`) passed via `--disallowed-tools` on all four plan-phase `call_claude` call sites (plan_task + revise_plan × streamed/non-streamed). Exploration tools (Read/Grep/Glob/Agent) remain. Surfaced by NC-418 twin failures on 20260422-144319 + 20260422-202632 — planner used `ExitPlanMode`/`Write` and orchestrator saw 0-char stdout. Impl/revise-impl paths unchanged. | `991ff3a` |
 
 **Phase BCF MVP gate (per ship order below):** C0 + F1 + F5. F5 is the last remaining
 MVP piece — F2/F3 were taken out of order because live probe evidence surfaced F2's
@@ -490,6 +491,7 @@ Auditor also returns `complexity_tier` in B0 contract; disagreements log `tier_m
 - **F6b.1 (classifier tune, shipped):** Classifier refinements after F6a observation surfaced false-RISKY from sectioned task bodies: section-strip on boilerplate sections, negation-window filtering on keyword matches, and a ≥2-kw gate for the default RISKY branch (`ge_2_keywords`). Five branches exposed via `signals.branch`: `ge_2_keywords | kw_plus_multifile | solo_kw_demote | small_trivial | default_standard`. **Shipped 768f34c.**
 - **F6b.2a (stance only, shipped):** Tier + signals injected into plan, revise-plan, audit, and review prompt headers via shared `scripts/lib/tier_stance.sh`. Stance file rendered once per task to `$SESSION_DIR/tasks/<id>/tier_stance.md`, consumed by bash-side prompts directly and plumbed through `call_codex.py` via `--tier-stance-file` for auditor/reviewer use. `stance_applied` journal event fires per phase (plan, plan-revise, audit, review). `scripts/tier-check.sh` dry-run wrapper lets operators sample tier on a task body without running a session. **Still no loop-cap changes.** **Shipped 0fcc305.**
 - **F6b.2b (stance + caps, pending):** Tier-specific loop caps (e.g. TRIVIAL plan=1, impl=1; RISKY no cap change). Gated on one natural-traffic observation batch on 0fcc305+ (task #74) confirming stance authority helps without causing RISKY false-strictness on UI-polish tasks.
+- **F6b.3 (keyword false-positive guard, pending):** Evidence from NC-418 re-spec (20260422-202632-camello): the task body contained `drop` in the phrase *"decision to drop"* (a scope-reduction decision, not a SQL-destructive action). The classifier keyword matcher surfaced `drop` → `kw_plus_multifile` → **RISKY**, which pushed the planner stance toward "enumerate every surface: schema, migration, API handler, auth/tenant scoping, UI, tests" for a one-line observability change. Planner burned 15 turns looking for surfaces that didn't exist. Two candidate fixes: *(a)* narrow — extend F6b.1's negation window to catch sentence-level negations (`don't ... drop`, `decision to drop`, `decided to drop`, `drop ... from scope`); *(b)* broad — treat `drop` as tier-neutral unless it co-occurs with `table`, `column`, `index`, `schema`, `database`, `migration` (the SQL-destructive context). Pick after scanning current `task_tier` journal events for how often `drop`/`delete` keywords fire on non-destructive task bodies. Don't ship this alongside the tool-restrict fix — keep the classifier tune isolated for attribution.
 
 **Files:** `scripts/nightcrawler.sh` (`derive_complexity_tier()`), audit prompt assembly adds stance block based on tier.
 
