@@ -8,7 +8,7 @@
 
 ## Shipped log
 
-Last updated 2026-04-21. Pull `git log --oneline` for the authoritative view.
+Last updated 2026-04-22. Pull `git log --oneline` for the authoritative view.
 
 | Phase | What | Commit |
 |---|---|---|
@@ -22,8 +22,9 @@ Last updated 2026-04-21. Pull `git log --oneline` for the authoritative view.
 | F6a | Observe-only complexity tier classifier + `task_tier` journal event + `return 0` safety fix | `ef986f4` |
 | F6b.1 | Classifier tune: section-strip, negation window, ≥2-kw gate (reduces false-RISKY from boilerplate sections) | `768f34c` |
 | F6b.2a | Tier authority in plan/audit/review prompt headers (stance-only; no cap changes). Shared `tier_stance.sh`, `--tier-stance-file` plumbed through `call_codex.py`, `stance_applied` journal event, `signals.branch` in telemetry, `scripts/tier-check.sh` dry-run wrapper | `0fcc305` |
-| F6b.2a ops | `scripts/f6-read.sh` observation reader (tier-mismatch rate, stance coverage, plan-iter-by-tier, RISKY UI-polish-shape heuristic, planner-compliance probe) | (this commit) |
-| ops | Codex CLI auth pre-flight at startup (`codex login status`) — fast, token-free; skips round-trip test and pages on unauthed (task #51) | (this commit) |
+| F6b.2a ops | `scripts/f6-read.sh` observation reader (tier-mismatch rate, stance coverage, plan-iter-by-tier, RISKY UI-polish-shape heuristic, planner-compliance probe) | `6b865e3` |
+| ops | Codex CLI auth pre-flight at startup (`codex login status`) — fast, token-free; skips round-trip test and pages on unauthed (task #51) | `6b865e3` |
+| B4.1 | Plan inflation guard (observe-only): rev-over-rev size deltas + exact-hash blocker repeats via `scripts/lib/plan_inflation.py`, per-task `plan_history.jsonl`, `plan_inflation_detected` journal event, reader wired into `f6-read.sh`. Default-on; no steering yet (B4.2). | (this commit) |
 
 **Phase BCF MVP gate (per ship order below):** C0 + F1 + F5. F5 is the last remaining
 MVP piece — F2/F3 were taken out of order because live probe evidence surfaced F2's
@@ -204,23 +205,33 @@ Separately: `call_codex.py:246` opens with `"You are an independent code auditor
 
 ### B4 — Plan-inflation guard
 
-**Problem.** NC-SMOKE plan grew 1074 → 4564 → 6981 chars across three revisions for a task that needed one file write. The planner inflates under audit pressure. This is a planner guardrail, not a reviewer change — stays in B, not F.
+**Problem.** NC-413 (2026-04-22, RISKY, post-F6b.2a) churned 5 plan iterations growing 14.2 KB → 17.8 KB → 21.7 KB → 25.9 KB → 28.6 KB (+100%) while the auditor issued one **verbatim-identical blocker** on iterations 2 and 3. F6b.2a fixed the tier-negotiation problem (mismatch rate 60% → 0%, stance coverage 100%), but the planner still inflates under repeated audit pressure. This is a planner guardrail, not a reviewer change.
 
-**Change.** After `revise_plan`:
-- If revised plan > 2× previous AND task AC/spec unchanged, classify as `plan_inflation`.
-- **Don't silently reuse the old plan.** Instead:
-  - Keep previous plan as "best-known."
-  - Attach auditor advisory: `plan_inflation_detected` with both char counts.
-  - Continue with prior approved/best-known plan.
-  - Journal event `plan_inflation_event` with before/after sizes.
+#### B4.1 — Observe-only detector [**SHIPPED**]
 
-Makes behavior explainable. Logs show what happened, operators can tell "stopped escalating" vs "actually converged."
+Detect inflation/repeats and emit telemetry only; no steering. One batch of natural traffic with B4.1 on tells us (a) how often real rejections trigger it, (b) whether the size/repeat thresholds are tuned right before we steer. Ships alongside an `f6-read.sh` section so the existing observation pass surfaces fires.
 
-**Files:** `scripts/nightcrawler.sh` (`plan_task` / `revise_plan`); journal event.
+**Change.** Between `audit REJECTED` and `revise_plan` in the plan loop:
+- Extract the top blocker from `AUDIT_BLOCKING_JSON[0]`; normalize subject (lowercase, strip punct, collapse ws); hash the normalized subject.
+- Read per-task `plan_history.jsonl`; compute `current_size` vs `initial_size` (first history row) and vs `prior_size` (last history row).
+- Fire `plan_inflation_detected` when ANY of: size ≥ 1.5× initial, size ≥ 1.4× prior, or hash matches any prior row. `reason` is `size` | `repeat` | `size+repeat`.
+- Always append the rejection row to per-task `plan_history.jsonl` (non-firing rows stay per-task only; the global journal gets the event only on a fire).
 
-**Acceptance:** synthesized trivial task with forced auditor rejections → planner inflates → guard catches, logs, uses prior plan, impl proceeds.
+**Files:** new `scripts/lib/plan_inflation.py`; inline wrapper in `scripts/nightcrawler.sh` plan loop; new `plan_inflation_detected` journal reader in `scripts/f6-read.sh`.
 
-**Rollback:** `NC_PLAN_INFLATION_GUARD=1`, default off until tested.
+**Acceptance:** smoke test against NC-413's real size progression fires on iters 3/4/5 with correct reason codes; f6-read.sh renders the new section for both empty and populated cases.
+
+**Rollback:** purely additive — `git revert` the commit, or delete the wrapper block in `nightcrawler.sh`. No flag (telemetry-only, no behavior change).
+
+#### B4.2 — Steer revise_plan toward targeted patches [**PENDING**]
+
+After B4.1 validates on one Camello session: when a fire happens, inject a stance into the `revise_plan` prompt telling the LLM to ship the **smallest targeted patch** that addresses the repeated/top blocker, rather than expanding the whole plan. Guardrail, not auto-approval — the auditor still gets the final call.
+
+**Flag:** `NC_PLAN_INFLATION_GUARD=1`, default off until B4.1 observation confirms thresholds are well-calibrated.
+
+**Files:** `scripts/lib/plan_inflation.py` (adds steer-prompt renderer); `scripts/nightcrawler.sh` (consumes `steer_injected=true` event to thread stance into revise prompt).
+
+**Acceptance:** forced-inflation scenario produces a smaller revised plan than the baseline without B4.2; journal shows `steer_injected: true` on the fire event.
 
 ---
 

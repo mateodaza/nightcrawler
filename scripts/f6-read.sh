@@ -150,6 +150,14 @@ iter_by_tier = defaultdict(list)  # tier -> [iter_count, ...]
 for tid, info in task_tiers.items():
     iter_by_tier[info["tier"]].append(plan_audits_per_task.get(tid, 0))
 
+# ----- plan inflation (B4.1) -----
+plan_inflations = [e for e in events if e.get("event") == "plan_inflation_detected"]
+inflation_by_task = defaultdict(list)  # task_id -> [event, ...]
+for e in plan_inflations:
+    tid = e.get("task_id")
+    if tid:
+        inflation_by_task[tid].append(e)
+
 # ----- RISKY enumeration + mini_plan inspection -----
 # Keywords that suggest a UI-polish shape (for the RISKY false-strictness
 # check — if a RISKY task is overwhelmingly UI-polish, the stance may be
@@ -325,6 +333,21 @@ for row in compliance_rows:
     print(f"  {row['task_id']:10s} tier={row['tier']:8s}  tier_in_plan={tag}  "
           f"plan={row['plan_lines']}L/{row['plan_sections']}§  phrases: {phrases}")
 
+hdr("8. Plan inflation (B4.1)")
+if not plan_inflations:
+    print("  (no plan_inflation_detected events — clean batch)")
+else:
+    print(f"  {len(plan_inflations)} fire(s) across {len(inflation_by_task)} task(s).")
+    for tid in sorted(inflation_by_task):
+        rows = sorted(inflation_by_task[tid], key=lambda e: e.get("iteration", 0))
+        print(f"  {tid}: {len(rows)} fire(s)")
+        for e in rows:
+            print(f"    iter={e.get('iteration')}  reason={e.get('reason')}  "
+                  f"size={e.get('current_size_bytes')}B  "
+                  f"from_initial=+{e.get('growth_from_initial_pct')}%  "
+                  f"from_prior=+{e.get('growth_from_prior_pct')}%  "
+                  f"repeat={e.get('repeated_blocker')}")
+
 # Summary verdict hints — mechanical, not interpretive.
 hdr("Summary")
 verdict_notes = []
@@ -341,6 +364,10 @@ if risky_flagged:
     verdict_notes.append(
         f"{len(risky_flagged)} RISKY task(s) have UI-polish shape — "
         "candidates for F6b.2b's stance-softening review")
+if plan_inflations:
+    verdict_notes.append(
+        f"{len(plan_inflations)} plan_inflation_detected fire(s) across "
+        f"{len(inflation_by_task)} task(s) — review per-task history (B4.2 candidates)")
 if not verdict_notes:
     verdict_notes.append("no flags raised — observation looks clean")
 for note in verdict_notes:

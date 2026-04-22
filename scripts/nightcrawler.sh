@@ -1910,6 +1910,27 @@ plan_loop() {
         feedbacks+=("$AUDIT_FEEDBACK")
         log "Plan soft-rejected (iteration $iteration): ${AUDIT_FEEDBACK:0:200}"
 
+        # B4.1: plan inflation guard (observe-only). Detects rev-over-rev
+        # plan bloat and exact-hash blocker repeats; emits
+        # plan_inflation_detected to the global journal only when fired.
+        # Per-task plan_history.jsonl always records every rejection so the
+        # next iteration's check has history to compare against.
+        local plan_hist_dir="$SESSION_DIR/tasks/$task_id"
+        mkdir -p "$plan_hist_dir" 2>/dev/null || true
+        local plan_infl_event
+        plan_infl_event=$(python3 "$SCRIPTS/lib/plan_inflation.py" \
+            --task-id "$task_id" \
+            --iter "$iteration" \
+            --plan-file "$plan_file" \
+            --history-file "$plan_hist_dir/plan_history.jsonl" \
+            --blocker-json "${AUDIT_BLOCKING_JSON:-}" \
+            2>>"$SESSION_DIR/plan_inflation.err" || true)
+        if [[ -n "$plan_infl_event" ]]; then
+            journal "$plan_infl_event"
+            log "plan_inflation_detected (iter $iteration): ${plan_infl_event:0:400}"
+        fi
+
+
         # Dynamic convergence check — stop early if stuck, keep going if progressing
         if (( iteration >= MAX_PLAN_ITERATIONS )) || ! check_convergence "plan audit" "${feedbacks[@]}"; then
             break
