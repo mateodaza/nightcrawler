@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""F6a + F6b.1 contract tests — complexity_tier.derive_tier behavior.
+"""F6a + F6b.1 + F6b.2a contract tests — complexity_tier.derive_tier behavior.
 
 Runs standalone (no pytest required). Exit code: 0 = all pass, 1 = any fail.
 
 Run with:
     python3 tests/test_complexity_tier.py
 
-F6b.1 additions (this file):
+F6b.1 additions:
     - Lever 1: prohibition-section stripping (Non-goals / Do NOT / Don't / Never)
     - Lever 2: negation window (no/not/without/never/nor/cannot/n't ≤ 5 tokens)
     - Lever 3: RISKY gate requires ≥2 distinct keywords OR ≥1 keyword + files>1
     - Schema: signals.keywords_raw exposes pre-filter matches for diagnosis
+
+F6b.2a additions (this file):
+    - Schema: signals.branch names which decision rule fired, one of:
+      "ge_2_keywords" | "kw_plus_multifile" | "solo_kw_demote" |
+      "small_trivial" | "default_standard". Used by the tier-check dry-run
+      wrapper and by F6b.2b when caps become behavior-affecting.
 """
 from __future__ import annotations
 
@@ -285,6 +291,11 @@ def test_trivial_one_file_two_ac() -> None:
     _check("trivial: listed_files=1", signals["listed_files"] == 1, str(signals))
     _check("trivial: ac_count=2", signals["ac_count"] == 2, str(signals))
     _check("trivial: no keywords", signals["keywords"] == [], str(signals))
+    _check(
+        "trivial: branch=small_trivial",
+        signals["branch"] == "small_trivial",
+        str(signals),
+    )
 
 
 def test_standard_multi_file_multi_ac() -> None:
@@ -293,6 +304,11 @@ def test_standard_multi_file_multi_ac() -> None:
     _check("standard: listed_files>=3", signals["listed_files"] >= 3, str(signals))
     _check("standard: ac_count>=3", signals["ac_count"] >= 3, str(signals))
     _check("standard: no keywords", signals["keywords"] == [], str(signals))
+    _check(
+        "standard: branch=default_standard (no kws, files>1)",
+        signals["branch"] == "default_standard",
+        str(signals),
+    )
 
 
 def test_risky_schema_migration_auth() -> None:
@@ -306,6 +322,11 @@ def test_risky_schema_migration_auth() -> None:
         "risky: keywords in canonical order",
         got == [k for k in order if k in got],
         str(got),
+    )
+    _check(
+        "risky: branch=ge_2_keywords (3 distinct kws)",
+        signals["branch"] == "ge_2_keywords",
+        str(signals),
     )
 
 
@@ -347,12 +368,13 @@ def test_empty_input() -> None:
     tier, signals = ct.derive_tier("")
     _check("empty: tier is TRIVIAL", tier == "TRIVIAL", f"got {tier}")
     _check(
-        "empty: signals zeroed (with keywords_raw)",
+        "empty: signals zeroed (with keywords_raw + branch)",
         signals == {
             "ac_count": 0,
             "listed_files": 0,
             "keywords": [],
             "keywords_raw": [],
+            "branch": "small_trivial",
         },
         str(signals),
     )
@@ -535,6 +557,11 @@ def test_lever3_solo_keyword_demotes_to_standard() -> None:
         signals["keywords"] == ["delete"],
         str(signals),
     )
+    _check(
+        "lever3: branch=solo_kw_demote",
+        signals["branch"] == "solo_kw_demote",
+        str(signals),
+    )
 
 
 def test_lever3_solo_keyword_with_multi_file_is_risky() -> None:
@@ -552,6 +579,11 @@ def test_lever3_solo_keyword_with_multi_file_is_risky() -> None:
         "lever3: 1 kw + 3 files → RISKY",
         tier == "RISKY",
         f"got {tier} signals={signals}",
+    )
+    _check(
+        "lever3: branch=kw_plus_multifile (the un-exercised branch in NC-408..412)",
+        signals["branch"] == "kw_plus_multifile",
+        str(signals),
     )
 
 
@@ -571,6 +603,11 @@ def test_lever3_two_distinct_keywords_is_risky() -> None:
     _check(
         "lever3: both kws present",
         set(signals["keywords"]) == {"schema", "migration"},
+        str(signals),
+    )
+    _check(
+        "lever3: branch=ge_2_keywords",
+        signals["branch"] == "ge_2_keywords",
         str(signals),
     )
 
@@ -640,6 +677,65 @@ def test_cli_reads_stdin_writes_json() -> None:
         "keywords_raw" in payload["signals"],
         str(payload),
     )
+    _check(
+        "cli: branch field present (F6b.2a)",
+        "branch" in payload["signals"],
+        str(payload),
+    )
+    _check(
+        "cli: branch=small_trivial",
+        payload["signals"]["branch"] == "small_trivial",
+        str(payload),
+    )
+
+
+# -----------------------------------------------------------------------------
+# F6b.2a — Branch coverage (every rule's branch label is reachable)
+# -----------------------------------------------------------------------------
+
+
+def test_branch_coverage_all_five_rules() -> None:
+    """Every decision rule must be reachable and emit the correct `branch` label.
+
+    Without this, a rename or reorder in derive_tier could silently detach the
+    `branch` label from the rule that fired, and the dry-run wrapper would
+    lie to the operator about *why* a task classified the way it did.
+    """
+    cases = [
+        ("small_trivial", TRIVIAL_TASK, "TRIVIAL"),
+        ("default_standard", STANDARD_TASK, "STANDARD"),
+        ("ge_2_keywords", RISKY_TASK, "RISKY"),
+        ("solo_kw_demote", SOLO_KEYWORD_SMALL_TASK, "STANDARD"),
+    ]
+    for expected_branch, body, expected_tier in cases:
+        tier, signals = ct.derive_tier(body)
+        _check(
+            f"branch-coverage: {expected_branch} → tier={expected_tier}",
+            tier == expected_tier,
+            f"got tier={tier} signals={signals}",
+        )
+        _check(
+            f"branch-coverage: {expected_branch} branch label matches",
+            signals["branch"] == expected_branch,
+            f"got branch={signals['branch']}",
+        )
+    # kw_plus_multifile: 1 kw + 3 files. Reached in lever3 test but this
+    # suite also asserts it explicitly as a branch-coverage anchor.
+    kw_multifile_body = (
+        "**The gap:** delete flow update.\n\n"
+        "**Files:**\n- `a.ts`\n- `b.ts`\n\n### Acceptance\n- delete works\n"
+    )
+    tier, signals = ct.derive_tier(kw_multifile_body)
+    _check(
+        "branch-coverage: kw_plus_multifile → tier=RISKY",
+        tier == "RISKY",
+        f"got tier={tier} signals={signals}",
+    )
+    _check(
+        "branch-coverage: kw_plus_multifile branch label matches",
+        signals["branch"] == "kw_plus_multifile",
+        f"got branch={signals['branch']}",
+    )
 
 
 def test_cli_empty_input() -> None:
@@ -688,6 +784,8 @@ def main() -> int:
     test_lever3_two_distinct_keywords_is_risky()
     test_lever3_multi_keyword_risky_genuine()
     test_ui_delete_now_demotes_to_standard()
+    # F6b.2a
+    test_branch_coverage_all_five_rules()
     # CLI
     test_cli_reads_stdin_writes_json()
     test_cli_empty_input()

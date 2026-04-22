@@ -43,13 +43,23 @@ Output contract (JSON, single line, on stdout):
          "ac_count": int,
          "listed_files": int,
          "keywords": [str, ...],         # final post-filter
-         "keywords_raw": [str, ...]}}    # all matches before filters
+         "keywords_raw": [str, ...],     # all matches before filters
+         "branch": str}}                 # which decision rule fired
 
 `keywords_raw == keywords` means filters did not fire. When they differ,
 the journal preserves both lists so we can post-hoc check whether the new
 levers are working as intended.
 
-Callers: scripts/nightcrawler.sh::derive_complexity_tier (subprocess).
+F6b.2a: the `branch` field names the specific rule that decided the tier
+(one of: "ge_2_keywords", "kw_plus_multifile", "solo_kw_demote",
+"small_trivial", "default_standard"). The tier-check dry-run wrapper uses
+this to show the operator *why* a task was classified the way it was —
+particularly useful for spotting whether the 1-kw + files>1 branch (the
+un-exercised one in the NC-408..412 observation batch) fires sensibly
+before F6b.2b caps become behavior-affecting.
+
+Callers: scripts/nightcrawler.sh::derive_complexity_tier (subprocess),
+         scripts/tier-check.sh (F6b.2a dry-run wrapper).
 """
 from __future__ import annotations
 
@@ -220,22 +230,34 @@ def derive_tier(body: str) -> Tuple[str, Dict]:
     _, kws_raw = find_keywords_filtered(body)
     kws, _ = find_keywords_filtered(filtered_body)
 
-    if len(kws) >= 2 or (len(kws) >= 1 and files > 1):
+    # Decision order matters: check the strongest RISKY signal first, then
+    # the file-scoped RISKY gate, then solo-kw demote, then TRIVIAL shape,
+    # else STANDARD by exclusion. The `branch` label names the rule that
+    # fired so the dry-run wrapper and the journal can tell operators why.
+    if len(kws) >= 2:
         tier = "RISKY"
+        branch = "ge_2_keywords"
+    elif len(kws) >= 1 and files > 1:
+        tier = "RISKY"
+        branch = "kw_plus_multifile"
     elif len(kws) >= 1:
         # Single benign-looking keyword in a small task — caution preserved
         # (don't flatten to TRIVIAL) but no RISKY shouting.
         tier = "STANDARD"
+        branch = "solo_kw_demote"
     elif ac <= 2 and files <= 1:
         tier = "TRIVIAL"
+        branch = "small_trivial"
     else:
         tier = "STANDARD"
+        branch = "default_standard"
 
     signals = {
         "ac_count": ac,
         "listed_files": files,
         "keywords": kws,
         "keywords_raw": kws_raw,
+        "branch": branch,
     }
     return tier, signals
 

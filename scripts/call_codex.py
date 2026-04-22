@@ -568,6 +568,32 @@ def _maybe_log_prompt(label: str, prompt: str) -> None:
     print(f"=== {label} prompt END ===", file=sys.stderr)
 
 
+def _read_tier_stance(tier_stance_file: str = None) -> str:
+    """Return the orchestrator's rendered tier stance block, or empty string.
+
+    F6b.2a: the orchestrator renders `tier_stance.md` once per task and passes
+    its path here. The block is prepended to audit + review prompts so the
+    auditor/reviewer see the same authoritative tier the planner saw. The
+    block itself contains the calibration clause reminding Codex that tier is
+    authoritative and that disagreement should be surfaced via the structured
+    output's `complexity_tier` field, not by weakening its own stance.
+
+    Empty/missing path means no header (UNKNOWN tier or classifier disabled) —
+    we fall through without adding noise to the prompt.
+    """
+    if not tier_stance_file:
+        return ""
+    try:
+        body = Path(tier_stance_file).read_text()
+    except (OSError, FileNotFoundError):
+        return ""
+    body = body.strip()
+    if not body:
+        return ""
+    # Trailing blank line keeps the prompt scaffolding visually separated.
+    return body + "\n\n"
+
+
 # =============================================================================
 # Main commands
 # =============================================================================
@@ -585,12 +611,15 @@ def _emit(v2: dict, method: str, model: str, cost_usd: float,
 
 def audit_plan(plan_file: str, task_file: str, rules_file: str,
                project_path: str = None, *,
-               task_id: str = None, session_dir: str = None):
+               task_id: str = None, session_dir: str = None,
+               tier_stance_file: str = None):
     """Audit a mini-plan. Tries Codex CLI exec first, falls back to API."""
     plan = Path(plan_file).read_text()
     task = Path(task_file).read_text()
     rules = Path(rules_file).read_text() if Path(rules_file).exists() else "No project rules provided."
     persona = _load_audit_persona(project_path)
+    # F6b.2a: orchestrator-derived tier header. Empty if classifier off/UNKNOWN.
+    tier_stance = _read_tier_stance(tier_stance_file)
 
     # F1: relevance pack replaces _read_project_context when flag is on.
     pack_text, pack_meta_path = _maybe_build_pack(
@@ -618,7 +647,7 @@ PROJECT RULES:
 PROJECT CONTEXT (spec, progress, existing code — use these to validate the plan):
 {project_context}"""
 
-    audit_prompt = f"""{persona}
+    audit_prompt = f"""{tier_stance}{persona}
 
 {context_section}
 
@@ -639,7 +668,7 @@ MINI-PLAN TO AUDIT:
         print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
 
     # Fallback to API
-    system_prompt = f"""{persona}
+    system_prompt = f"""{tier_stance}{persona}
 
 YOUR ROLE:
 - You audit implementation plans created by another AI model.
@@ -672,11 +701,14 @@ Return the v2 JSON object described above."""
 def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch: str = None,
                 diff_source: str = None, test_output_file: str = None, *,
                 task_id: str = None, session_dir: str = None,
-                changed_files: list = None):
+                changed_files: list = None,
+                tier_stance_file: str = None):
     """Review implementation. Tries codex exec CLI first, falls back to API."""
     plan = Path(plan_file).read_text()
     rules = Path(rules_file).read_text() if Path(rules_file).exists() else "No project rules provided."
     persona = _load_audit_persona(project_path)
+    # F6b.2a: orchestrator-derived tier header. Empty if classifier off/UNKNOWN.
+    tier_stance = _read_tier_stance(tier_stance_file)
 
     # Get diff for both CLI and API paths. `git diff` / `git diff --staged`
     # don't include untracked files, so we synthesize added-file diffs for any
@@ -768,7 +800,7 @@ def review_impl(project_path: str, plan_file: str, rules_file: str, base_branch:
 
     pack_block = f"\n\n{pack_text}\n" if pack_text else ""
 
-    review_prompt = f"""{persona}
+    review_prompt = f"""{tier_stance}{persona}
 
 APPROVED PLAN:
 {plan[:3000]}
@@ -804,7 +836,7 @@ YOUR ROLE:
         print(f"CLI failed ({result.get('error', 'unknown')}), falling back to API", file=sys.stderr)
 
     # Fallback to API
-    system_prompt = f"""{persona}
+    system_prompt = f"""{tier_stance}{persona}
 
 YOUR ROLE:
 - You review implementations created by another AI model against the approved plan.
@@ -909,6 +941,11 @@ if __name__ == "__main__":
     parser.add_argument("--changed-files", dest="changed_files", default=None,
                         help="Comma-separated list of changed files (review phase only). "
                              "If omitted, derived from `git diff --name-only`.")
+    # F6b.2a: orchestrator-rendered tier stance block. Empty/missing = no header.
+    parser.add_argument("--tier-stance-file", dest="tier_stance_file", default=None,
+                        help="Path to orchestrator-rendered tier stance markdown block. "
+                             "Prepended to audit/review prompts so Codex sees the same "
+                             "authoritative tier as the planner. Empty/missing skips header.")
 
     args = parser.parse_args()
 
@@ -925,12 +962,14 @@ if __name__ == "__main__":
         audit_plan(
             args.plan, args.task_file, args.rules, args.project,
             task_id=args.task_id, session_dir=args.session_dir,
+            tier_stance_file=args.tier_stance_file,
         )
     elif args.command == "review-impl":
         review_impl(
             args.project, args.plan, args.rules, args.base, args.diff, args.test_output,
             task_id=args.task_id, session_dir=args.session_dir,
             changed_files=changed_files_list,
+            tier_stance_file=args.tier_stance_file,
         )
     else:
         parser.print_help()

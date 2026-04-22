@@ -26,6 +26,8 @@ export PATH
 
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPTS/_resolve-path.sh"
+# F6b.2a: tier stance rendering (prompt headers for plan/audit/review).
+source "$SCRIPTS/lib/tier_stance.sh"
 STATE_DIR="${NIGHTCRAWLER_STATE_PATH:-$HOME/.nightcrawler}"
 PROJECT_PATH="$(_resolve_project_path "$PROJECT")"
 CONTROL_DIR="/tmp/nightcrawler/${PROJECT}"
@@ -1403,7 +1405,18 @@ plan_task() {
     local learnings
     learnings=$(get_session_learnings 2>/dev/null || true)
 
-    local prompt="You are planning a task for a ${PROJECT_DESC} project.
+    # F6b.2a: prepend orchestrator-derived tier stance block. TIER_STANCE_FILE
+    # is set by derive_complexity_tier earlier in process_task. Empty/missing
+    # means the classifier did not run (UNKNOWN) — fall through without a header.
+    local tier_stance_header=""
+    if [[ -n "${TIER_STANCE_FILE:-}" && -f "$TIER_STANCE_FILE" ]]; then
+        tier_stance_header=$(cat "$TIER_STANCE_FILE")
+        tier_stance_header="${tier_stance_header}
+"
+        journal '{"event":"stance_applied","task_id":"'"$task_id"'","phase":"plan","iteration":0,"tier":"'"${TASK_DERIVED_TIER:-UNKNOWN}"'"}'
+    fi
+
+    local prompt="${tier_stance_header}You are planning a task for a ${PROJECT_DESC} project.
 
 TASK:
 ${task_content}
@@ -1510,7 +1523,18 @@ revise_plan() {
     local current_plan
     current_plan=$(cat "$plan_file")
 
-    local prompt="You are revising an implementation plan that was rejected by the auditor.
+    # F6b.2a: reuse the same orchestrator-derived stance on every revise. The
+    # planner just got auditor feedback — the tier must still be authoritative,
+    # otherwise the revise can drift (e.g. flatten a RISKY plan to STANDARD).
+    local tier_stance_header=""
+    if [[ -n "${TIER_STANCE_FILE:-}" && -f "$TIER_STANCE_FILE" ]]; then
+        tier_stance_header=$(cat "$TIER_STANCE_FILE")
+        tier_stance_header="${tier_stance_header}
+"
+        journal '{"event":"stance_applied","task_id":"'"$task_id"'","phase":"plan-revise","iteration":'"$iteration"',"tier":"'"${TASK_DERIVED_TIER:-UNKNOWN}"'"}'
+    fi
+
+    local prompt="${tier_stance_header}You are revising an implementation plan that was rejected by the auditor.
 
 CURRENT PLAN:
 ${current_plan}
@@ -1607,6 +1631,9 @@ audit_plan_call() {
 
     local raw_output exit_code
     set +e
+    # F6b.2a: pass the rendered tier stance file so the auditor sees the same
+    # authoritative tier header the planner saw. call_codex.py treats an empty
+    # or missing path as UNKNOWN-tier (no header injected).
     raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" \
         NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-1}" \
         NC_LOG_AUDIT_PROMPT="${NC_LOG_AUDIT_PROMPT:-}" \
@@ -1618,7 +1645,8 @@ audit_plan_call() {
             --rules "$STATE_DIR/RULES.md" \
             --project "$PROJECT_PATH" \
             --task-id "${TASK_ID:-unknown}" \
-            --session-dir "$SESSION_DIR")
+            --session-dir "$SESSION_DIR" \
+            --tier-stance-file "${TIER_STANCE_FILE:-}")
     exit_code=$?
     set -e
 
@@ -1845,6 +1873,12 @@ plan_loop() {
 
     while (( iteration < MAX_PLAN_ITERATIONS )); do
         iteration=$((iteration + 1))
+
+        # F6b.2a: journal stance_applied per audit iteration. The stance file
+        # itself is passed through audit_plan_call -> call_codex.py.
+        if [[ -n "${TIER_STANCE_FILE:-}" && -f "$TIER_STANCE_FILE" ]]; then
+            journal '{"event":"stance_applied","task_id":"'"$task_id"'","phase":"audit","iteration":'"$iteration"',"tier":"'"${TASK_DERIVED_TIER:-UNKNOWN}"'"}'
+        fi
 
         run_audit "$plan_file" "$task_file"
         journal '{"event":"plan_audited","task_id":"'"$task_id"'","verdict":"'"$AUDIT_VERDICT"'","iteration":'"$iteration"',"confidence":"'"${AUDIT_CONFIDENCE:-unknown}"'","complexity_tier":"'"${AUDIT_COMPLEXITY_TIER:-UNKNOWN}"'"}'
@@ -2154,6 +2188,8 @@ review_impl() {
 
     local raw_output exit_code
     set +e
+    # F6b.2a: same stance file the auditor saw — reviewer must hold the impl
+    # to the same tier bar, not its own read of the task.
     raw_output=$(OPENAI_API_KEY="$_OPENAI_KEY" \
         NC_RELEVANCE_PACK="${NC_RELEVANCE_PACK:-1}" \
         NC_LOG_AUDIT_PROMPT="${NC_LOG_AUDIT_PROMPT:-}" \
@@ -2165,7 +2201,8 @@ review_impl() {
             --rules "$STATE_DIR/RULES.md" \
             --task-id "${TASK_ID:-unknown}" \
             --session-dir "$SESSION_DIR" \
-            --changed-files "$changed_files")
+            --changed-files "$changed_files" \
+            --tier-stance-file "${TIER_STANCE_FILE:-}")
     exit_code=$?
     set -e
 
@@ -2382,6 +2419,12 @@ Resume from here and finish the remaining work.")
         fi
 
         record_touched_files
+
+        # F6b.2a: journal stance_applied per review iteration. Stance file
+        # passes through review_impl -> call_codex.py.
+        if [[ -n "${TIER_STANCE_FILE:-}" && -f "$TIER_STANCE_FILE" ]]; then
+            journal '{"event":"stance_applied","task_id":"'"$task_id"'","phase":"review","iteration":'"$iteration"',"tier":"'"${TASK_DERIVED_TIER:-UNKNOWN}"'"}'
+        fi
 
         run_review "$plan_file"
         reviews_reached=$((reviews_reached + 1))
@@ -3210,14 +3253,24 @@ main_loop() {
         # loop above (so F5's PARTIAL injection happens before downstream
         # consumers read task_context.md). Nothing to do here.
 
-        # F6a (observe-only): classify task into TRIVIAL/STANDARD/RISKY and
-        # journal once per task. Derived AFTER F5 may have augmented task_file.
-        # No downstream behavior change — used for telemetry + tier_mismatch
-        # comparison against auditor/reviewer verdicts.
+        # F6a: classify task into TRIVIAL/STANDARD/RISKY and journal once per
+        # task. Derived AFTER F5 may have augmented task_file. The tier drives
+        # F6b.2a stance headers in plan/audit/review prompts (below) but does
+        # NOT yet change loop caps — F6b.2b gates behavior on the tier after
+        # one observation batch confirms stance headers alone reduce thrash.
         derive_complexity_tier "$task_file"
+        TIER_STANCE_FILE=""
         if [[ -n "$TASK_DERIVED_TIER" ]]; then
             journal '{"event":"task_tier","task_id":"'"$TASK_ID"'","tier":"'"$TASK_DERIVED_TIER"'","signals":'"$TASK_TIER_SIGNALS_JSON"'}'
+            # F6b.2a: render the stance block once per task. Plan/revise
+            # prompts cat it inline; audit/review pass its path to
+            # call_codex.py via --tier-stance-file. Empty TIER_STANCE_FILE
+            # means "classifier failed, skip stance injection" — planner and
+            # auditor fall back to their pre-F6b.2a behavior.
+            TIER_STANCE_FILE="$SESSION_DIR/tasks/$TASK_ID/tier_stance.md"
+            render_tier_stance_block "$TASK_DERIVED_TIER" "$TASK_TIER_SIGNALS_JSON" "$TIER_STANCE_FILE"
         fi
+        export TIER_STANCE_FILE
 
         update_status "working on $TASK_ID: $task_desc"
         notify_normal "🆕 $TASK_ID: $task_desc
