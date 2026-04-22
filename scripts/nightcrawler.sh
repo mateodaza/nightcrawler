@@ -1534,7 +1534,19 @@ revise_plan() {
         journal '{"event":"stance_applied","task_id":"'"$task_id"'","phase":"plan-revise","iteration":'"$iteration"',"tier":"'"${TASK_DERIVED_TIER:-UNKNOWN}"'"}'
     fi
 
-    local prompt="${tier_stance_header}You are revising an implementation plan that was rejected by the auditor.
+    # B4.2: plan inflation steer (NC_PLAN_INFLATION_GUARD=1 gates whether
+    # PLAN_STEER_FILE is ever populated in the plan loop). Prepended AFTER
+    # the tier stance so the stance's tier-specific strictness is primary,
+    # and the inflation steer layers a revision-shape constraint on top.
+    local plan_steer_header=""
+    if [[ -n "${PLAN_STEER_FILE:-}" && -f "$PLAN_STEER_FILE" ]]; then
+        plan_steer_header=$(cat "$PLAN_STEER_FILE")
+        plan_steer_header="${plan_steer_header}
+"
+        journal '{"event":"plan_steer_applied","task_id":"'"$task_id"'","phase":"plan-revise","iteration":'"$iteration"'}'
+    fi
+
+    local prompt="${tier_stance_header}${plan_steer_header}You are revising an implementation plan that was rejected by the auditor.
 
 CURRENT PLAN:
 ${current_plan}
@@ -1915,8 +1927,21 @@ plan_loop() {
         # plan_inflation_detected to the global journal only when fired.
         # Per-task plan_history.jsonl always records every rejection so the
         # next iteration's check has history to compare against.
+        #
+        # B4.2 (NC_PLAN_INFLATION_GUARD=1, default off): when a fire occurs
+        # AND the flag is on, plan_inflation.py writes a rendered steer to
+        # $plan_steer_file and sets steer_injected=true in the event.
+        # revise_plan() picks up PLAN_STEER_FILE on its next call and
+        # prepends the steer to the revise prompt. Per-iteration file so
+        # the next iteration starts clean whether a fire recurs or not.
         local plan_hist_dir="$SESSION_DIR/tasks/$task_id"
         mkdir -p "$plan_hist_dir" 2>/dev/null || true
+        local plan_steer_file="$plan_hist_dir/plan_steer_iter_${iteration}.txt"
+        rm -f "$plan_steer_file" 2>/dev/null || true
+        local plan_infl_steer_args=()
+        if [[ "${NC_PLAN_INFLATION_GUARD:-0}" == "1" ]]; then
+            plan_infl_steer_args=(--steer-out "$plan_steer_file")
+        fi
         local plan_infl_event
         plan_infl_event=$(python3 "$SCRIPTS/lib/plan_inflation.py" \
             --task-id "$task_id" \
@@ -1924,10 +1949,16 @@ plan_loop() {
             --plan-file "$plan_file" \
             --history-file "$plan_hist_dir/plan_history.jsonl" \
             --blocker-json "${AUDIT_BLOCKING_JSON:-}" \
+            "${plan_infl_steer_args[@]}" \
             2>>"$SESSION_DIR/plan_inflation.err" || true)
         if [[ -n "$plan_infl_event" ]]; then
             journal "$plan_infl_event"
             log "plan_inflation_detected (iter $iteration): ${plan_infl_event:0:400}"
+        fi
+        # Surface steer file to revise_plan, if one was written this iter.
+        PLAN_STEER_FILE=""
+        if [[ -s "$plan_steer_file" ]]; then
+            PLAN_STEER_FILE="$plan_steer_file"
         fi
 
 

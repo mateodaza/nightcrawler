@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B4.1: Plan inflation detector (observe-only).
+"""B4.1 + B4.2: Plan inflation detector (observe) + steer renderer (guarded).
 
 Runs between audit-rejection and revise_plan() in the plan loop. Tracks
 per-task plan_history.jsonl with one entry per rejection:
@@ -16,14 +16,25 @@ If nothing fires, stdout is empty. The history file is always appended —
 non-firing rows are kept only in per-task plan_history.jsonl, NOT in the
 global journal (keeps the global journal clean for fired events only).
 
-B4.1 is pure telemetry: no steering, no flag needed. The steering sibling
-B4.2 lands behind NC_PLAN_INFLATION_GUARD=1 once B4.1 validates on one
-natural session.
+B4.2 (steer rendering) is optional and gated by the caller passing
+`--steer-out PATH`. The orchestrator gates that flag behind
+`NC_PLAN_INFLATION_GUARD=1`. When a fire occurs AND `--steer-out` is set,
+this script writes the rendered steer text to that path and sets
+`steer_injected: true` in the emitted event. Without `--steer-out`,
+behavior is identical to B4.1 (pure telemetry).
+
+Two steer branches, keyed on the fire `reason`:
+- repeat / size+repeat (strongest): "preserve unrelated sections unchanged,
+  targeted patch only" — the auditor reissued a blocker, planner must
+  narrow the revision shape.
+- size only: display last up-to-3 blocker subjects so the planner sees the
+  concern lineage, and constrain the next revision to prior size +/-10%
+  unless the planner can justify exceeding it.
 
 Thresholds rationale (1.5x / 1.4x): conservative for a detector. NC-413
 went 14.2KB -> 17.8KB -> 21.7KB -> 25.9KB -> 28.6KB: every revision above
 iter-1 would have tripped 1.4x-prior, and iters 4-5 would have tripped
-1.5x-initial. Those are exactly the cases we want flagged.
+1.5x-initial. NC-415 iter 2 tripped +314% cleanly.
 
 Usage:
     plan_inflation.py \\
@@ -31,7 +42,8 @@ Usage:
         --iter 3 \\
         --plan-file /path/to/mini_plan.md \\
         --history-file /path/to/plan_history.jsonl \\
-        --blocker-json '[{"issue":"...","severity":"high"}]'
+        --blocker-json '[{"issue":"...","severity":"high"}]' \\
+        [--steer-out /path/to/plan_steer_iter_3.txt]
 
 Exit codes:
     0 always. Errors print to stderr; stdout stays empty on error so the
@@ -45,9 +57,11 @@ import os
 import re
 import sys
 
-# Tunable thresholds — kept as constants so B4.2 can reuse the same numbers.
+# Tunable thresholds — kept as constants so B4.2 reuses them.
 SIZE_VS_INITIAL_MULT = 1.5
 SIZE_VS_PRIOR_MULT   = 1.4
+# B4.2 steer: target band for size-only steer = prior size +/- this fraction.
+STEER_SIZE_TOLERANCE = 0.10
 
 _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s]")
@@ -127,7 +141,9 @@ def _read_history(path: str):
 
 def _append_history(path: str, entry: dict) -> None:
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
     except OSError as exc:
@@ -142,6 +158,122 @@ def _file_size(path: str) -> int:
         return 0
 
 
+def _display_for_steer(row: dict, max_len: int = 280) -> str:
+    """Pick the most readable form of a blocker for display in the steer.
+
+    `top_blocker_raw` in history rows often holds a serialized JSON dict
+    (when the auditor v2 contract uses `current_state` / `reference` /
+    `required_change` rather than a flat `issue` string). Parse it and
+    pull out the primary human-readable field; otherwise fall back to the
+    raw string or the normalized subject. Truncate to `max_len` so long
+    blockers don't drown the prompt.
+    """
+    raw = row.get("top_blocker_raw") or ""
+    subject = row.get("top_blocker_subject") or ""
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict):
+            for k in ("current_state", "issue", "description", "subject",
+                      "message", "title"):
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip():
+                    s = " ".join(v.strip().split())
+                    return s[:max_len] + ("…" if len(s) > max_len else "")
+    source = (raw or subject).strip()
+    source = " ".join(source.split())
+    return source[:max_len] + ("…" if len(source) > max_len else "")
+
+
+def render_steer_prompt(reason: str, history_with_current: list,
+                        current_size: int, initial_size: int,
+                        prior_size: int) -> str:
+    """Render the B4.2 planner steer block.
+
+    `history_with_current` is the full history list including the
+    just-computed current rejection (caller passes `history + [entry]`).
+    The last row is the current rejection; for size-only we display up to
+    the final 3 rows for concern lineage.
+
+    Two branches on `reason`:
+    - contains "repeat": strongest steer. One blocker, preserve unrelated
+      sections unchanged.
+    - otherwise (pure "size"): show lineage, constrain size to prior +/-10%.
+    """
+    def pct(cur: int, base: int) -> int:
+        if base <= 0:
+            return 0
+        return int(round((cur - base) * 100.0 / base))
+
+    if "repeat" in reason:
+        top = history_with_current[-1] if history_with_current else {}
+        subj = _display_for_steer(top)
+        return (
+            "[Plan-inflation steer] The auditor issued the following blocker "
+            "on a previous revision and again on this revision with the "
+            "same normalized subject:\n\n"
+            f"    {subj}\n\n"
+            "Your next revision must address this specific blocker and "
+            "preserve all unrelated sections of the plan unchanged. You may "
+            "update cross-references or numbering as required by the local "
+            "change, but do not add new sections, expand existing "
+            "non-related sections, or rephrase prose that is not "
+            "load-bearing for the cited concern. If you cannot make the "
+            "change without restructuring unrelated sections, say so "
+            "explicitly and stop; do not attempt a broad rewrite.\n"
+        )
+
+    # Pure size branch.
+    recent = history_with_current[-3:]
+    if recent:
+        lineage_lines = [
+            f"    iter {row.get('iter', '?')}: {_display_for_steer(row, 220)}"
+            for row in recent
+        ]
+        lineage = "\n".join(lineage_lines)
+    else:
+        lineage = "    (no prior blockers recorded)"
+
+    target_lo = max(0, int(prior_size * (1.0 - STEER_SIZE_TOLERANCE)))
+    target_hi = int(prior_size * (1.0 + STEER_SIZE_TOLERANCE))
+
+    return (
+        "[Plan-inflation steer] Your recent revisions grew the plan from "
+        f"{initial_size} to {current_size} bytes "
+        f"(+{pct(current_size, initial_size)}% from initial, "
+        f"+{pct(current_size, prior_size)}% from prior revision) while the "
+        "auditor has pressed on a related lineage of concerns. The recent "
+        "blockers:\n\n"
+        f"{lineage}\n\n"
+        "These may share a theme (for example: missing test assertions, "
+        "tenant scoping, error handling, file scope). Identify the theme "
+        "if one exists, then make the next revision approximately the same "
+        "size as the prior revision "
+        f"(\u00b110%, roughly {target_lo}-{target_hi} bytes) "
+        "unless you can justify exceeding it with a specific auditor-cited "
+        "requirement. Address only the auditor-cited concern(s); leave "
+        "unrelated sections unchanged. If the concerns are genuinely "
+        "unrelated, pick the one to address now and defer the rest to a "
+        "follow-up task.\n"
+    )
+
+
+def _write_steer_file(path: str, text: str) -> bool:
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return True
+    except OSError as exc:
+        print(f"plan_inflation: failed to write steer {path}: {exc}",
+              file=sys.stderr)
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--task-id", required=True)
@@ -153,6 +285,11 @@ def main() -> int:
                     help="path to per-task plan_history.jsonl (created if absent)")
     ap.add_argument("--blocker-json", default="",
                     help="AUDIT_BLOCKING_JSON (JSON string of blocking_issues array)")
+    ap.add_argument("--steer-out", default="",
+                    help="B4.2: when set AND a fire occurs, write the rendered "
+                         "steer to this path and set steer_injected=true in the "
+                         "emitted event. Caller gates this on "
+                         "NC_PLAN_INFLATION_GUARD=1.")
     args = ap.parse_args()
 
     current_size = _file_size(args.plan_file)
@@ -202,6 +339,21 @@ def main() -> int:
     if not fired:
         return 0
 
+    # B4.2: optionally render + write the steer text. Only when the caller
+    # passed --steer-out (i.e. NC_PLAN_INFLATION_GUARD=1 is on). Event's
+    # steer_injected flag reflects whether the file was written.
+    steer_injected = False
+    if args.steer_out:
+        steer_text = render_steer_prompt(
+            reason,
+            history + [entry],
+            current_size,
+            initial_size,
+            prior_size,
+        )
+        if _write_steer_file(args.steer_out, steer_text):
+            steer_injected = True
+
     def _pct(cur: int, base: int) -> int:
         if base <= 0:
             return 0
@@ -219,7 +371,7 @@ def main() -> int:
         "repeated_blocker": repeated_blocker,
         "blocker_subject": normalized[:160],
         "reason": reason,
-        "steer_injected": False,
+        "steer_injected": steer_injected,
         "ts": entry["ts"],
     }
     # Single-line JSON on stdout — ready for nightcrawler.sh's journal().

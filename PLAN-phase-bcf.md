@@ -24,7 +24,8 @@ Last updated 2026-04-22. Pull `git log --oneline` for the authoritative view.
 | F6b.2a | Tier authority in plan/audit/review prompt headers (stance-only; no cap changes). Shared `tier_stance.sh`, `--tier-stance-file` plumbed through `call_codex.py`, `stance_applied` journal event, `signals.branch` in telemetry, `scripts/tier-check.sh` dry-run wrapper | `0fcc305` |
 | F6b.2a ops | `scripts/f6-read.sh` observation reader (tier-mismatch rate, stance coverage, plan-iter-by-tier, RISKY UI-polish-shape heuristic, planner-compliance probe) | `6b865e3` |
 | ops | Codex CLI auth pre-flight at startup (`codex login status`) — fast, token-free; skips round-trip test and pages on unauthed (task #51) | `6b865e3` |
-| B4.1 | Plan inflation guard (observe-only): rev-over-rev size deltas + exact-hash blocker repeats via `scripts/lib/plan_inflation.py`, per-task `plan_history.jsonl`, `plan_inflation_detected` journal event, reader wired into `f6-read.sh`. Default-on; no steering yet (B4.2). | (this commit) |
+| B4.1 | Plan inflation guard (observe-only): rev-over-rev size deltas + exact-hash blocker repeats via `scripts/lib/plan_inflation.py`, per-task `plan_history.jsonl`, `plan_inflation_detected` journal event, reader wired into `f6-read.sh`. Default-on; no steering yet (B4.2). | `b2d772f` |
+| B4.2 | Plan inflation steer (flag-gated): `render_steer_prompt()` in `scripts/lib/plan_inflation.py` with two branches (repeat/size+repeat: preserve unrelated sections unchanged, targeted patch; size-only: last 3 blocker subjects + prior size ±10% unless justified). `nightcrawler.sh` gates `--steer-out` on `NC_PLAN_INFLATION_GUARD=1`; `revise_plan` prepends steer block after tier stance. `plan_steer_applied` journal event. Default off. | (this commit) |
 
 **Phase BCF MVP gate (per ship order below):** C0 + F1 + F5. F5 is the last remaining
 MVP piece — F2/F3 were taken out of order because live probe evidence surfaced F2's
@@ -223,15 +224,21 @@ Detect inflation/repeats and emit telemetry only; no steering. One batch of natu
 
 **Rollback:** purely additive — `git revert` the commit, or delete the wrapper block in `nightcrawler.sh`. No flag (telemetry-only, no behavior change).
 
-#### B4.2 — Steer revise_plan toward targeted patches [**PENDING**]
+#### B4.2 — Steer revise_plan toward targeted patches [**SHIPPED**]
 
-After B4.1 validates on one Camello session: when a fire happens, inject a stance into the `revise_plan` prompt telling the LLM to ship the **smallest targeted patch** that addresses the repeated/top blocker, rather than expanding the whole plan. Guardrail, not auto-approval — the auditor still gets the final call.
+Shipped after B4.1 natural-traffic batch on `20260422-144319-camello` produced 1 good size-only fire (NC-415: 2081B→8611B→2381B, recovered at near-initial size), 0 noisy, 0 miss. Evidence sufficient to wire the steer; flag kept default-off for one validation batch before flipping. Design source of truth: `project_nc413_blocker_analysis.md` (memory).
 
-**Flag:** `NC_PLAN_INFLATION_GUARD=1`, default off until B4.1 observation confirms thresholds are well-calibrated.
+**Flag:** `NC_PLAN_INFLATION_GUARD=1`, default off. When the flag is set AND a fire occurs, `plan_inflation.py` writes a rendered steer to `$SESSION_DIR/tasks/$TASK_ID/plan_steer_iter_$ITER.txt` and sets `steer_injected: true` in the `plan_inflation_detected` event. Per-iteration file — next iteration starts clean whether a fire recurs or not. Flag off = B4.1 behavior identical to before (`steer_injected: false`, no file written).
 
-**Files:** `scripts/lib/plan_inflation.py` (adds steer-prompt renderer); `scripts/nightcrawler.sh` (consumes `steer_injected=true` event to thread stance into revise prompt).
+**Steer branches (keyed on `reason`):**
+- `repeat` / `size+repeat`: strongest. Displays the repeated blocker subject, instructs the planner to address only that concern and preserve all unrelated sections unchanged (cross-references/numbering may update as required by the local change). If a broad restructure is unavoidable, planner must say so and stop.
+- `size` only: displays the last up-to-3 blocker subjects for concern-lineage context (themes like missing test assertions, tenant scoping, error handling, file scope), then constrains the next revision to prior size ±10% unless a specific auditor-cited requirement justifies more.
 
-**Acceptance:** forced-inflation scenario produces a smaller revised plan than the baseline without B4.2; journal shows `steer_injected: true` on the fire event.
+**Files:** `scripts/lib/plan_inflation.py` (adds `render_steer_prompt()`, `--steer-out` flag, latent bare-path `_append_history` fix); `scripts/nightcrawler.sh` plan loop (gates `--steer-out` on `NC_PLAN_INFLATION_GUARD=1`; surfaces `PLAN_STEER_FILE` to revise_plan); `nightcrawler.sh` `revise_plan()` (prepends `plan_steer_header` after `tier_stance_header`; emits `plan_steer_applied` journal event per injection).
+
+**Do not:** auto-approve, alter audit verdicts, or thread the steer into anywhere except the revise_plan prompt. Auditor gates every round.
+
+**Next:** one camello session with `NC_PLAN_INFLATION_GUARD=1`, then compare whether fired tasks converge with smaller plan growth vs. the B4.1-observation baseline. If validation holds, flip default to on in a follow-up.
 
 ---
 
