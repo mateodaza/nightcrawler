@@ -1,6 +1,6 @@
 # PLAN — Phase C (Queue Reconciliation) + Phase B (Audit Contract) + Phase F (Grounded Companion)
 
-**Status:** draft · 2026-04-19
+**Status:** CLOSED · 2026-04-23 (exit 3 — MVP shipped long ago, F3/F4 trigger not met per NC-421..424 corpus; deferred items are regression-driven backlog, not active roadmap)
 **Predecessor:** PLAN-stabilization.md (Phase A — streaming + envelopes, shipped)
 **Successors (pre-existing, unchanged):** PLAN-context-awareness.md (Phase D), PLAN-v3.md Tier 1 (Phase E)
 
