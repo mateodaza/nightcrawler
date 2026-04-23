@@ -710,46 +710,58 @@ $(cat "$queue")"
 
     log "pick_next_task: asking Sonnet to pick from queue"
 
-    # Retry up to 3x — a rate limit or transient failure here would silently end the session
-    local raw_output exit_code=1
-    local claude_stderr="/tmp/nightcrawler-pick-stderr.$$"
-    local pick_attempt
-    for pick_attempt in 1 2 3; do
-        set +e
-        raw_output=$(cd "$PROJECT_PATH" && \
-            call_claude 60 "$prompt" \
-                --model sonnet \
-                --output-format json \
-                --max-turns 1 2>"$claude_stderr")
-        exit_code=$?
-        set -e
-        if [[ $exit_code -eq 0 ]]; then
-            break
-        fi
-        log "pick_next_task: attempt $pick_attempt/3 failed (exit $exit_code). stderr: $(head -3 "$claude_stderr" 2>/dev/null)"
-        if [[ $pick_attempt -lt 3 ]]; then
-            # Exponential backoff — rate limits need time to clear
-            local wait_secs=$((30 * pick_attempt))
-            log "pick_next_task: waiting ${wait_secs}s before retry (possible rate limit)"
-            sleep "$wait_secs"
-        fi
-    done
+    # #64 picker hallucination guard: Sonnet has been observed inventing task
+    # IDs that don't exist in TASK_QUEUE.md (session 20260423-014905-camello
+    # picked NC-429..434, none defined — burned ~$5 on ghost planning + impl
+    # that C0's ghost-commit guard caught downstream). We now require an
+    # exact queued/in-progress header match in TASK_QUEUE.md, and repick up
+    # to NC_PICKER_MAX_HALLUCINATIONS times (default 3) before giving up.
+    # NONE and regex-parse-failure are NOT hallucinations (they return empty
+    # immediately and end the session cleanly).
+    local hallucination_attempt=0
+    local max_hallucination_attempts="${NC_PICKER_MAX_HALLUCINATIONS:-3}"
 
-    if [[ $exit_code -ne 0 ]]; then
-        log "pick_next_task: all 3 attempts failed — returning empty (session will end)"
-        escalate_urgent "WARNING ($PROJECT): Task picker failed 3x (possible rate limit) — session ending"
+    while (( hallucination_attempt < max_hallucination_attempts )); do
+        # Retry up to 3x — a rate limit or transient failure here would silently end the session
+        local raw_output exit_code=1
+        local claude_stderr="/tmp/nightcrawler-pick-stderr.$$"
+        local pick_attempt
+        for pick_attempt in 1 2 3; do
+            set +e
+            raw_output=$(cd "$PROJECT_PATH" && \
+                call_claude 60 "$prompt" \
+                    --model sonnet \
+                    --output-format json \
+                    --max-turns 1 2>"$claude_stderr")
+            exit_code=$?
+            set -e
+            if [[ $exit_code -eq 0 ]]; then
+                break
+            fi
+            log "pick_next_task: attempt $pick_attempt/3 failed (exit $exit_code). stderr: $(head -3 "$claude_stderr" 2>/dev/null)"
+            if [[ $pick_attempt -lt 3 ]]; then
+                # Exponential backoff — rate limits need time to clear
+                local wait_secs=$((30 * pick_attempt))
+                log "pick_next_task: waiting ${wait_secs}s before retry (possible rate limit)"
+                sleep "$wait_secs"
+            fi
+        done
+
+        if [[ $exit_code -ne 0 ]]; then
+            log "pick_next_task: all 3 attempts failed — returning empty (session will end)"
+            escalate_urgent "WARNING ($PROJECT): Task picker failed 3x (possible rate limit) — session ending"
+            rm -f "$claude_stderr"
+            echo ""
+            return
+        fi
         rm -f "$claude_stderr"
-        echo ""
-        return
-    fi
-    rm -f "$claude_stderr"
 
-    # Log cost (small but track it)
-    log_claude_cli_cost "$raw_output" "pick_task" "task-pick"
+        # Log cost (small but track it)
+        log_claude_cli_cost "$raw_output" "pick_task" "task-pick"
 
-    # Extract .result from JSON
-    local answer
-    answer=$(echo "$raw_output" | python3 -c "
+        # Extract .result from JSON
+        local answer
+        answer=$(echo "$raw_output" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -758,29 +770,48 @@ except:
     print('')
 " 2>/dev/null)
 
-    # Validate: must look like a task ID (NC-XXX) or NONE
-    if [[ "$answer" == "NONE" ]] || [[ -z "$answer" ]]; then
-        log "pick_next_task: no eligible task (model said: ${answer:-empty})"
-        echo ""
-        return
-    fi
+        # Validate: must look like a task ID (NC-XXX) or NONE
+        if [[ "$answer" == "NONE" ]] || [[ -z "$answer" ]]; then
+            log "pick_next_task: no eligible task (model said: ${answer:-empty})"
+            echo ""
+            return
+        fi
 
-    # Strip any extra text — model should return just the ID but be safe.
-    # Regex supports multi-segment IDs (NC-F1-VALIDATE, CAM-F1-SMOKE-V2, …);
-    # legacy single-segment IDs (NC-385, CAM-001, NC-SMOKE) still match.
-    # Lowercase terminates a segment (e.g. "NC-SMOKE-v2" → "NC-SMOKE"), so the
-    # downstream task-body lookup can't be tricked by prose continuations.
-    local task_id
-    task_id=$(echo "$answer" | grep -oE '[A-Z]+-[0-9A-Z]+(-[0-9A-Z]+)*' | head -1)
+        # Strip any extra text — model should return just the ID but be safe.
+        # Regex supports multi-segment IDs (NC-F1-VALIDATE, CAM-F1-SMOKE-V2, …);
+        # legacy single-segment IDs (NC-385, CAM-001, NC-SMOKE) still match.
+        # Lowercase terminates a segment (e.g. "NC-SMOKE-v2" → "NC-SMOKE"), so the
+        # downstream task-body lookup can't be tricked by prose continuations.
+        local task_id
+        task_id=$(echo "$answer" | grep -oE '[A-Z]+-[0-9A-Z]+(-[0-9A-Z]+)*' | head -1)
 
-    if [[ -z "$task_id" ]]; then
-        log "pick_next_task: could not parse task ID from model response: $answer"
-        echo ""
-        return
-    fi
+        if [[ -z "$task_id" ]]; then
+            log "pick_next_task: could not parse task ID from model response: $answer"
+            echo ""
+            return
+        fi
 
-    log "pick_next_task: selected $task_id"
-    echo "$task_id"
+        # #64: require an exact queued [ ] or in-progress [~] header for this ID.
+        # Shipped [x] and human-only [🚧]/MANUAL are intentionally rejected.
+        if grep -qE "^#{1,6}[[:space:]]+${task_id}[[:space:]]+\[[ ~]\]" "$queue"; then
+            log "pick_next_task: selected $task_id"
+            echo "$task_id"
+            return
+        fi
+
+        hallucination_attempt=$((hallucination_attempt + 1))
+        journal '{"event":"invalid_pick","task_id":"'"$task_id"'","reason":"not_in_queue","attempt":'"$hallucination_attempt"',"max_attempts":'"$max_hallucination_attempts"',"ts":"'"$(date -u +%FT%TZ)"'"}'
+        log "pick_next_task: $task_id NOT FOUND in TASK_QUEUE.md (hallucination $hallucination_attempt/$max_hallucination_attempts)"
+
+        if (( hallucination_attempt >= max_hallucination_attempts )); then
+            log "pick_next_task: picker hallucination limit reached — ending session cleanly"
+            escalate_urgent "WARNING ($PROJECT): Picker returned $max_hallucination_attempts invalid task IDs in a row — check TASK_QUEUE.md"
+            break
+        fi
+        log "pick_next_task: re-asking picker (hallucination retry)"
+    done
+
+    echo ""
 }
 
 extract_task_context() {
@@ -808,7 +839,13 @@ for i, line in enumerate(lines):
         break
 
 if not found:
-    print('Task ' + task_id)
+    # #64 defense-in-depth: pick_next_task rejects IDs not in TASK_QUEUE.md,
+    # so this branch should be unreachable on the happy path. If it fires
+    # (file race, header-format drift), make it loud instead of producing
+    # a zero-information "Task NC-XXX" stub that silently poisons planning.
+    import sys
+    sys.stderr.write('extract_task_context: task ID ' + task_id + ' not found in TASK_QUEUE.md\n')
+    sys.exit(1)
 " 2>/dev/null
 }
 
