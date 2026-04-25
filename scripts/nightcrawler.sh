@@ -842,7 +842,8 @@ if not found:
     # #64 defense-in-depth: pick_next_task rejects IDs not in TASK_QUEUE.md,
     # so this branch should be unreachable on the happy path. If it fires
     # (file race, header-format drift), make it loud instead of producing
-    # a zero-information "Task NC-XXX" stub that silently poisons planning.
+    # a zero-information stub (the previous fallback printed Task plus the id)
+    # that silently poisons planning.
     import sys
     sys.stderr.write('extract_task_context: task ID ' + task_id + ' not found in TASK_QUEUE.md\n')
     sys.exit(1)

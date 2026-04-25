@@ -86,53 +86,82 @@ fi
 echo "ALL PASSED ($(grep -c '^    check ' "$0" 2>/dev/null || echo '?') assertions)"
 
 # ---------------------------------------------------------------------------
-# Defense-in-depth: verify extract_task_context no longer emits a "Task NC-XXX"
-# stub on miss. We can't easily invoke the bash function in isolation, so we
-# extract just the python body and run it against a fixture missing the ID.
+# Source the actual extract_task_context() function from nightcrawler.sh and
+# call it as a bash function. Tests both happy AND miss paths through the
+# real bash double-quoted python heredoc. The earlier python-body-standalone
+# test missed an unescaped \" in a comment that broke bash quoting and made
+# every happy-path call fail with IndentationError — surfaced by an aborted
+# session on 2026-04-25 (NC-429A pick → 0-byte task_context.md → set -e die).
 # ---------------------------------------------------------------------------
 
 echo
-echo "extract_task_context fallback (must FAIL LOUD, not print stub):"
+echo "extract_task_context as sourced bash function:"
 
-tmp_py=$(mktemp --suffix=.py)
-trap "rm -f '$fixture' '$tmp_py'" EXIT
-cat > "$tmp_py" <<PY
-import re, sys
+SCRIPT=/root/nightcrawler/scripts/nightcrawler.sh
+[[ -f "$SCRIPT" ]] || { echo "  SKIP: $SCRIPT not present"; exit 0; }
 
-with open("$fixture") as f:
-    lines = f.readlines()
+tmp_etc=$(mktemp --suffix=.sh)
+trap "rm -f '$fixture' '$tmp_etc'" EXIT
+awk '/^extract_task_context\(\) \{/,/^\}$/' "$SCRIPT" > "$tmp_etc"
+# Strip the function-internal `2>/dev/null` so the test surfaces python errors.
+sed -i 's| 2>/dev/null$||' "$tmp_etc"
 
-task_id = "NC-DOES-NOT-EXIST"
-header_re = re.compile(r'^#{1,6}\s+' + re.escape(task_id) + r'\s+\[.\]')
-found = False
-for i, line in enumerate(lines):
-    if header_re.match(line):
-        print(line.rstrip())
-        for j in range(i+1, len(lines)):
-            if re.match(r'^#{1,6}\s', lines[j]):
-                break
-            print(lines[j].rstrip())
-        found = True
-        break
+# Build a project-shaped fixture dir so $PROJECT_PATH/TASK_QUEUE.md resolves.
+proj_dir=$(mktemp -d)
+trap "rm -rf '$proj_dir'; rm -f '$fixture' '$tmp_etc'" EXIT
+cp "$fixture" "$proj_dir/TASK_QUEUE.md"
 
-if not found:
-    sys.stderr.write('extract_task_context: task ID ' + task_id + ' not found in TASK_QUEUE.md\n')
-    sys.exit(1)
-PY
-
+# Happy path
 set +e
-out=$(python3 "$tmp_py" 2>/dev/null)
+out=$(PROJECT_PATH="$proj_dir" bash -c "source '$tmp_etc'; extract_task_context NC-100" 2>/tmp/etc_err.$$)
+rc=$?
+set -e
+if (( rc != 0 )); then
+    echo "  FAIL: happy path NC-100 exited $rc (stderr: $(cat /tmp/etc_err.$$))"
+    rm -f /tmp/etc_err.$$
+    exit 1
+fi
+if [[ -z "$out" ]]; then
+    echo "  FAIL: happy path produced empty stdout"
+    rm -f /tmp/etc_err.$$
+    exit 1
+fi
+echo "  PASS: happy path NC-100 → exit 0, ${#out} chars stdout"
+
+# Multi-segment ID happy path (this is the shape that aborted the live session)
+set +e
+out=$(PROJECT_PATH="$proj_dir" bash -c "source '$tmp_etc'; extract_task_context NC-FOO-SMOKE" 2>/tmp/etc_err.$$)
+rc=$?
+set -e
+if (( rc != 0 )) || [[ -z "$out" ]]; then
+    echo "  FAIL: multi-segment NC-FOO-SMOKE exited $rc, ${#out} chars (stderr: $(cat /tmp/etc_err.$$))"
+    rm -f /tmp/etc_err.$$
+    exit 1
+fi
+echo "  PASS: multi-segment NC-FOO-SMOKE → exit 0, ${#out} chars stdout"
+
+# Miss path
+set +e
+out=$(PROJECT_PATH="$proj_dir" bash -c "source '$tmp_etc'; extract_task_context NC-DOES-NOT-EXIST" 2>/tmp/etc_err.$$)
 rc=$?
 set -e
 if (( rc != 1 )); then
-    echo "  FAIL: expected exit 1, got $rc"
+    echo "  FAIL: miss path expected exit 1, got $rc"
+    rm -f /tmp/etc_err.$$
     exit 1
 fi
 if [[ -n "$out" ]]; then
-    echo "  FAIL: fallback should emit nothing on stdout, got: $out"
+    echo "  FAIL: miss path stdout should be empty, got: $out"
+    rm -f /tmp/etc_err.$$
     exit 1
 fi
-echo "  PASS: exit 1, empty stdout on missing ID"
+if ! grep -q 'not found in TASK_QUEUE.md' /tmp/etc_err.$$; then
+    echo "  FAIL: miss path stderr missing expected message (got: $(cat /tmp/etc_err.$$))"
+    rm -f /tmp/etc_err.$$
+    exit 1
+fi
+echo "  PASS: miss path → exit 1, empty stdout, loud stderr"
+rm -f /tmp/etc_err.$$
 
 echo
 echo "OK"
