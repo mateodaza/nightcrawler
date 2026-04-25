@@ -1364,9 +1364,14 @@ append_to_progress() {
 count_tasks() {
     local queue="$PROJECT_PATH/TASK_QUEUE.md"
     [[ -f "$queue" ]] || { echo "0"; return; }
-    # Count [ ] tasks excluding MANUAL — approximate, just for notifications
+    # Count [ ] tasks excluding MANUAL — approximate, just for notifications.
+    # ID pattern mirrors pick_next_task's parser so multi-segment IDs
+    # (NC-429A, CAM-F1-SMOKE-V2, NC-FOO-SMOKE) are counted, not silently
+    # dropped. Pre-758b0b4 this was [A-Z]+-[0-9]+ and excluded any ID with
+    # a non-digit suffix — produced spurious low Remaining counts in
+    # session notifications when sprints used multi-segment IDs.
     local n
-    n=$(grep -cE '^\#{4}\s+[A-Z]+-[0-9]+\s+\[ \]' "$queue" 2>/dev/null) || true
+    n=$(grep -cE '^\#{4}\s+[A-Z]+-[0-9A-Z]+(-[0-9A-Z]+)*\s+\[ \]' "$queue" 2>/dev/null) || true
     echo "${n:-0}"
 }
 
