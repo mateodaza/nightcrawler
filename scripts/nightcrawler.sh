@@ -1350,9 +1350,11 @@ except Exception:
 append_to_progress() {
     local task_id="$1" degraded_note="${2:-}"
     local progress="$PROJECT_PATH/PROGRESS.md"
-    local hash
-    hash=$(git -C "$PROJECT_PATH" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    local line="- **${task_id}** — $(date -u +%F) — \`${hash}\` — Session: ${SESSION_ID}"
+    # Hash field intentionally omitted: append_to_progress runs pre-commit so
+    # any captured hash is one off, and amending the row post-commit changes
+    # the commit's own hash (chicken-and-egg). Use git log --grep=$task_id
+    # for the canonical commit lookup.
+    local line="- **${task_id}** — $(date -u +%F) — Session: ${SESSION_ID}"
     if [[ -n "$degraded_note" ]]; then
         line="${line} — ⚠ $(echo -e "$degraded_note" | head -1)"
     fi
