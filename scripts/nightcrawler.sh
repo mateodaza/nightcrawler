@@ -149,6 +149,23 @@ if [[ -f "$HOME/.env" ]]; then
     done < "$HOME/.env"
 fi
 
+# Augment PATH with nvm-active node bin if pnpm/turbo aren't already on PATH.
+# Non-interactive shells (systemd, the orchestrator's bash invocation) don't
+# source ~/.bashrc, so nvm's PATH magic never fires. Without this, BUILD_CMD
+# = "pnpm type-check" silently fails with "pnpm: command not found", the
+# picker prompt always reports BUILD: FAILING, and Sonnet gets biased toward
+# skipping eligible work. Discovered 2026-04-26 via session 20260426-222314,
+# which returned an empty pick on a queue with one valid task (NC-433).
+if ! command -v pnpm >/dev/null 2>&1; then
+    if [[ -d "$HOME/.nvm/versions/node" ]]; then
+        nvm_latest=$(ls -1 "$HOME/.nvm/versions/node" 2>/dev/null | sort -V | tail -1)
+        if [[ -n "$nvm_latest" ]]; then
+            export PATH="$HOME/.nvm/versions/node/$nvm_latest/bin:$PATH"
+        fi
+        unset nvm_latest
+    fi
+fi
+
 # =============================================================================
 # SEC 2: State flags
 # =============================================================================
@@ -666,7 +683,7 @@ $(cat "$skip_file")
     if cd "$PROJECT_PATH" && eval "$BUILD_CMD" >/dev/null 2>&1; then
         build_status="BUILD: passing"
     else
-        build_status="BUILD: FAILING — consider if this blocks anything"
+        build_status="BUILD: FAILING — informational only; pick the next eligible task anyway unless its body explicitly depends on a clean build"
     fi
 
     local prompt
