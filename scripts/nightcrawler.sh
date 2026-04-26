@@ -2640,7 +2640,9 @@ Resume from here and finish the remaining work.")
     IMPL_REVIEW_MODE="capped_soft_reject"
     IMPL_LAST_FEEDBACK="${REVIEW_FEEDBACK:-no review feedback available}"
     local safe_feedback
-    safe_feedback=$(echo "${REVIEW_FEEDBACK:-}" | head -c 500 | sed 's/"/\\"/g')
+    # Strip newlines/CR/tabs before quote-escaping so multi-line auditor REJECTED
+    # text doesn't break the JSON line (4 lines/session went malformed pre-fix).
+    safe_feedback=$(echo "${REVIEW_FEEDBACK:-}" | head -c 500 | tr -d '\n\r\t' | sed 's/"/\\"/g')
     journal '{"event":"impl_capped_soft_reject","task_id":"'"$task_id"'","iteration":'"$iteration"',"last_feedback":"'"$safe_feedback"'"}'
     return 0
 }
@@ -2926,6 +2928,12 @@ execute_recovery() {
             ;;
         task_start|plan_approved|impl_approved)
             log "RECOVERY: Task $RECOVERY_TASK_ID was in progress, resetting to queued"
+            ;;
+        session_aborted|session_complete)
+            # Previous session exited cleanly (or was killed by set -e + trap).
+            # No in-flight task to recover — workspace revert below still runs
+            # for any orphaned Nightcrawler-owned files.
+            log "RECOVERY: Previous session exited ($RECOVERY_LAST_EVENT), no task in flight"
             ;;
         *)
             log "RECOVERY: Unknown last event '$RECOVERY_LAST_EVENT', proceeding cautiously"
@@ -3349,7 +3357,7 @@ main_loop() {
             task_file="$SESSION_DIR/tasks/$TASK_ID/task_context.md"
             mkdir -p "$(dirname "$task_file")"
             extract_task_context "$TASK_ID" > "$task_file"
-            task_desc=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+[A-Z]+-[0-9]+\s+\[.\]\s*//' | head -c 72)
+            task_desc=$(head -1 "$task_file" | sed -E 's/^#{1,6}\s+[A-Z]+-[0-9A-Z]+(-[0-9A-Z]+)*\s+\[.\]\s*//' | head -c 72)
 
             # F5 companion check (no-op unless NC_COMPANION_CHECK=1). On
             # SHIPPED it returns 2 — treat as C0-style stale pick.
