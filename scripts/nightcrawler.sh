@@ -3407,6 +3407,22 @@ main_loop() {
         TIER_STANCE_FILE=""
         if [[ -n "$TASK_DERIVED_TIER" ]]; then
             journal '{"event":"task_tier","task_id":"'"$TASK_ID"'","tier":"'"$TASK_DERIVED_TIER"'","signals":'"$TASK_TIER_SIGNALS_JSON"'}'
+            # F6a.vol (observe-only): the keyword classifier has no volume
+            # signal — NC-430 (37 ACs / 18 files / 0 destructive kw) was
+            # tiered STANDARD but cost $9 across 8 plan iters and triggered
+            # one inflation fire. Emit volume_escalation_observed when a
+            # STANDARD-tiered task crosses ac>=20 OR files>=8 so we can
+            # post-hoc decide whether to escalate the heuristic. NO
+            # behavior change — stance + caps still use TASK_DERIVED_TIER.
+            if [[ "$TASK_DERIVED_TIER" == "STANDARD" ]]; then
+                local vol_ac vol_files
+                vol_ac=$(echo "$TASK_TIER_SIGNALS_JSON" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("ac_count",0))' 2>/dev/null || echo 0)
+                vol_files=$(echo "$TASK_TIER_SIGNALS_JSON" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("listed_files",0))' 2>/dev/null || echo 0)
+                if (( vol_ac >= 20 )) || (( vol_files >= 8 )); then
+                    journal '{"event":"volume_escalation_observed","task_id":"'"$TASK_ID"'","derived_tier":"STANDARD","ac_count":'"$vol_ac"',"listed_files":'"$vol_files"',"thresholds":{"ac":20,"files":8},"would_be":"RISKY"}'
+                    log "F6a.vol: $TASK_ID is STANDARD but volume (ac=$vol_ac, files=$vol_files) suggests RISKY — observe only"
+                fi
+            fi
             # F6b.2a: render the stance block once per task. Plan/revise
             # prompts cat it inline; audit/review pass its path to
             # call_codex.py via --tier-stance-file. Empty TIER_STANCE_FILE
