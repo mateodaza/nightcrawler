@@ -1983,7 +1983,7 @@ plan_loop() {
         # Per-task plan_history.jsonl always records every rejection so the
         # next iteration's check has history to compare against.
         #
-        # B4.2 (NC_PLAN_INFLATION_GUARD=1, default off): when a fire occurs
+        # B4.2 (NC_PLAN_INFLATION_GUARD, default ON as of ac2ad72+1): when a fire occurs
         # AND the flag is on, plan_inflation.py writes a rendered steer to
         # $plan_steer_file and sets steer_injected=true in the event.
         # revise_plan() picks up PLAN_STEER_FILE on its next call and
@@ -1994,7 +1994,7 @@ plan_loop() {
         local plan_steer_file="$plan_hist_dir/plan_steer_iter_${iteration}.txt"
         rm -f "$plan_steer_file" 2>/dev/null || true
         local plan_infl_steer_args=()
-        if [[ "${NC_PLAN_INFLATION_GUARD:-0}" == "1" ]]; then
+        if [[ "${NC_PLAN_INFLATION_GUARD:-1}" == "1" ]]; then
             plan_infl_steer_args=(--steer-out "$plan_steer_file")
         fi
         local plan_infl_event
