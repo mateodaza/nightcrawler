@@ -73,6 +73,13 @@ PLAN_MAX_TURNS="${PLAN_MAX_TURNS:-15}"
 # Exploration tools (Read/Grep/Glob/Agent) remain allowed. Override via env
 # if future task shapes need different restrictions.
 PLAN_DISALLOWED_TOOLS="${PLAN_DISALLOWED_TOOLS:-ExitPlanMode,Write,Edit,NotebookEdit,Bash,TodoWrite}"
+# Picker tool-surface restriction. The picker'''s job is to read TASK_QUEUE.md
+# (already in-prompt) and name a task ID — it never needs tools. Letting Sonnet
+# call Read/Grep/Glob causes it to exhaust max-turns=1 with a tool call and
+# return empty (subtype=error_max_turns). Diagnosed 2026-04-26 after sessions
+# 20260426-222314 + 20260426-223543 returned empty on a one-task queue;
+# 5-run replay showed 60%% empty-rate without restrict, ~0%% with.
+PICKER_DISALLOWED_TOOLS="${PICKER_DISALLOWED_TOOLS:-Read,Edit,Write,Glob,Grep,Bash,WebSearch,WebFetch,NotebookEdit,TodoWrite,ExitPlanMode}"
 IMPL_MAX_TURNS="${IMPL_MAX_TURNS:-40}"
 REPAIR_MAX_TURNS="${REPAIR_MAX_TURNS:-}"  # empty = omit --max-turns (unlimited)
 VERIFY_INSTRUCTIONS="Run '$BUILD_CMD' and '$TEST_CMD' to verify before finishing."
@@ -749,7 +756,8 @@ $(cat "$queue")"
                 call_claude 60 "$prompt" \
                     --model sonnet \
                     --output-format json \
-                    --max-turns 1 2>"$claude_stderr")
+                    --max-turns 1 \
+                    --disallowedTools "$PICKER_DISALLOWED_TOOLS" 2>"$claude_stderr")
             exit_code=$?
             set -e
             if [[ $exit_code -eq 0 ]]; then
