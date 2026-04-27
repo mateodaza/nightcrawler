@@ -756,7 +756,7 @@ $(cat "$queue")"
                 call_claude 60 "$prompt" \
                     --model sonnet \
                     --output-format json \
-                    --max-turns 1 \
+                    --max-turns 2 \
                     --disallowedTools "$PICKER_DISALLOWED_TOOLS" 2>"$claude_stderr")
             exit_code=$?
             set -e
