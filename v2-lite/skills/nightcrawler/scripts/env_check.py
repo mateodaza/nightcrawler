@@ -44,12 +44,15 @@ def _major(v):
     return m.group(1) if m else None
 
 
-def _detect_node_version(which):
-    if which("node") is None:
-        return None
+def _detect_node_version(login_shell=False):
+    # Probe node the SAME way verify will invoke it. An NC_VERIFY_CMD override runs through
+    # `bash -lc`, which sources login files (.bash_profile / .zprofile) and can resolve a
+    # DIFFERENT node (nvm/fnm/brew) than a direct subprocess. Probing directly here once reported
+    # v22 as "ready" while the login-shell verify actually ran v12 -> false base_red. (#3)
+    cmd = ["bash", "-lc", "node --version"] if login_shell else ["node", "--version"]
     try:
-        return subprocess.run(["node", "--version"], capture_output=True,
-                              text=True).stdout.strip()
+        v = (subprocess.run(cmd, capture_output=True, text=True).stdout or "").strip()
+        return v or None
     except Exception:
         return None
 
@@ -62,16 +65,25 @@ def check_env(repo, which=None, node_version=None, env=None):
 
     issues = []
 
-    # node version (only if the repo declares one)
+    # Resolve the checks ONCE and detect the context verify will run in: an NC_VERIFY_CMD override
+    # runs via `bash -lc` (login shell), auto-detected checks run as direct subprocesses. Every
+    # probe below must match that context so env_check can't disagree with verify about node. (#3)
+    checks = verify.detect_checks(repo, env)
+    uses_login_shell = any(
+        isinstance(c.get("cmd"), list) and c["cmd"][:2] == ["bash", "-lc"] for c in checks
+    )
+
+    # node version (only if the repo declares one) — probed in verify's execution context
     req = required_node(repo)
     if req is not None:
-        actual = node_version() if node_version else _detect_node_version(which)
+        actual = node_version() if node_version else _detect_node_version(uses_login_shell)
         rmaj, amaj = _major(req), _major(actual)
         if actual is None:
             issues.append("node not found on PATH (repo expects node %s)" % req)
         elif rmaj and amaj and rmaj != amaj:
-            issues.append("node major mismatch: repo wants %s, found %s "
-                          "(switch with nvm/fnm before running)" % (req, actual))
+            ctx = " — as resolved by the login shell NC_VERIFY_CMD runs in" if uses_login_shell else ""
+            issues.append("node major mismatch: repo wants %s, found %s%s "
+                          "(fix nvm/fnm/.bash_profile before running)" % (req, actual, ctx))
 
     # node deps installed
     if os.path.exists(os.path.join(repo, "package.json")):
@@ -81,8 +93,8 @@ def check_env(repo, which=None, node_version=None, env=None):
             issues.append("node_modules missing — run the project's install "
                           "(e.g. `pnpm install`) before verify can run")
 
-    # verifier toolchain resolvable
-    for chk in verify.detect_checks(repo, env):
+    # verifier toolchain resolvable (reuse the checks resolved above)
+    for chk in checks:
         binary = chk["cmd"][0]
         if binary == "bash":            # NC_VERIFY_CMD override runs via `bash -lc`; bash always present
             continue

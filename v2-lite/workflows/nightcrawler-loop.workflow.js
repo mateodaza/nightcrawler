@@ -310,11 +310,21 @@ const commitRaw = await agent(
   ${COMMIT_CMD} ${JSON.stringify(WT)} ${JSON.stringify('nc: ' + SLUG)}`,
   { model: MODEL_RUNNER, phase: 'Commit', label: 'commit' }
 )
-const commitResult = extractJsonObject(commitRaw) || { committed: false }
+const commitResult = extractJsonObject(commitRaw) || { committed: false, reason: 'unparseable' }
 if (commitResult.committed !== true) {
+  // Only a genuinely EMPTY diff is a benign no_changes. A failed commit (bad worktree, git
+  // identity/error, failing hook) or unparseable output is an INFRA failure — never a harmless
+  // no-op the feat can continue past. (Same infra-vs-findings discipline as the verifier.)
+  if (commitResult.reason === 'empty') {
+    return {
+      status: 'no_changes', task: TASK, worktree: WT, branch: BRANCH, rounds: round,
+      note: 'Review passed but the implement step produced no committable change (empty diff). no_changes, never a false done — nothing to merge.',
+    }
+  }
   return {
-    status: 'no_changes', task: TASK, worktree: WT, branch: BRANCH, rounds: round,
-    note: 'Review passed but the implement step produced no committable change (empty diff). Reported as no_changes, never a false done — there is nothing to merge.',
+    status: 'infra_error', task: TASK, worktree: WT, branch: BRANCH, rounds: round,
+    error: `commit gate failed: ${commitResult.reason || 'unknown'}`,
+    note: 'The commit step FAILED (bad worktree, git error/identity, failing hook, or unparseable output) — NOT an empty diff and NOT a benign no-op. Needs a human / infra check.',
   }
 }
 const COMMIT_SHA = commitResult.sha || null

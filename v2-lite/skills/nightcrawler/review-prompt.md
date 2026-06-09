@@ -10,8 +10,8 @@ actually correct in context — not just locally plausible.
 
 ## Task completion (when a task is provided)
 
-If a "## Task this change must accomplish" section appears below, your review MUST also judge
-**completeness**, not only correctness: does the diff actually DO what the task asked? A change that
+If the context below states a task this change must accomplish (under any heading), your review
+MUST also judge **completeness**, not only correctness: does the diff actually DO what the task asked? A change that
 is clean and compiles but does NOT fulfill the stated task (e.g. it refactors but omits the required
 new behavior) is an **incomplete implementation** — emit a **priority 1** finding naming what's
 missing. "Correct but incomplete" must NOT pass.
