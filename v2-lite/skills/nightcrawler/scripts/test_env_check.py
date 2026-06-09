@@ -103,8 +103,9 @@ def _record_probe_context(repo, env):
     """Run check_env with the real node probe swapped for a recorder; return login_shell flag."""
     seen = {}
 
-    def rec(login_shell=False):
+    def rec(login_shell=False, cwd=None):
         seen["ls"] = login_shell
+        seen["cwd"] = cwd
         return "v22.0.0"
 
     orig = E._detect_node_version
@@ -113,20 +114,26 @@ def _record_probe_context(repo, env):
         E.check_env(repo, which=ALL_PRESENT, env=env)   # node_version=None -> uses _detect_node_version
     finally:
         E._detect_node_version = orig
-    return seen.get("ls")
+    return seen
 
 
 def test_node_probed_in_login_shell_when_override():
     # NC_VERIFY_CMD -> verify runs `bash -lc` -> env_check must probe node via the login shell too
     repo = _repo({".node-version": "22", "README.md": "x"})
-    assert _record_probe_context(repo, {"NC_VERIFY_CMD": "pnpm -w type-check"}) is True
+    assert _record_probe_context(repo, {"NC_VERIFY_CMD": "pnpm -w type-check"})["ls"] is True
 
 
 def test_node_probed_directly_when_autodetect():
     # auto-detected checks run as direct subprocesses -> probe node directly, no login shell
     repo = _repo({".node-version": "22", "package.json": '{"scripts":{"test":"vitest"}}',
                   "pnpm-lock.yaml": "", "node_modules/": ""})
-    assert _record_probe_context(repo, {}) is False
+    assert _record_probe_context(repo, {})["ls"] is False
+
+
+def test_node_probe_runs_in_repo_cwd():
+    # #3 P2: probe must run with cwd=repo so .nvmrc/fnm/asdf/direnv pick the node verify will
+    repo = _repo({".node-version": "22", "README.md": "x"})
+    assert _record_probe_context(repo, {})["cwd"] == repo
 
 
 def test_login_shell_mismatch_message_names_the_cause():

@@ -44,14 +44,16 @@ def _major(v):
     return m.group(1) if m else None
 
 
-def _detect_node_version(login_shell=False):
+def _detect_node_version(login_shell=False, cwd=None):
     # Probe node the SAME way verify will invoke it. An NC_VERIFY_CMD override runs through
     # `bash -lc`, which sources login files (.bash_profile / .zprofile) and can resolve a
     # DIFFERENT node (nvm/fnm/brew) than a direct subprocess. Probing directly here once reported
     # v22 as "ready" while the login-shell verify actually ran v12 -> false base_red. (#3)
+    # cwd=repo so directory-sensitive managers (.nvmrc / fnm / asdf / direnv) select the same node
+    # verify will — verify runs every check with cwd=repo, so the probe must match that too. (#3 P2)
     cmd = ["bash", "-lc", "node --version"] if login_shell else ["node", "--version"]
     try:
-        v = (subprocess.run(cmd, capture_output=True, text=True).stdout or "").strip()
+        v = (subprocess.run(cmd, capture_output=True, text=True, cwd=cwd).stdout or "").strip()
         return v or None
     except Exception:
         return None
@@ -76,7 +78,7 @@ def check_env(repo, which=None, node_version=None, env=None):
     # node version (only if the repo declares one) — probed in verify's execution context
     req = required_node(repo)
     if req is not None:
-        actual = node_version() if node_version else _detect_node_version(uses_login_shell)
+        actual = node_version() if node_version else _detect_node_version(uses_login_shell, cwd=repo)
         rmaj, amaj = _major(req), _major(actual)
         if actual is None:
             issues.append("node not found on PATH (repo expects node %s)" % req)
