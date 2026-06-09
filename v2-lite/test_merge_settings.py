@@ -43,11 +43,20 @@ def test_allow_rules_are_narrow_gate_scripts_only():
     rules = M.allow_rules()
     assert rules, "expected allow rules"
     for r in rules:
-        assert "/.claude/skills/nightcrawler/scripts/" in r
+        assert ".claude/skills/nightcrawler/scripts" in r
         assert any(name in r for _, name in M._GATE_SCRIPTS)
     joined = " ".join(rules)
     for broad in ("git:*", "pnpm:*", "npm:*", "Bash(git ", "Bash(pnpm ", "Write(", "Edit("):
         assert broad not in joined
+
+
+def test_allow_rules_match_workflow_command_shape():
+    # the workflows emit:  <runner> "$HOME/.claude/skills/nightcrawler/scripts"/<script> <args>
+    # so a literal-$HOME, dir-quoted rule MUST be present for each gate script (P2 fix).
+    rules = M.allow_rules()
+    for runner, name in M._GATE_SCRIPTS:
+        literal = 'Bash(%s "$HOME/.claude/skills/nightcrawler/scripts"/%s *)' % (runner, name)
+        assert literal in rules, "missing literal-$HOME rule for " + name
 
 
 def test_preserves_all_other_settings():

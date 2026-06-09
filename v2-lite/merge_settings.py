@@ -61,22 +61,35 @@ _GATE_SCRIPTS = [
 ]
 
 
+# MUST mirror the workflows' SKILL_SCRIPTS const exactly. The loop/feat invoke a gate script as:
+#     <runner> "$HOME/.claude/skills/nightcrawler/scripts"/<script> <args>
+# i.e. LITERAL `$HOME`, with quotes around the DIR only and the script name OUTSIDE the quotes.
+SCRIPTS_SUFFIX = ".claude/skills/nightcrawler/scripts"
+LITERAL_DIR = '"$HOME/%s"' % SCRIPTS_SUFFIX
+
+
 def scripts_dir(home=None):
     home = home if home is not None else os.path.expanduser("~")
     return os.path.join(home, ".claude", "skills", "nightcrawler", "scripts")
 
 
+def _expanded_dir(home=None):
+    home = home if home is not None else os.path.expanduser("~")
+    return '"%s/%s"' % (home, SCRIPTS_SUFFIX)
+
+
 def allow_rules(home=None):
-    """Narrow permissions.allow rules for the gate scripts. Both quoted and unquoted absolute-path
-    forms are emitted because the workflow invokes them as `bash "$HOME/.../x.sh" ...` and the exact
-    command string the matcher sees (quoted vs expanded) can differ — extra non-matching allow
-    entries are harmless (allow only widens; deny/ask still take precedence)."""
-    d = scripts_dir(home)
+    """Narrow permissions.allow rules for the gate scripts, matching the EXACT command shape the
+    workflows emit: `<runner> "$HOME/.../scripts"/<script> <args>`. We don't know for certain whether
+    Claude Code matches the command BEFORE or AFTER $HOME-expansion, so emit BOTH the literal-`$HOME`
+    form (most likely — it matches the unexpanded string the agent passes to the Bash tool) and the
+    expanded-home form. The FIRST AUTO DRY-RUN must confirm which actually matched; copy the exact
+    command from any remaining prompt to refine. Extra non-matching entries are harmless (allow only
+    widens; deny/ask still take precedence)."""
     rules = []
     for runner, name in _GATE_SCRIPTS:
-        path = "%s/%s" % (d, name)
-        rules.append('Bash(%s %s *)' % (runner, path))
-        rules.append('Bash(%s "%s" *)' % (runner, path))
+        rules.append('Bash(%s %s/%s *)' % (runner, LITERAL_DIR, name))
+        rules.append('Bash(%s %s/%s *)' % (runner, _expanded_dir(home), name))
     return rules
 
 
