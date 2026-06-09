@@ -8,4 +8,10 @@
 # Taking the dir as an arg means the call site needs no leading `cd` — one clean command.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# Target guard (auto-mode hardening): only verify the caller's own repo / an nc-wt-* worktree.
+source "$here/_guard.sh"
+if ! nc_guard repo_or_worktree "${1:-$PWD}"; then
+  printf '{"pass": false, "inconclusive": true, "failures": [{"stage": "guard", "kind": "refused", "log_tail": "target rejected by nc_guard (not the caller repo or an nc worktree)"}], "checks": []}\n'
+  exit 0
+fi
 exec python3 "$here/verify.py" "${1:-$PWD}"

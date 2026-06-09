@@ -6,6 +6,14 @@
 set -uo pipefail
 dir="${1:?worktree dir required}"
 msg="${2:-nc: task}"
+# Target guard (auto-mode hardening): only `git add -A && commit` inside an nc-wt-* worktree of the
+# caller's own repo — never stage/commit an arbitrary directory. Runs BEFORE any cd (uses caller $PWD).
+here="$(cd "$(dirname "$0")" && pwd)"
+source "$here/_guard.sh"
+if ! nc_guard worktree "$dir"; then
+  printf '{"committed": false, "reason": "guard_refused"}\n'
+  exit 0
+fi
 # reason distinguishes a benign empty diff from a real failure — only "empty" maps to no_changes;
 # bad_worktree / commit_failed are infra errors the loop must NOT swallow as a harmless no-op.
 if ! cd "$dir" 2>/dev/null; then

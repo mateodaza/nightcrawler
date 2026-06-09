@@ -238,9 +238,23 @@ if (!pf.clean) {
 // feat branch, which persists in git) so we skip them.
 const prior = pf.stateRaw ? extractJsonObject(pf.stateRaw) : null
 if (prior && Array.isArray(prior.tasks)) {
-  const doneIds = new Set(prior.tasks.filter((t) => t && t.status === 'done').map((t) => t.taskId))
-  for (const node of state.tasks) if (doneIds.has(node.taskId)) node.status = 'done'
-  if (doneIds.size) log(`Resume: ${doneIds.size} task(s) already done in ${STATE_PATH} — will skip.`)
+  // Carry forward BOTH done AND noop. A done task is merged into the feat branch (persisted in git);
+  // a noop task contributed nothing but its deterministic branch/worktree name is already taken —
+  // re-running it would collide. Carrying noop (terminal for resume) avoids the collision and keeps
+  // the done_with_noops accounting honest. Also preserve each carried task's logged decisions.
+  const priorById = new Map(prior.tasks.filter((t) => t && t.taskId).map((t) => [t.taskId, t]))
+  let carried = 0
+  for (const node of state.tasks) {
+    const p = priorById.get(node.taskId)
+    if (p && (p.status === 'done' || p.status === 'noop')) {
+      node.status = p.status
+      if (p.status === 'noop') node.noop = true
+      if (Array.isArray(p.decisions)) node.decisions = p.decisions
+      if (p.loopStatus) node.loopStatus = p.loopStatus
+      carried++
+    }
+  }
+  if (carried) log(`Resume: ${carried} task(s) already done/noop in ${STATE_PATH} — will skip.`)
 }
 
 // ── 2. Cut (or resume) the feat branch from base ─────────────────────────────
@@ -296,7 +310,7 @@ phase('Tasks')
 for (let i = 0; i < state.tasks.length; i++) {
   const node = state.tasks[i]
   const n = `${i + 1}/${state.tasks.length}`
-  if (node.status === 'done') { log(`Task ${n} "${node.taskId}" already done (resume) — skipping.`); continue }
+  if (node.status === 'done' || node.status === 'noop') { log(`Task ${n} "${node.taskId}" already ${node.status} (resume) — skipping.`); continue }
 
   node.status = 'running'
   log(`Task ${n}: ${node.spec}  →  loop (branch ${node.branch}).`)

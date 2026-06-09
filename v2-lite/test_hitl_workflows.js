@@ -18,10 +18,23 @@ function load(p) {
 }
 const key = (label) => (label || '').split(':')[0]
 
-function makeAgent(scripts, calls) {
-  return async (_p, opts = {}) => {
+function extractBraces(s) {
+  const i = s.indexOf('{'); if (i < 0) return null
+  let d = 0, q = false, e = false
+  for (let k = i; k < s.length; k++) {
+    const c = s[k]
+    if (q) { if (e) e = false; else if (c === '\\') e = true; else if (c === '"') q = false; continue }
+    if (c === '"') q = true
+    else if (c === '{') d++
+    else if (c === '}') { if (--d === 0) { try { return JSON.parse(s.slice(i, k + 1)) } catch (_) { return null } } }
+  }
+  return null
+}
+function makeAgent(scripts, calls, capture) {
+  return async (p, opts = {}) => {
     const label = opts.label || opts.phase || '?'
     calls.push(label)
+    if (capture && label === 'state') capture.state = p   // the persist prompt embeds the state JSON
     const s = (label in scripts) ? scripts[label] : scripts[key(label)]
     return typeof s === 'function' ? s() : s
   }
@@ -34,10 +47,11 @@ async function runLoop(args, scripts) {
 }
 async function runFeat(args, scripts, loopResults) {
   const calls = []
+  const capture = {}
   let li = 0
-  const res = await load(FEAT)(args, makeAgent(scripts, calls), () => {}, () => {},
+  const res = await load(FEAT)(args, makeAgent(scripts, calls, capture), () => {}, () => {},
     async () => loopResults[li++])
-  return { res, calls }
+  return { res, calls, workflowCalls: li, stateJSON: capture.state ? extractBraces(capture.state) : null }
 }
 
 const J = (o) => JSON.stringify(o)
@@ -110,6 +124,22 @@ const planOf = (clarity, question = 'Q', interpretations = []) =>
     ok('F2 feat done', res && res.status === 'done', res && res.status)
     ok('F2 rollup decisions', res && Array.isArray(res.decisions) && res.decisions.length === 1 && res.decisions[0].taskId)
     ok('F2 per-task decisions', res && res.tasks[0].decisions.length === 1)
+  }
+  // F3: resume carries a prior NOOP — it must NOT be re-run (would collide on its branch/worktree)
+  {
+    // run 1: task 'a' → no_changes (noop), task 'b' → needs_human (halt) — capture persisted state
+    const r1 = await runFeat({ feat: 'R', tasks: ['a', 'b'] }, featBase,
+      [{ status: 'no_changes' }, { status: 'needs_human', question: 'Q', clarity: 'ambiguous', interpretations: [], plan: 'p' }])
+    const prior = r1.stateJSON
+    ok('F3 captured prior state', !!(prior && Array.isArray(prior.tasks) && prior.tasks.length === 2))
+    const aId = prior.tasks[0].taskId, bId = prior.tasks[1].taskId
+    ok('F3 prior a=noop, b=needs_human', prior.tasks[0].status === 'noop' && prior.tasks[1].status === 'needs_human')
+    // run 2 (resume): 'a' is carried noop (skipped); only 'b' re-runs with the answer → done
+    const featResume = { ...featBase, preflight: { clean: true, base: 'main', dirtyFiles: 0, stateRaw: JSON.stringify(prior) } }
+    const r2 = await runFeat({ feat: 'R', tasks: ['a', 'b'], answers: { [bId]: 'do it' } }, featResume,
+      [{ status: 'done', branch: 'nc/feat/x/b', decisions: [] }])
+    ok('F3 only ONE task re-ran (noop a skipped)', r2.workflowCalls === 1, 'workflowCalls=' + r2.workflowCalls)
+    ok('F3 prior noop carried in report', !!(r2.res && r2.res.tasks.find((t) => t.taskId === aId && t.status === 'noop')))
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)

@@ -43,11 +43,12 @@ TRUST_LINE = (
     "for this diff-review purpose only."
 )
 CONTEXT_LINE = (
-    "Nightcrawler runs locally only: it operates on git worktrees and branches named `nc/feat...` "
-    "in the current project, writes its feat state and reports under ~/.nightcrawler, and runs its "
-    "own gate scripts under ~/.claude/skills/nightcrawler/scripts. These local file writes, "
-    "worktree/branch operations, and gate-script runs are intended and trusted. Nightcrawler does "
-    "NOT push, deploy, run database migrations, or publish — human merge and publish remain the boundary."
+    "Nightcrawler is trusted ONLY when invoked by its own installed workflows (nightcrawler-loop / "
+    "nightcrawler-feat), and ONLY for: the CURRENT working repo; git branches named `nc/...` and "
+    "worktrees named `nc-wt-*`; running its own gate scripts under "
+    "~/.claude/skills/nightcrawler/scripts (each enforces a same-repo target guard); and state/report "
+    "writes under ~/.nightcrawler. It must NOT push, deploy, run database migrations, or publish, and "
+    "must NOT operate on any other repository — human merge and publish remain the boundary."
 )
 ENV_LINES = [TRUST_LINE, CONTEXT_LINE]
 

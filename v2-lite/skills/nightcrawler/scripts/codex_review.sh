@@ -19,6 +19,12 @@ prompt_file="$skill_dir/review-prompt.md"
 # First positional arg = the directory to review (the worktree); remaining = extra context.
 # No leading `cd` needed at the call site, so the whole invocation is one allowlistable command.
 target_dir="${1:-$PWD}"
+# Target guard (auto-mode hardening): refuse a hostile path before sending ANY diff to OpenAI.
+source "$here/_guard.sh"
+if ! nc_guard worktree "$target_dir"; then
+  printf '' | python3 "$here/adapter.py" from-codex --exit 1   # ran:false (fail closed), never a verdict
+  exit 0
+fi
 shift 2>/dev/null || true
 if ! cd "$target_dir" 2>/dev/null; then
   # Can't enter the target -> infra failure, never a verdict (adapter emits ran:false).
