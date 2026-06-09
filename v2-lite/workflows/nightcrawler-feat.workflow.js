@@ -1,7 +1,7 @@
 export const meta = {
   name: 'nightcrawler-feat',
   description: 'Run an ordered task list as ONE feature through the Nightcrawler M1 gate: preflight → feat branch → env+baseline → per-task v2-lite loop (merge on done) → env re-check + integration verify → report. Linear only (no DAG/parallel/bisection).',
-  whenToUse: 'Drive a small ordered feat (2–3 tasks in M1) through v2-overnight M1. args = { feat: "<title>", tasks: ["task 1", "task 2", ...], targetPath? }. Reuses nightcrawler-loop per task with feat-scoped branch identity. Launch FROM the target repo (cwd = repo root). Run `install.sh --check` yourself first — gate-freshness is a human step.',
+  whenToUse: 'Drive a small ordered feat (2–3 tasks in M1) through v2-overnight M1. args = { feat: "<title>", tasks: ["task 1", "task 2", ...], targetPath?, policy?, answers? }. policy ∈ autonomous|ask_on_ambiguity(default)|ask_on_major controls when a task PAUSES for a human (status needs_human); on a resume after a pause, answers={ "<taskId>": "..." } threads the decision back in. Reuses nightcrawler-loop per task with feat-scoped branch identity. Launch FROM the target repo (cwd = repo root). Run `install.sh --check` yourself first — gate-freshness is a human step.',
   phases: [
     { title: 'Preflight',    detail: 'Agent confirms the base working tree is CLEAN and reads any prior feat state (resume). Dirty → stop.' },
     { title: 'Feat branch',  detail: 'Agent cuts (or, on resume, checks out) nc/feat-<featId> from the current base branch.' },
@@ -30,6 +30,11 @@ if (!A || typeof A !== 'object' || Array.isArray(A)) {
 const FEAT = String(A.feat || '').trim()
 const TASKS = Array.isArray(A.tasks) ? A.tasks.map((t) => String(t).trim()).filter(Boolean) : []
 const TARGET = (A.targetPath && String(A.targetPath)) || ''
+// HITL: policy is threaded to every per-task loop (default ask_on_ambiguity). `answers` is an
+// optional map { taskId: "human answer" } supplied on a RESUME after a needs_human pause — the
+// matching task re-runs with that answer threaded back in. Neither enters featId (stable resume).
+const POLICY = (A.policy && String(A.policy)) || 'ask_on_ambiguity'
+const ANSWERS = (A.answers && typeof A.answers === 'object' && !Array.isArray(A.answers)) ? A.answers : {}
 if (!FEAT) throw new Error('nightcrawler-feat: missing feat title (args.feat)')
 if (!TASKS.length) throw new Error('nightcrawler-feat: args.tasks[] is empty')
 // All git/env/verify run in the target repo. Default to the workflow cwd ($PWD = repo root),
@@ -77,8 +82,12 @@ function taskIdentity(task) {
 }
 
 // ── Persistent state + report paths (OUTSIDE any worktree, per-user) ─────────
-const STATE_PATH = `~/.claude/nightcrawler/feats/${featId}.json`
-const REPORT_PATH = `~/.claude/nightcrawler/reports/${featId}.json`
+// Deliberately OUTSIDE ~/.claude: that dir is protected/config-adjacent, so auto mode prompts
+// on writes there. ~/.nightcrawler is a plain user dir the classifier treats as ordinary local
+// state (Codex review note 2026-06-09). The frozen gate (skill/workflow) still lives in ~/.claude;
+// only mutable RUN state moved out.
+const STATE_PATH = `~/.nightcrawler/feats/${featId}.json`
+const REPORT_PATH = `~/.nightcrawler/reports/${featId}.json`
 
 // LINEAR DAG: every node carries dependsOn:[] (always empty in M1; lets M2 add edges
 // without migrating state). Strictly sequential execution regardless.
@@ -170,7 +179,7 @@ const MERGE_SCHEMA = {
 // ── State + report persistence (agents do all file I/O; script supplies bytes) ─
 async function persistState(phaseName) {
   await agent(
-    `Persist Nightcrawler feat state. Create the directory ~/.claude/nightcrawler/feats if it does not exist, then write the following EXACT JSON (verbatim, byte-for-byte — do NOT reformat, summarize, or add anything) to ${STATE_PATH} :
+    `Persist Nightcrawler feat state. Create the directory ~/.nightcrawler/feats if it does not exist, then write the following EXACT JSON (verbatim, byte-for-byte — do NOT reformat, summarize, or add anything) to ${STATE_PATH} :
 
 ${JSON.stringify(state, null, 2)}
 
@@ -186,13 +195,18 @@ async function finalize(status, extra = {}) {
     env: state.env, baseline: state.baseline, envRecheck: state.envRecheck, integration: state.integration,
     tasks: state.tasks.map((t) => ({
       taskId: t.taskId, spec: t.spec, dependsOn: t.dependsOn, status: t.status, branch: t.branch, loopStatus: t.loopStatus,
+      decisions: t.decisions || [],
+      ...(t.question ? { question: t.question, clarity: t.clarity || '' } : {}),
     })),
+    // Feat-level rollup of every decision the loop logged across tasks — the human's merge-time
+    // audit trail ("what did the agent decide that I should sanity-check before merging?").
+    decisions: state.tasks.flatMap((t) => (t.decisions || []).map((d) => ({ taskId: t.taskId, ...d }))),
     merged: state.tasks.filter((t) => t.status === 'done').map((t) => t.branch),
     featBranchToReview: featBranch,
     ...extra,
   }
   await agent(
-    `Write the Nightcrawler feat REPORT. Create the directory ~/.claude/nightcrawler/reports if it does not exist, then write the following EXACT JSON (verbatim, byte-for-byte) to ${REPORT_PATH} :
+    `Write the Nightcrawler feat REPORT. Create the directory ~/.nightcrawler/reports if it does not exist, then write the following EXACT JSON (verbatim, byte-for-byte) to ${REPORT_PATH} :
 
 ${JSON.stringify(report, null, 2)}
 
@@ -296,6 +310,8 @@ for (let i = 0; i < state.tasks.length; i++) {
       task: node.spec,
       branchPrefix,        // 'nc/feat/<featId>/'
       idSalt: featId,      // makes the loop's id hash feat-unique
+      policy: POLICY,      // HITL posture, applied per task
+      ...(ANSWERS[node.taskId] ? { humanAnswer: String(ANSWERS[node.taskId]) } : {}),  // resume answer
       ...(TARGET ? { targetPath: TARGET } : {}),
     })
   } catch (e) {
@@ -311,6 +327,24 @@ for (let i = 0; i < state.tasks.length; i++) {
     await persistState('Tasks')
     log(`Task ${n}: loop returned no_changes (nothing to commit) → recorded as NO-OP, continuing.`)
     continue
+  }
+
+  if (res && res.status === 'needs_human') {
+    // The loop PAUSED for a human decision before implementing (HITL ask-gate). Not a failure —
+    // halt the feat and surface the question + context. Earlier merged tasks remain on the feat
+    // branch; the user re-runs with answers:{<taskId>: "..."} and this task resumes with the answer.
+    node.status = 'needs_human'
+    node.question = res.question || ''
+    node.clarity = res.clarity || ''
+    await persistState('Tasks')
+    log(`Task ${n}: loop PAUSED for a human decision (clarity=${res.clarity}). Halting feat to ask.`)
+    return finalize('needs_human', {
+      stage: 'task', haltedTask: node.taskId,
+      question: res.question || '', clarity: res.clarity || '',
+      interpretations: res.interpretations || [], plan: res.plan || '',
+      resumeWith: { answers: { [node.taskId]: '<your answer here>' } },
+      note: `Task ${n} needs a human decision before it can proceed (policy ${POLICY}). Answer the question, then re-run the feat with answers:{"${node.taskId}":"<your answer>"}. Tasks merged before this remain on ${featBranch}; this task resumes with your answer threaded in.`,
+    })
   }
 
   if (!res || res.status !== 'done') {
@@ -367,8 +401,9 @@ Return {merged, committed, alreadyUpToDate, before, after, conflict, error}.`,
     continue
   }
   node.status = 'done'
+  node.decisions = Array.isArray(res.decisions) ? res.decisions : []   // audit trail for merge review
   await persistState('Tasks')
-  log(`Task ${n} done → merged ${mergeBranch} into ${featBranch} (commit ${mg.after ? String(mg.after).slice(0, 8) : '?'}).`)
+  log(`Task ${n} done → merged ${mergeBranch} into ${featBranch} (commit ${mg.after ? String(mg.after).slice(0, 8) : '?'})${node.decisions.length ? ` · ${node.decisions.length} decision(s) logged` : ''}.`)
 }
 
 // ── 6. ENV RE-CHECK (tasks may have added deps) + FINAL INTEGRATION VERIFY ─────

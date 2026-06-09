@@ -42,10 +42,25 @@ if [[ "${1:-}" == "--env-check" ]]; then
 fi
 
 if [[ "${1:-}" == "--auto-setup" ]]; then
-  # OPT-IN: add the review-egress trust line to ~/.claude/settings.json so the loop's
-  # Codex review runs under auto mode without per-run approval. Structured JSON merge —
-  # preserves every existing setting, backs up first, idempotent. (See merge_settings.py.)
-  exec python3 "$here/merge_settings.py" --apply
+  # OPT-IN: install the NARROW Nightcrawler auto profile into ~/.claude/settings.json —
+  # egress trust + local-only env context + allow rules for ONLY the gate scripts. Preserves
+  # every existing setting, backs up first, idempotent. Does NOT set a global permission mode
+  # and does NOT grant broad shell/package-manager access. (See merge_settings.py.)
+  python3 "$here/merge_settings.py" --apply
+  echo
+  echo "── Unattended run recipe ─────────────────────────────────────────────────────"
+  echo "Auto mode is entered PER RUN (no global setting was changed). To run a feat hands-off:"
+  echo
+  echo "  cd <your repo root>             # your own, trusted repo"
+  echo "  git status                      # must be CLEAN (Preflight halts on a dirty tree)"
+  echo "  bash \"$here/install.sh\" --check  # gate must be in sync"
+  echo "  export NC_VERIFY_CMD='<type-check && test>'   # include TESTS, not just type-check"
+  echo "  claude --permission-mode auto   # then invoke the nightcrawler-feat workflow"
+  echo
+  echo "Safety: never as root; auto mode auto-approves local edits + declared dep installs, but"
+  echo "the classifier still blocks destructive / out-of-repo actions and honors 'don't push'."
+  echo "Human merge & publish stay yours — the feat branch is left unmerged."
+  exit 0
 fi
 
 if [[ "${1:-}" == "--check" ]]; then

@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
-"""Idempotently add the Nightcrawler review-egress trust line to ~/.claude/settings.json
-so the loop's cross-vendor Codex review runs under AUTO mode without per-run approval.
+"""Install the Nightcrawler AUTO PROFILE into ~/.claude/settings.json so a feat run can go
+unattended under Claude Code's `auto` permission mode WITHOUT broad autonomy.
 
-The classifier blocks the review by default because it sends the working-tree diff to
-OpenAI (an "external" destination = potential exfiltration). Listing that egress in
-autoMode.environment redefines it as trusted for this purpose only — everything else the
-loop does still goes through the classifier.
+The profile is deliberately NARROW (per the 2026-06-09 cross-vendor review):
+  1. autoMode.environment += a Codex review-egress trust line (the local `codex` CLI sends the
+     working-tree diff to OpenAI — an intended, trusted cross-vendor review, not exfiltration).
+  2. autoMode.environment += a local-only context line (Nightcrawler operates on local worktrees
+     and `nc/feat...` branches, writes run state under ~/.nightcrawler, runs its own gate scripts;
+     it does NOT push/deploy/migrate/publish — human merge & publish stay the boundary).
+  3. permissions.allow += narrow rules for ONLY the installed gate scripts (codex_review.sh,
+     verify.sh, prep.sh, commit.sh, env_check.py). NOT broad `Bash(git:*)` / `Bash(pnpm:*)` —
+     auto mode already auto-approves local working-dir edits + declared dep installs, and broad
+     shell/PM rules are either risky or dropped in auto mode (narrow rules carry over).
+
+Explicitly does NOT set `permissions.defaultMode` — that is a global toggle and too broad for an
+installer. The user enters auto mode PER RUN with `claude --permission-mode auto`.
 
 Usage:
-  merge_settings.py --apply [--settings PATH]   # add the line (backs up first), idempotent
-  merge_settings.py --check [--settings PATH]   # exit 0 if present, 1 if missing
+  merge_settings.py --apply [--settings PATH]   # add the profile (backs up first), idempotent
+  merge_settings.py --check [--settings PATH]   # exit 0 if the full profile is present, 1 if not
 
 Safety:
-- Structured JSON merge — every existing setting is preserved; only autoMode.environment is touched.
-- A freshly-created environment array always includes "$defaults" (omitting it would discard
-  the built-in classifier protections — see the auto-mode-config docs' Danger note). An
-  existing array's "$defaults" choice is left exactly as the user set it.
+- Structured JSON merge — every existing setting is preserved; only autoMode.environment and
+  permissions.allow are appended to (never overwritten or reordered).
+- A freshly-created autoMode.environment array always includes "$defaults" (omitting it would
+  discard the built-in classifier protections). An existing array's "$defaults" choice is left
+  exactly as the user set it.
 - Backs up the file before writing; refuses to touch invalid JSON.
 """
 import argparse
@@ -25,12 +35,49 @@ import shutil
 import sys
 import time
 
+DEFAULTS = "$defaults"
+
 TRUST_LINE = (
     "Code review: the local `codex` CLI sends working-tree diffs to OpenAI for an intended, "
     "trusted cross-vendor review (the Nightcrawler review gate). OpenAI is a trusted destination "
     "for this diff-review purpose only."
 )
-DEFAULTS = "$defaults"
+CONTEXT_LINE = (
+    "Nightcrawler runs locally only: it operates on git worktrees and branches named `nc/feat...` "
+    "in the current project, writes its feat state and reports under ~/.nightcrawler, and runs its "
+    "own gate scripts under ~/.claude/skills/nightcrawler/scripts. These local file writes, "
+    "worktree/branch operations, and gate-script runs are intended and trusted. Nightcrawler does "
+    "NOT push, deploy, run database migrations, or publish — human merge and publish remain the boundary."
+)
+ENV_LINES = [TRUST_LINE, CONTEXT_LINE]
+
+# Only the deterministic gate scripts — never a broad command class.
+_GATE_SCRIPTS = [
+    ("bash", "codex_review.sh"),
+    ("bash", "verify.sh"),
+    ("bash", "prep.sh"),
+    ("bash", "commit.sh"),
+    ("python3", "env_check.py"),
+]
+
+
+def scripts_dir(home=None):
+    home = home if home is not None else os.path.expanduser("~")
+    return os.path.join(home, ".claude", "skills", "nightcrawler", "scripts")
+
+
+def allow_rules(home=None):
+    """Narrow permissions.allow rules for the gate scripts. Both quoted and unquoted absolute-path
+    forms are emitted because the workflow invokes them as `bash "$HOME/.../x.sh" ...` and the exact
+    command string the matcher sees (quoted vs expanded) can differ — extra non-matching allow
+    entries are harmless (allow only widens; deny/ask still take precedence)."""
+    d = scripts_dir(home)
+    rules = []
+    for runner, name in _GATE_SCRIPTS:
+        path = "%s/%s" % (d, name)
+        rules.append('Bash(%s %s *)' % (runner, path))
+        rules.append('Bash(%s "%s" *)' % (runner, path))
+    return rules
 
 
 def default_settings_path():
@@ -51,13 +98,18 @@ def load(path):
     return data, True
 
 
-def has_trust_line(settings):
+def has_profile(settings, home=None):
     env = (settings.get("autoMode") or {}).get("environment")
-    return isinstance(env, list) and TRUST_LINE in env
+    if not (isinstance(env, list) and all(line in env for line in ENV_LINES)):
+        return False
+    allow = (settings.get("permissions") or {}).get("allow")
+    if not isinstance(allow, list):
+        return False
+    return all(rule in allow for rule in allow_rules(home))
 
 
-def apply(settings):
-    """Add the trust line, preserving everything else. Idempotent."""
+def apply(settings, home=None):
+    """Add the full profile, preserving everything else. Idempotent."""
     am = settings.setdefault("autoMode", {})
     if not isinstance(am, dict):
         raise ValueError("autoMode is not an object")
@@ -66,14 +118,29 @@ def apply(settings):
         env = [DEFAULTS]                 # fresh array MUST carry $defaults
     elif not isinstance(env, list):
         raise ValueError("autoMode.environment is not an array")
-    if TRUST_LINE not in env:
-        env.append(TRUST_LINE)
+    for line in ENV_LINES:
+        if line not in env:
+            env.append(line)
     am["environment"] = env
+
+    perms = settings.setdefault("permissions", {})
+    if not isinstance(perms, dict):
+        raise ValueError("permissions is not an object")
+    allow = perms.get("allow")
+    if allow is None:
+        allow = []
+    elif not isinstance(allow, list):
+        raise ValueError("permissions.allow is not an array")
+    for rule in allow_rules(home):
+        if rule not in allow:
+            allow.append(rule)
+    perms["allow"] = allow
+    # Deliberately NOT setting permissions.defaultMode — auto mode is entered per run.
     return settings
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Nightcrawler auto-mode trust merger")
+    ap = argparse.ArgumentParser(description="Nightcrawler auto-profile merger")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--settings", default=default_settings_path())
@@ -88,16 +155,16 @@ def main(argv=None):
         return 2
 
     if args.check:
-        if has_trust_line(settings):
-            print("ok:    auto-mode review-egress trust present")
+        if has_profile(settings):
+            print("ok:    Nightcrawler auto profile present (egress trust + local context + gate-script allows)")
             return 0
-        print("info:  auto-mode review-egress trust MISSING "
+        print("info:  Nightcrawler auto profile MISSING/partial "
               "(optional — run `install.sh --auto-setup` for unattended auto runs)")
         return 1
 
     if args.apply:
-        if has_trust_line(settings):
-            print("auto-mode trust already present — no change.")
+        if has_profile(settings):
+            print("Nightcrawler auto profile already present — no change.")
             return 0
         try:
             apply(settings)
@@ -112,8 +179,9 @@ def main(argv=None):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(settings, fh, indent=2)
             fh.write("\n")
-        print("added auto-mode review-egress trust to %s (\"$defaults\" preserved)." % path)
-        print("verify with: claude auto-mode config")
+        print("installed Nightcrawler auto profile -> %s" % path)
+        print('  egress trust + local-only context + narrow gate-script allows ("$defaults" preserved).')
+        print("  NO global permission mode set — start each run with: claude --permission-mode auto")
         return 0
 
     ap.print_help()

@@ -39,6 +39,16 @@ const TARGET = (args && typeof args === 'object' && args.targetPath) || ''
 // and worktree by passing branchPrefix (default 'nc/') and idSalt (default '' = standalone).
 const BRANCH_PREFIX = (args && typeof args === 'object' && args.branchPrefix) || 'nc/'
 const ID_SALT = (args && typeof args === 'object' && args.idSalt) || ''
+// HITL: policy governs when the loop PAUSES to ask a human vs. acting and LOGGING the decision.
+//   autonomous       — never ask; every notable call is recorded in `decisions`, human reviews at merge.
+//   ask_on_ambiguity — ask only on genuine ambiguity / divergent readings / irreversible calls. (default)
+//   ask_on_major     — also ask on any non-trivial design decision (more interruptions).
+// Safety-axis HITL (destructive/out-of-repo actions) is handled separately by auto mode's classifier.
+const POLICY = (args && typeof args === 'object' && args.policy) || 'ask_on_ambiguity'
+const ASK_ON = { autonomous: [], ask_on_ambiguity: ['ambiguous'], ask_on_major: ['ambiguous', 'design_decision'] }
+// On resume after a needs_human pause, the caller threads the human's answer back in. When present
+// we do NOT re-ask (the call is made) and feed it into plan + implement as resolved guidance.
+const HUMAN_ANSWER = (args && typeof args === 'object' && args.humanAnswer && String(args.humanAnswer)) || ''
 if (!TASK) throw new Error('nightcrawler-loop: no task in args (pass a string or {task, targetPath})')
 
 const softBudget = `Soft budget: aim to stay under ~${TOKEN_TARGET_K}k tokens. Be terse; do not over-explore.`
@@ -81,10 +91,14 @@ const CLASSIFY_SCHEMA = {
 const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['plan', 'relevant_files'],
+  required: ['plan', 'relevant_files', 'clarity'],
   properties: {
     plan: { type: 'string', description: 'Short ordered plan. What to change and why. No code.' },
     relevant_files: { type: 'array', items: { type: 'string' }, description: 'Files the change will touch.' },
+    clarity: { type: 'string', enum: ['clear', 'design_decision', 'ambiguous'],
+      description: 'clear = exactly one obvious correct implementation. design_decision = a real non-trivial design choice with tradeoffs exists, though a sensible default can be picked. ambiguous = genuinely under-specified, valid interpretations DIVERGE, or the change is irreversible — must not be guessed.' },
+    question: { type: 'string', description: 'If not clear: the single specific question/decision blocking a confident implementation. Else "".' },
+    interpretations: { type: 'array', items: { type: 'string' }, description: 'If ambiguous: the divergent valid readings. Else [].' },
   },
 }
 const IMPL_SCHEMA = {
@@ -96,6 +110,18 @@ const IMPL_SCHEMA = {
     branch: { type: 'string', description: 'Branch name created for the worktree.' },
     summary: { type: 'string', description: 'One-paragraph summary of what was changed.' },
     files_changed: { type: 'array', items: { type: 'string' } },
+    decisions: {
+      type: 'array',
+      description: 'Notable design decisions made while implementing — a chosen default for an unspecified case, a signature/API change, a tradeoff, an assumption. EMPTY if the change was wholly mechanical. This is the audit trail a human reviews at merge.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['what', 'why'],
+        properties: {
+          what: { type: 'string', description: 'The decision made, concretely (e.g. "widened content: string → content?: unknown").' },
+          why: { type: 'string', description: 'Why this choice.' },
+          alternative: { type: 'string', description: 'A reasonable alternative not taken, if any.' },
+        },
+      },
+    },
   },
 }
 
@@ -167,23 +193,52 @@ const plan = await agent(
   `You are planning ONE Nightcrawler task. Do NOT write code in this phase.
 
 Task: ${TASK}
-${targetLine}
+${targetLine}${HUMAN_ANSWER ? `\n\nA human has ALREADY answered the open question for this task — treat it as DECIDED, do not re-raise it:\n${HUMAN_ANSWER}` : ''}
 
 Read only the files needed to understand the change. Produce a short, ordered plan
 (what to change, in which files, and why) plus the list of files the change will touch.
+
+Then assess CLARITY honestly:
+- "clear": exactly one obvious correct implementation.
+- "design_decision": a real non-trivial design choice with tradeoffs exists, though a sensible default can be chosen.
+- "ambiguous": genuinely under-specified, valid interpretations diverge, or the change is irreversible — must not be guessed.
+If not "clear", put the single blocking question in question (and, when ambiguous, the divergent readings in interpretations).${HUMAN_ANSWER ? ' Since the human already answered, report "clear" unless a genuinely NEW, different question arises.' : ''}
 ${softBudget}`,
   { model: thinkModel, phase: 'Plan', label: 'plan', schema: PLAN_SCHEMA }
 )
 if (!plan) return { status: 'aborted', stage: 'plan', task: TASK }
-log(`Plan ready — ${plan.relevant_files.length} file(s) in scope.`)
+log(`Plan ready — ${plan.relevant_files.length} file(s) in scope; clarity=${plan.clarity}.`)
+
+// ── HITL ask-gate: pause BEFORE implementing if the policy says this clarity level warrants a
+// human decision (and we don't already hold an answer). Asking before the work is cheaper than
+// implementing, getting it wrong, and redoing it. autonomous never asks; the call is logged in
+// `decisions` instead and reviewed at merge.
+const askLevels = ASK_ON[POLICY] || ASK_ON.ask_on_ambiguity
+if (!HUMAN_ANSWER && askLevels.includes(plan.clarity)) {
+  log(`Pausing for a human decision: clarity=${plan.clarity}, policy=${POLICY}.`)
+  return {
+    status: 'needs_human', task: TASK, branch: BRANCH, clarity: plan.clarity,
+    question: plan.question || 'The task is under-specified; a human decision is needed before implementing.',
+    interpretations: plan.interpretations || [], plan: plan.plan,
+    note: `Paused before implementing (policy ${POLICY}): the task needs a human decision. Answer the question and re-run — the answer is threaded back into this task, which then resumes from here.`,
+  }
+}
 
 // ── Phase 2: IMPLEMENT (Haiku — cheap) in a dedicated worktree ───────────────
+// Decision context: if we're proceeding on a non-"clear" task without asking (autonomous, or a
+// clarity below the ask threshold), tell the implementer to pick the best reading AND log it; if a
+// human already answered, implement per that answer and log it. Either way it lands in `decisions`.
+const decisionGuidance = HUMAN_ANSWER
+  ? `\nA human has DECIDED the open question — implement per this decision and record it in decisions:\n${HUMAN_ANSWER}\n`
+  : (plan.clarity !== 'clear'
+    ? `\nThis task has an unresolved point we are NOT pausing for (policy ${POLICY}). Pick the most reasonable interpretation, proceed, and RECORD that choice in decisions (what / why / alternative). Open point: ${plan.question || plan.clarity}\n`
+    : '')
 phase('Implement')
 const impl = await agent(
   `Implement ONE Nightcrawler task in an ISOLATED git worktree so review/verify can run against it cleanly.
 
 Task: ${TASK}
-
+${decisionGuidance}
 Approved plan:
 ${plan.plan}
 
@@ -198,6 +253,8 @@ Steps:
    plan clearly requires touching an adjacent file.
 4. Do NOT run type-check, tests, or codex review — later phases own that.
 5. Return worktree_path (absolute), branch ("${BRANCH}"), and a one-paragraph summary.
+6. Record any notable DECISIONS in decisions[{what, why, alternative}] — a chosen default for an
+   unspecified case, a signature/API change, a tradeoff, an assumption. EMPTY if wholly mechanical.
 ${softBudget}`,
   { model: thinkModel, phase: 'Implement', label: 'implement', schema: IMPL_SCHEMA }
 )
@@ -371,7 +428,7 @@ const verify = asVerify(verifyRaw)
 if (verify.pass === true) {
   return {
     status: 'done', task: TASK, worktree: WT, branch: BRANCH, commit_sha: COMMIT_SHA,
-    rounds: round, summary: impl.summary,
+    rounds: round, summary: impl.summary, decisions: Array.isArray(impl.decisions) ? impl.decisions : [],
     note: 'Review clean, change committed, and verify passed. Worktree left in place for human merge/inspection.',
   }
 }
