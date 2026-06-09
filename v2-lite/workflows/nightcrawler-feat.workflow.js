@@ -303,6 +303,16 @@ for (let i = 0; i < state.tasks.length; i++) {
   }
   node.loopStatus = (res && res.status) || 'unknown'
 
+  if (res && res.status === 'no_changes') {
+    // The loop committed nothing (empty implement, or the change was already present). Not a
+    // failure — flag as a NO-OP and CONTINUE (don't merge an empty branch, don't halt the feat).
+    node.status = 'noop'
+    node.noop = true
+    await persistState('Tasks')
+    log(`Task ${n}: loop returned no_changes (nothing to commit) → recorded as NO-OP, continuing.`)
+    continue
+  }
+
   if (!res || res.status !== 'done') {
     // Any non-done (review_unresolved / verify_failed / verify_inconclusive / infra_error /
     // aborted) -> mark failed and HALT. M1 never builds later tasks on top of a failed one.

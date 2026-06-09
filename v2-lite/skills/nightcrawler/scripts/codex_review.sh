@@ -31,7 +31,9 @@ prompt="$(cat "$prompt_file")"
 if [ -n "$extra" ]; then
   prompt="$prompt
 
-## Additional context for this review
+## Task this change must accomplish
+The diff is meant to accomplish the following task. Verify it actually FULFILLS it — a clean,
+correct-looking diff that does NOT accomplish the stated task is an incomplete implementation (P1):
 $extra"
 fi
 

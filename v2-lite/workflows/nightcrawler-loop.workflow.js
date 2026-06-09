@@ -30,6 +30,7 @@ const SKILL_SCRIPTS = '"$HOME/.claude/skills/nightcrawler/scripts"'
 const REVIEW_CMD = `bash ${SKILL_SCRIPTS}/codex_review.sh`
 const VERIFY_CMD = `bash ${SKILL_SCRIPTS}/verify.sh`
 const PREP_CMD = `bash ${SKILL_SCRIPTS}/prep.sh`     // make a fresh worktree runnable before verify
+const COMMIT_CMD = `bash ${SKILL_SCRIPTS}/commit.sh` // commit reviewed work so the branch isn't empty
 
 // args may be a bare string or {task, targetPath}
 const TASK = typeof args === 'string' ? args : (args && args.task) || ''
@@ -225,7 +226,7 @@ function reviewerPrompt(attempt) {
 the worktree and return its stdout. Do NOT interpret, summarize, re-judge, or reformat.
 
 ${backoff}Run EXACTLY this one command (the worktree path is the argument — do NOT cd, do NOT add anything else):
-  ${REVIEW_CMD} ${JSON.stringify(WT)}
+  ${REVIEW_CMD} ${JSON.stringify(WT)} ${JSON.stringify(TASK)}
 
 Output the command's stdout VERBATIM as your entire reply — nothing before or after, no code
 fences, no commentary. It is already JSON.`
@@ -299,6 +300,26 @@ if (!reviewPassed) {
   }
 }
 
+// ── Phase 3.4: COMMIT GATE — the reviewed change MUST land on the branch, or the merge ships
+// nothing (run-2 bug: implement changed files but never committed → empty merge → false done).
+// Review/fix run on the UNCOMMITTED tree so Codex sees the diff; only NOW, after review is clean,
+// do we commit. No staged changes → no_changes (never a false done). `done` requires a commit_sha.
+phase('Commit')
+const commitRaw = await agent(
+  `THIN commit runner. Run EXACTLY this one command and output its stdout VERBATIM (JSON {committed, sha}); no fences, no commentary:
+  ${COMMIT_CMD} ${JSON.stringify(WT)} ${JSON.stringify('nc: ' + SLUG)}`,
+  { model: MODEL_RUNNER, phase: 'Commit', label: 'commit' }
+)
+const commitResult = extractJsonObject(commitRaw) || { committed: false }
+if (commitResult.committed !== true) {
+  return {
+    status: 'no_changes', task: TASK, worktree: WT, branch: BRANCH, rounds: round,
+    note: 'Review passed but the implement step produced no committable change (empty diff). Reported as no_changes, never a false done — there is nothing to merge.',
+  }
+}
+const COMMIT_SHA = commitResult.sha || null
+log(`Committed reviewed work (${COMMIT_SHA}) to ${BRANCH}.`)
+
 // ── Phase 3.5: PREP — make the fresh worktree runnable (Node deps) before verify ─
 // A fresh git worktree has no node_modules; without this, verify can't RUN there (127 →
 // inconclusive). Node-only; non-node stacks no-op. Runs after review passes (review/fix
@@ -339,9 +360,9 @@ const verify = asVerify(verifyRaw)
 // A clean review does NOT override a failing verify.
 if (verify.pass === true) {
   return {
-    status: 'done', task: TASK, worktree: WT, branch: BRANCH,
+    status: 'done', task: TASK, worktree: WT, branch: BRANCH, commit_sha: COMMIT_SHA,
     rounds: round, summary: impl.summary,
-    note: 'Review clean and verify passed. Worktree left in place for human merge/inspection.',
+    note: 'Review clean, change committed, and verify passed. Worktree left in place for human merge/inspection.',
   }
 }
 

@@ -8,6 +8,14 @@ Review the working-tree diff (and the files it touches) for correctness, safety,
 contract adherence. Read the surrounding code as needed to judge whether the change is
 actually correct in context — not just locally plausible.
 
+## Task completion (when a task is provided)
+
+If a "## Task this change must accomplish" section appears below, your review MUST also judge
+**completeness**, not only correctness: does the diff actually DO what the task asked? A change that
+is clean and compiles but does NOT fulfill the stated task (e.g. it refactors but omits the required
+new behavior) is an **incomplete implementation** — emit a **priority 1** finding naming what's
+missing. "Correct but incomplete" must NOT pass.
+
 ## Output
 
 Return ONLY JSON conforming to the provided schema (`sev.schema.json`). For each issue,
