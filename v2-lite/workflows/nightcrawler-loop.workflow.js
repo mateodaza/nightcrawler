@@ -29,6 +29,7 @@ const MODEL_RUNNER = 'haiku'     // review-runner, verify-runner (no judgment to
 const SKILL_SCRIPTS = '"$HOME/.claude/skills/nightcrawler/scripts"'
 const REVIEW_CMD = `bash ${SKILL_SCRIPTS}/codex_review.sh`
 const VERIFY_CMD = `bash ${SKILL_SCRIPTS}/verify.sh`
+const PREP_CMD = `bash ${SKILL_SCRIPTS}/prep.sh`     // make a fresh worktree runnable before verify
 
 // args may be a bare string or {task, targetPath}
 const TASK = typeof args === 'string' ? args : (args && args.task) || ''
@@ -297,6 +298,29 @@ if (!reviewPassed) {
     note: `Reached ROUND_CAP=${ROUND_CAP} with blocking findings still present. Surfaced for human review.`,
   }
 }
+
+// ── Phase 3.5: PREP — make the fresh worktree runnable (Node deps) before verify ─
+// A fresh git worktree has no node_modules; without this, verify can't RUN there (127 →
+// inconclusive). Node-only; non-node stacks no-op. Runs after review passes (review/fix
+// don't need deps), so we only install when we're about to verify. Install failure →
+// verify_inconclusive (env not ready, NOT code-red).
+phase('Prep')
+const prepRaw = await agent(
+  `THIN prep runner. Run EXACTLY this one command and output its stdout VERBATIM as your entire reply
+(JSON {prepped, ran, ...}); no fences, no commentary:
+  ${PREP_CMD} ${JSON.stringify(WT)}`,
+  { model: MODEL_RUNNER, phase: 'Prep', label: 'prep' }
+)
+const prepResult = extractJsonObject(prepRaw)
+if (!prepResult || prepResult.prepped !== true) {
+  return {
+    status: 'verify_inconclusive', task: TASK, worktree: WT, branch: BRANCH, rounds: round,
+    failures: [{ stage: 'prep', kind: 'missing_tool',
+      log_tail: (prepResult && (prepResult.log_tail || prepResult.error)) || 'worktree dependency install failed or unparseable' }],
+    note: 'Could not prepare the worktree to run (dependency install failed) — env not ready, NOT a code failure. Check the package manager / lockfile and re-run.',
+  }
+}
+log(prepResult.ran ? `Prep: installed worktree deps (${prepResult.ran.join(' ')}).` : 'Prep: no dep install needed.')
 
 // ── Phase 4: VERIFY (deterministic ground truth — final, non-negotiable gate) ─
 phase('Verify')

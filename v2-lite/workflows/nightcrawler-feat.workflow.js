@@ -294,7 +294,7 @@ for (let i = 0; i < state.tasks.length; i++) {
   try {
     res = await workflow('nightcrawler-loop', {
       task: node.spec,
-      branchPrefix,        // 'nc/feat-<featId>/'
+      branchPrefix,        // 'nc/feat/<featId>/'
       idSalt: featId,      // makes the loop's id hash feat-unique
       ...(TARGET ? { targetPath: TARGET } : {}),
     })
