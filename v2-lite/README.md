@@ -28,10 +28,29 @@ deliberate installs, see spec §12):
 ```bash
 ./install.sh            # copies skill + workflow into ~/.claude, prints freeze-check shasums
 ./install.sh --check    # before any auto/feat run: exit 0 = in sync, exit 1 = drifted/stale
+./install.sh --auto-setup   # OPT-IN: trust the Codex review egress so AUTO mode runs unattended
+./install.sh --env-check ~/path/to/repo   # preflight: is the repo runnable (node ver / deps / toolchain)?
 ```
+
+Run `--env-check <repo>` before a feat/auto run so verify never false-fails on a setup issue
+(missing `node_modules`, wrong node). The loop also self-protects: a toolchain that can't run
+returns `verify_inconclusive` (not `verify_failed`) — a missing env never masquerades as broken
+code. And a cheap classify pass routes the think-model by task complexity (trivial→Sonnet,
+standard/complex→Opus) so small tasks don't pay Opus latency.
 
 Re-run `./install.sh` after editing anything under `v2-lite/`, and `--check` if you're unsure
 whether the installed gate matches source. This is the fix for the source↔installed drift.
+
+### Unattended auto mode (`--auto-setup`)
+
+Under auto mode the classifier blocks the Codex review by default (it sends the diff to
+OpenAI = "external"). `--auto-setup` adds one natural-language trust line to
+`autoMode.environment` in `~/.claude/settings.json` so that one egress is trusted — the loop
+then runs unattended with no per-run approval, while the classifier still guards everything
+else. It is **opt-in** (not part of plain install), does a **structured JSON merge that
+preserves every existing setting**, **backs up** the file first, keeps **`"$defaults"`** so
+built-in classifier protections stay intact, and is idempotent. Verify with
+`claude auto-mode config`. To undo, delete the line (or restore the `.nc-bak.*` backup).
 
 ## Run the tests
 

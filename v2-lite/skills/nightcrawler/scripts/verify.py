@@ -139,13 +139,20 @@ def run_cmd(cmd, cwd):
 
 
 def build_result(checks, runner, repo):
-    """Assemble the {pass, failures, checks} contract. `runner(cmd, cwd) -> (exit, tail)`."""
+    """Assemble the {pass, inconclusive, failures, checks} contract. `runner(cmd, cwd) -> (exit, tail)`.
+
+    Infra-vs-findings guard for verify (mirrors the adapter): a check that could NOT RUN
+    (toolchain missing, exit 127) or "no verifier detected" is `inconclusive` — it must NOT
+    be reported as a code failure. Only checks that actually ran and failed are real failures.
+    """
     if not checks:
         return {
             "pass": False,
+            "inconclusive": True,   # nothing to verify != code is broken
             "failures": [{
                 "stage": "verify",
                 "reason": "no_verifier_detected",
+                "kind": "missing_tool",
                 "log_tail": "no recognized build/test config found; set NC_VERIFY_CMD "
                             "to specify the command explicitly",
             }],
@@ -157,8 +164,14 @@ def build_result(checks, runner, repo):
         exit_code, tail = runner(chk["cmd"], repo)
         ran.append({"name": chk["name"], "cmd": chk["cmd"], "exit": exit_code})
         if exit_code != 0:
-            failures.append({"stage": chk["name"], "exit": exit_code, "log_tail": tail})
-    return {"pass": len(failures) == 0, "failures": failures, "checks": ran}
+            # 127 = command not found -> the check couldn't RUN (toolchain/deps missing).
+            kind = "missing_tool" if exit_code == 127 else "failed"
+            failures.append({"stage": chk["name"], "exit": exit_code,
+                             "kind": kind, "log_tail": tail})
+    passed = len(failures) == 0
+    # inconclusive when there are failures but NONE of them is a real ran-and-failed check.
+    inconclusive = (not passed) and all(f["kind"] == "missing_tool" for f in failures)
+    return {"pass": passed, "inconclusive": inconclusive, "failures": failures, "checks": ran}
 
 
 def main(argv=None):

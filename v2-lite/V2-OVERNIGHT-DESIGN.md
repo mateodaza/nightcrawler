@@ -22,7 +22,7 @@ per task and adds the layer above it. The new guarantees (Codex's list, expanded
 | Ordering | n/a | **task DAG** with dependencies |
 | Identity | per-task worktree id (FNV of task) | **deterministic task IDs** + one **feat branch** |
 | Integration | per-task verify | **final integration verify** on the merged feat branch |
-| Output | one verdict | one **feat report** (per-task status + integration result) |
+| Output | one verdict | one **feat report** (per-task status + integration result) + **optional** connector publish (PR/notify), off by default |
 | Recovery | resume within session | **resume the feat**: re-run only incomplete tasks |
 
 ---
@@ -31,10 +31,24 @@ per task and adds the layer above it. The new guarantees (Codex's list, expanded
 
 The integrity rule from v2-lite carries up: identity is **owned by the runner, never improvised**.
 
-- One **feat branch** `nc/feat-<featId>` cut from the base branch at feat start. `featId` = deterministic
-  hash of the feat spec.
+- One **feat branch** `nc/feat-<featId>` (note the **hyphen**) cut from the base branch at feat start.
+  `featId` = **`<feat-slug>-<hash>`** — a slug of the feat title (human-legible) plus a short FNV-1a hash of
+  the feat title + ordered task list (deterministic so reruns resume; unique so two feats with the same title
+  don't collide). E.g. `add-divide-helper-1pkgi21`. The slug is for humans, the hash is the identity/guarantee
+  — so branches and the `feats/<featId>.json` state file read clearly instead of being opaque hashes.
+  - ⚠️ **Why task branches use `nc/feat/<featId>/…` (slash) and the feat branch uses `nc/feat-<featId>`
+    (hyphen):** git stores refs as files/dirs, so `nc/feat-<featId>` (a ref file) and `nc/feat-<featId>/<task>`
+    (which needs `nc/feat-<featId>` to be a *directory*) are a file-vs-directory collision — creating a task
+    branch would clobber the feat-branch ref. The smoke hit this for real. Putting tasks under the sibling
+    namespace `nc/feat/<featId>/…` (so at `refs/heads/nc/` you have the file `feat-<featId>` and the dir
+    `feat/`) avoids the collision and keeps the human-facing feat-branch name literal. (Smoke, 2026-06-09.)
 - Each task runs the **v2-lite loop in its own worktree**, branched from the *current feat branch* (so a
-  task sees its dependencies' merged work).
+  task sees its dependencies' merged work). **Task identity is feat-scoped**, not just a task hash: the branch
+  is `nc/feat/<featId>/<taskId>` where `taskId = <slug>-<id>` and `id = hash(featId + taskSpec)` — i.e. exactly
+  what the v2-lite loop emits when given `branchPrefix:"nc/feat/<featId>/"` + `idSalt:featId`. The state node
+  stores the resolved branch string. v2-lite's same-task collision was fine for one task, but overnight will
+  see common names ("add tests", "fix lint") across different feats — scoping by `featId` keeps them from
+  colliding. (Codex review, 2026-06-09.)
 - On task `done` (Codex clean + verify pass), its branch **merges into the feat branch**. On any non-done
   status, it does **not** merge — it's surfaced and its dependents are blocked.
 - Nothing touches the base branch. The human reviews/merges the feat branch at the very end.
@@ -48,17 +62,30 @@ Open question: merge-conflict handling between sibling tasks (see §6).
 1. **Intake → decomposition.** A feat spec becomes an ordered **task DAG**: nodes are v2-lite tasks, edges
    are dependencies. (M1: human-authored task list. Later: a planner agent proposes the DAG, adversarially
    reviewed before it runs — same closed-loop discipline.)
-2. **Schedule.** Run tasks whose dependencies are all `done`. Independent tasks may run in parallel, bounded
+2. **Cut feat branch + environment check (first-class gate).** Cut `nc/feat-<featId>` from base, then confirm
+   it's RUNNABLE — `env_check.py`: correct node, deps installed, verifier toolchain on PATH. If not → stop
+   `env_not_ready` and report what to fix (e.g. `pnpm install`). **Fresh git worktrees routinely lack
+   untracked deps like `node_modules`**, so this gate is explicit and non-optional, not folded into verify.
+   (Order matters: cut the branch first, then check it — Codex, 2026-06-09.)
+3. **Baseline verify (fail fast on a red base).** Run the verifier on the freshly-cut feat branch **before
+   any task runs**. If the base is already red → stop `base_red` and report. (Don't burn the feat to discover
+   the base was broken from the start.)
+4. **Schedule.** Run tasks whose dependencies are all `done`. Independent tasks may run in parallel, bounded
    by the runtime's 16-concurrent / 1000-total agent caps **and** a feat-level concurrency limit (each task
    is itself several agents, so the real ceiling is lower).
-3. **Per task:** invoke the v2-lite loop (unchanged). On `done` → merge into feat branch, mark node done.
+5. **Per task:** invoke the v2-lite loop (unchanged). On `done` → merge into feat branch, mark node done.
    On `review_unresolved` / `verify_failed` / `infra_error` → mark node failed, **block its dependents**,
    keep independent branches going.
-4. **Integration verify.** After the DAG drains, run the **verifier once on the integrated feat branch**.
-   This catches cross-task breakage that green per-task verifies individually miss — the single most
-   important thing per-task gates can't give you.
-5. **Report.** Emit one structured feat report: per-task status, what merged, what's blocked and why, the
-   integration-verify result, and the feat branch to review.
+6. **Integration verify.** After the DAG drains, **re-run the environment check first** — tasks may have
+   added or changed dependencies, so the merged branch can need a fresh install; without this a missing new
+   dep mislabels as `feat_integration_failed` when the truth is `env_not_ready`. Then run the verifier on the
+   integrated feat branch and compare against the baseline: this isolates cross-task breakage the feat
+   *introduced* from pre-existing red or env gaps, and catches what green per-task verifies individually miss.
+7. **Report.** Emit one structured feat report: env + baseline result, per-task status, what merged, what's
+   blocked and why, the integration-verify result, and the feat branch to review.
+8. **Publish (optional, OFF by default).** If connectors are enabled, open a PR for the feat branch and
+   update the tracker / notify a channel. Default M1 output is branch + report only; the human reviews and
+   merges. The connector path is opt-in, not required to run a feat.
 
 ---
 
@@ -68,8 +95,14 @@ Open question: merge-conflict handling between sibling tasks (see §6).
   dependents. The feat does not "push through" a failed task.
 - **Feat-level caps:** max tasks, max review/fix rounds across the feat, and a wall-clock / rate-limit
   ceiling. When hit → stop, report partial progress, never silently continue.
+- **Environment gate:** if the feat branch isn't runnable (deps/node/verifier toolchain) — checked before
+  baseline **and** again before final integration verify — → stop (`env_not_ready`), report what to fix, run
+  nothing. An unrunnable env is never reported as a code failure.
+- **Baseline gate:** a freshly-cut feat branch that fails verify *before any task* → stop (`base_red`),
+  report, run nothing. Never start work on a red base.
 - **Integration verify is non-negotiable:** all-tasks-green does NOT mean feat-done; the merged branch must
-  pass the verifier. A clean DAG with a red integration verify → `feat_integration_failed`.
+  pass the verifier. A clean DAG with a red integration verify (that the baseline passed) →
+  `feat_integration_failed`.
 - Auto mode's own fallback (pause after repeated classifier blocks) is a backstop, not the brake.
 - **No self-mutation mid-feat:** the runner, skill, verifier, schemas, and permission rules are **frozen**
   for the duration of a run; the loop never edits its own brakes while driving. Improvements are proposed as
@@ -79,9 +112,15 @@ Open question: merge-conflict handling between sibling tasks (see §6).
 
 ## 5. Persistent feat state & recovery
 
-- Feat state lives in a file (e.g. `~/.claude/nightcrawler/feats/<featId>.json`) — **outside** any worktree,
-  same tamper-proofing as the gate scripts. Holds the DAG, each node's status, the merged set, and the
-  feat branch ref.
+- Live, authoritative feat state lives in a file **outside any worktree**
+  (`~/.claude/nightcrawler/feats/<featId>.json`), same tamper-proofing as the gate scripts. Holds the DAG,
+  each node's status, the merged set, and the feat branch ref. (Mutable run-state never goes inside the repo
+  the agents edit — see §6 #4.)
+- The **final report/manifest is a reviewable artifact** at feat end. Default: exported **out-of-tree**
+  (e.g. `~/.claude/nightcrawler/reports/<featId>.json`). Optionally, *after* the run, it may be committed or
+  attached to the feat branch/PR for in-tree review. Either way, **mutable run-state never lives in the
+  repo** — only the finished report may be brought in-tree, and only post-run. Tamper-resistance during the
+  run, reviewability at the end.
 - **Deterministic task IDs** (hash of task spec) make resume safe: a resumed feat reads state, skips `done`
   nodes, re-runs only incomplete ones. No Math.random / Date anywhere (the v2-lite determinism gotcha
   applies to the whole layer).
@@ -97,9 +136,17 @@ Open question: merge-conflict handling between sibling tasks (see §6).
 2. **Sibling merge conflicts** — two independent tasks editing nearby code. Options: serialize on file
    overlap (detect from each task's `files_changed`), or detect conflict at merge and route a resolve task.
 3. **Parallelism ceiling** — each task is N agents; need a feat concurrency limit well under the 16-cap.
-4. **Where feat state lives** — per-user (`~/.claude/...`) vs per-repo. Per-user keeps it out of the repo
-   and tamper-proof; per-repo makes it reviewable in a PR. Lean per-user for now.
-5. **What "feat done" reports to the human** — branch to merge, or auto-open a PR? Keep merge human for now.
+4. **Where feat state lives — RESOLVED (Codex review, 2026-06-09).** Split mutable state from the reviewable
+   artifact: **(a)** live, authoritative feat state goes **per-user, outside any worktree**
+   (`~/.claude/nightcrawler/feats/<featId>.json`) — tamper-proof, the code under review can't edit the state
+   that governs the run; **(b)** the **final report/manifest is exported as a reviewable artifact** at feat
+   end (out-of-tree, e.g. `reports/nightcrawler/<featId>.json`, or attached alongside the branch). Best of
+   both: tamper-resistance during the run, reviewability at the end. Don't put mutable run-state inside the
+   repo the agents edit. (This supersedes the earlier "$5 leans per-user / $6 open" wording — $5 and $6 now
+   agree.)
+5. **Feat output — RESOLVED:** branch + report by default; an **optional** connector-backed publish step
+   (open PR / update tracker / notify) behind an **off-by-default flag**. Merge stays human in every case,
+   so M1 keeps the least surface by default.
 
 ---
 
@@ -150,9 +197,20 @@ quality, with the safety property that the loop in force during any run is alway
 
 ## 9. Milestones (incremental — prove each before the next)
 
-- **M1 — sequential feat.** Human-authored ordered task list, no parallelism, no auto-decompose. Run v2-lite
-  per task → merge into one feat branch → integration verify → report. Proves the feat-branch + integration
-  shape with the least new surface. **Build this first.**
+- **M1 — sequential feat.** Human-authored ordered task list, no parallelism, no auto-decompose. Sequence:
+  **preflight** (`install.sh --check` so the gate isn't stale; base working tree clean so the feat doesn't
+  branch from dirty local state) → cut feat branch → **environment check** → **baseline verify** (stop
+  `env_not_ready` / `base_red` — never start on an unrunnable or red base) → run v2-lite per task → merge
+  only `done` tasks → **env re-check + final integration verify** → **report (branch + report is the default,
+  connector-free output)**. An **optional** connector publish (open PR / update tracker / notify) sits behind
+  an **off-by-default flag** — opt-in, not required for M1. Proves the feat-branch + baseline + integration
+  shape with the least new surface by default. **Build this first.**
+  - *Build note (Codex, 2026-06-09):* **no DAG machinery in M1.** Execute the human-authored list strictly
+    sequentially, but model it internally as a *linear* DAG and keep the **state schema dependency-compatible**
+    (each node carries a `dependsOn: []` that's always empty in M1) — so M2 adds edges/parallelism without
+    migrating state. Exact M1 scope: featId + feat branch + sequential task list, per-user state file,
+    `install.sh --check`, clean-worktree check, env check, baseline verify, call v2-lite per task, merge only
+    `done`, env re-check, final verify, report. **Everything else stays out.**
 - **M2 — DAG + bounded parallelism.** Dependencies + a few parallel independent tasks under a feat
   concurrency cap.
 - **M3 — auto-decompose.** A planner agent proposes the DAG from a feat spec; the DAG is adversarially

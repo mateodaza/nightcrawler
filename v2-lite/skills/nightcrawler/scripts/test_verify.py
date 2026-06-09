@@ -101,6 +101,7 @@ def test_no_verifier_is_fail_loud_not_pass():
     assert checks == []
     result = verify.build_result(checks, lambda cmd, cwd: (0, ""), repo)
     assert result["pass"] is False
+    assert result["inconclusive"] is True          # nothing to verify != code broken
     assert result["failures"][0]["reason"] == "no_verifier_detected"
 
 
@@ -108,16 +109,37 @@ def test_build_result_all_pass():
     checks = [{"name": "a", "cmd": ["x"]}, {"name": "b", "cmd": ["y"]}]
     result = verify.build_result(checks, lambda cmd, cwd: (0, ""), "/tmp")
     assert result["pass"] is True and result["failures"] == []
+    assert result["inconclusive"] is False
     assert [c["name"] for c in result["checks"]] == ["a", "b"]
 
 
-def test_build_result_one_fail_records_stage_and_tail():
+def test_real_fail_is_not_inconclusive():
     checks = [{"name": "node:test", "cmd": ["pnpm", "test"]}]
     result = verify.build_result(
         checks, lambda cmd, cwd: (1, "AssertionError: boom"), "/tmp")
     assert result["pass"] is False
+    assert result["inconclusive"] is False         # exit 1 = ran-and-failed (real)
     assert result["failures"][0]["stage"] == "node:test"
+    assert result["failures"][0]["kind"] == "failed"
     assert "boom" in result["failures"][0]["log_tail"]
+
+
+def test_missing_toolchain_is_inconclusive_not_failed():
+    # exit 127 = command not found -> couldn't RUN (the node_modules/wrong-node false negative)
+    checks = [{"name": "node:typecheck", "cmd": ["pnpm", "run", "type-check"]}]
+    result = verify.build_result(
+        checks, lambda cmd, cwd: (127, "turbo: not found"), "/tmp")
+    assert result["pass"] is False
+    assert result["inconclusive"] is True
+    assert result["failures"][0]["kind"] == "missing_tool"
+
+
+def test_mixed_real_and_missing_is_not_inconclusive():
+    # if even one real failure exists, it's a genuine verify_failed, not inconclusive
+    checks = [{"name": "a", "cmd": ["x"]}, {"name": "b", "cmd": ["y"]}]
+    result = verify.build_result(
+        checks, lambda cmd, cwd: (127, "") if cmd == ["x"] else (1, "real fail"), "/tmp")
+    assert result["pass"] is False and result["inconclusive"] is False
 
 
 # --- stdlib runner ---------------------------------------------------------

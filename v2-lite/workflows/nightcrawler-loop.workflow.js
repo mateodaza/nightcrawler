@@ -3,11 +3,12 @@ export const meta = {
   description: 'Run the Nightcrawler closed loop on one task: plan → implement → (codex-review ↔ fix)* → verify',
   whenToUse: 'Drive one task through the v2-lite Nightcrawler gate. Pass the task in args: a string, or {task, targetPath}.',
   phases: [
-    { title: 'Plan',      detail: 'Strong model reads relevant files, writes a short plan. No code.' },
-    { title: 'Implement', detail: 'Strong model makes the change in a dedicated git worktree.' },
+    { title: 'Classify',  detail: 'Cheap model rates complexity → routes the think-model (trivial→Sonnet, else Opus).' },
+    { title: 'Plan',      detail: 'Think model reads relevant files, writes a short plan. No code.' },
+    { title: 'Implement', detail: 'Think model makes the change in a dedicated git worktree.' },
     { title: 'Review',    detail: 'Thin runner execs codex_review.sh, echoes raw gate JSON (judgment is Codex).' },
-    { title: 'Fix',       detail: 'Strong model fixes blocking findings in the same worktree.' },
-    { title: 'Verify',    detail: 'Thin runner execs verify.sh; DONE only if pass is true.' },
+    { title: 'Fix',       detail: 'Think model fixes blocking findings in the same worktree.' },
+    { title: 'Verify',    detail: 'Thin runner execs verify.sh; pass→DONE, can\'t-run→inconclusive (not failed).' },
   ],
 }
 
@@ -16,12 +17,12 @@ const ROUND_CAP = 3              // review↔fix rounds (skill default)
 const INFRA_RETRIES = 2          // extra reviewer attempts when ran:false (total 3 tries)
 const TOKEN_TARGET_K = 12        // soft per-agent token target; runtime agent caps are the real backstop
 
-// Model routing: the strongest model where real thinking happens (plan/implement/fix),
-// the cheapest where the agent is just a runner. Review & Verify only EXEC a script and
-// echo its JSON — the judgment lives in Codex (review) and verify.sh's exit code (verify),
-// so a strong model there spends rate-limit headroom for zero quality gain.
-const MODEL_THINK = 'opus'       // plan, implement, fix  (best model — gates catch its mistakes)
-const MODEL_RUNNER = 'haiku'     // review-runner, verify-runner  (dumb exec + echo)
+// Model routing. A cheap CLASSIFY pass (Phase 0) picks the THINK model by task tier, so a
+// trivial change doesn't pay Opus latency/rate-limits while a hard one still gets the best
+// model. The two runner agents (review/verify) stay cheap regardless — they only exec a
+// script and echo JSON; the judgment lives in Codex (review) and verify.sh's exit code.
+const TIER_MODEL = { trivial: 'sonnet', standard: 'opus', complex: 'opus' }
+const MODEL_RUNNER = 'haiku'     // review-runner, verify-runner (no judgment to apply)
 // The skill lives in ~/.claude/skills (installed), NOT committed to the repo, so
 // the worktree checkout has no `.claude/skills/nightcrawler`. Always invoke the
 // installed copy by absolute path; cwd is the worktree so the tools see the change.
@@ -32,6 +33,10 @@ const VERIFY_CMD = `bash ${SKILL_SCRIPTS}/verify.sh`
 // args may be a bare string or {task, targetPath}
 const TASK = typeof args === 'string' ? args : (args && args.task) || ''
 const TARGET = (args && typeof args === 'object' && args.targetPath) || ''
+// Identity composability: a caller (e.g. the M1 feat-runner) can feat-scope this task's branch
+// and worktree by passing branchPrefix (default 'nc/') and idSalt (default '' = standalone).
+const BRANCH_PREFIX = (args && typeof args === 'object' && args.branchPrefix) || 'nc/'
+const ID_SALT = (args && typeof args === 'object' && args.idSalt) || ''
 if (!TASK) throw new Error('nightcrawler-loop: no task in args (pass a string or {task, targetPath})')
 
 const softBudget = `Soft budget: aim to stay under ~${TOKEN_TARGET_K}k tokens. Be terse; do not over-explore.`
@@ -55,12 +60,22 @@ function fnv1a(str) {
   }
   return h.toString(36)
 }
-const RUN_ID = fnv1a(TASK).slice(0, 6)
+// Salt makes the id feat-unique for a caller; empty salt preserves exact standalone hashing.
+const RUN_ID = fnv1a(ID_SALT ? ID_SALT + '::' + TASK : TASK).slice(0, 6)
 const SLUG = slugify(TASK)
-const BRANCH = `nc/${SLUG}-${RUN_ID}`
+const BRANCH = `${BRANCH_PREFIX}${SLUG}-${RUN_ID}`
 const WT_REL = `../nc-wt-${SLUG}-${RUN_ID}`
 
 // ── Schemas (only where the script needs structured fields) ──────────────────
+const CLASSIFY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['tier', 'reason'],
+  properties: {
+    tier: { type: 'string', enum: ['trivial', 'standard', 'complex'] },
+    reason: { type: 'string', description: 'one short sentence justifying the tier' },
+  },
+}
 const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -129,7 +144,22 @@ function asVerify(raw) {
   return v
 }
 
-// ── Phase 1: PLAN (Sonnet — stronger) ────────────────────────────────────────
+// ── Phase 0: CLASSIFY complexity → route the think-model ─────────────────────
+phase('Classify')
+const cls = await agent(
+  `Classify the complexity of this ONE coding task. Reply with a tier:
+- "trivial": a localized change of a few lines with obvious scope (a guard, a rename, a typo, a one-function fix).
+- "standard": a normal change touching one area or file-set with clear intent.
+- "complex": multi-file, ambiguous, architectural, or cross-cutting.
+
+Task: ${TASK}`,
+  { model: MODEL_RUNNER, phase: 'Classify', label: 'classify', schema: CLASSIFY_SCHEMA }
+)
+const tier = (cls && TIER_MODEL[cls.tier]) ? cls.tier : 'standard'
+const thinkModel = TIER_MODEL[tier]
+log(`Task classified "${tier}" → think model: ${thinkModel} (runners: ${MODEL_RUNNER}).`)
+
+// ── Phase 1: PLAN (think model) ──────────────────────────────────────────────
 phase('Plan')
 const plan = await agent(
   `You are planning ONE Nightcrawler task. Do NOT write code in this phase.
@@ -140,7 +170,7 @@ ${targetLine}
 Read only the files needed to understand the change. Produce a short, ordered plan
 (what to change, in which files, and why) plus the list of files the change will touch.
 ${softBudget}`,
-  { model: MODEL_THINK, phase: 'Plan', label: 'plan', schema: PLAN_SCHEMA }
+  { model: thinkModel, phase: 'Plan', label: 'plan', schema: PLAN_SCHEMA }
 )
 if (!plan) return { status: 'aborted', stage: 'plan', task: TASK }
 log(`Plan ready — ${plan.relevant_files.length} file(s) in scope.`)
@@ -167,7 +197,7 @@ Steps:
 4. Do NOT run type-check, tests, or codex review — later phases own that.
 5. Return worktree_path (absolute), branch ("${BRANCH}"), and a one-paragraph summary.
 ${softBudget}`,
-  { model: MODEL_THINK, phase: 'Implement', label: 'implement', schema: IMPL_SCHEMA }
+  { model: thinkModel, phase: 'Implement', label: 'implement', schema: IMPL_SCHEMA }
 )
 if (!impl) return { status: 'aborted', stage: 'implement', task: TASK, plan }
 // SECURITY (audit F3): never trust the agent's returned path verbatim — it flows into
@@ -247,7 +277,7 @@ ${JSON.stringify(lastBlocking, null, 2)}
 
 Apply the minimal correct fix for each. Do not run review or verify — the loop owns that.
 ${softBudget}`,
-    { model: MODEL_THINK, phase: 'Fix', label: `fix:r${round}` }
+    { model: thinkModel, phase: 'Fix', label: `fix:r${round}` }
   )
 }
 
@@ -291,8 +321,19 @@ if (verify.pass === true) {
   }
 }
 
+// Infra-vs-findings for verify: if the checks could NOT run (toolchain/deps missing, or no
+// verifier detected) that is NOT a code failure — surface it distinctly so a missing env never
+// masquerades as broken code (the run-1 false negative: turbo not found in a fresh worktree).
+if (verify.inconclusive) {
+  return {
+    status: 'verify_inconclusive', task: TASK, worktree: WT, branch: BRANCH,
+    rounds: round, failures: verify.failures || [],
+    note: 'Verification could not RUN (toolchain/deps missing in the worktree, or no verifier detected) — NOT a code failure. Fix the environment (install deps / correct node; see env_check) and re-run.',
+  }
+}
+
 return {
   status: 'verify_failed', task: TASK, worktree: WT, branch: BRANCH,
-  rounds: round, failures: verify.failures || [], inconclusive: !!verify.inconclusive,
-  note: 'Review was clean but deterministic verify did not pass. Code is NOT done.',
+  rounds: round, failures: verify.failures || [],
+  note: 'Review was clean but deterministic verify ran and did not pass. Code is NOT done.',
 }

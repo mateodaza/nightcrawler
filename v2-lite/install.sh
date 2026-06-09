@@ -35,8 +35,25 @@ check() {
   return $drift
 }
 
+if [[ "${1:-}" == "--env-check" ]]; then
+  # Preflight: is the target repo runnable (node version / deps / verifier toolchain)?
+  # Run before a feat/auto run so verify never false-fails on a setup issue. Defaults to $PWD.
+  exec python3 "$here/skills/nightcrawler/scripts/env_check.py" "${2:-$PWD}"
+fi
+
+if [[ "${1:-}" == "--auto-setup" ]]; then
+  # OPT-IN: add the review-egress trust line to ~/.claude/settings.json so the loop's
+  # Codex review runs under auto mode without per-run approval. Structured JSON merge —
+  # preserves every existing setting, backs up first, idempotent. (See merge_settings.py.)
+  exec python3 "$here/merge_settings.py" --apply
+fi
+
 if [[ "${1:-}" == "--check" ]]; then
-  if check; then
+  rc=0
+  check || rc=1
+  # auto-mode trust is opt-in; report its status but don't fail the drift check on it
+  python3 "$here/merge_settings.py" --check || true
+  if [[ $rc -eq 0 ]]; then
     echo "installed == source (frozen, in sync)"
   else
     echo "-> run ./install.sh to re-sync BEFORE your next run"

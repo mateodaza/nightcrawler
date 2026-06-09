@@ -1,0 +1,415 @@
+export const meta = {
+  name: 'nightcrawler-feat',
+  description: 'Run an ordered task list as ONE feature through the Nightcrawler M1 gate: preflight → feat branch → env+baseline → per-task v2-lite loop (merge on done) → env re-check + integration verify → report. Linear only (no DAG/parallel/bisection).',
+  whenToUse: 'Drive a small ordered feat (2–3 tasks in M1) through v2-overnight M1. args = { feat: "<title>", tasks: ["task 1", "task 2", ...], targetPath? }. Reuses nightcrawler-loop per task with feat-scoped branch identity. Launch FROM the target repo (cwd = repo root). Run `install.sh --check` yourself first — gate-freshness is a human step.',
+  phases: [
+    { title: 'Preflight',    detail: 'Agent confirms the base working tree is CLEAN and reads any prior feat state (resume). Dirty → stop.' },
+    { title: 'Feat branch',  detail: 'Agent cuts (or, on resume, checks out) nc/feat-<featId> from the current base branch.' },
+    { title: 'Env+Baseline', detail: 'Agent runs env_check.py then verify.sh on the feat branch; stop on env_not_ready / base_red before any task.' },
+    { title: 'Tasks',        detail: 'For each task in order: run the nightcrawler-loop gate with feat-scoped branch identity; on done → merge into the feat branch; first non-done HALTS the feat.' },
+    { title: 'Integration',  detail: 'Agent re-runs env_check.py (tasks may add deps) then verify.sh on the merged feat branch.' },
+    { title: 'Report',       detail: 'Agent writes the structured feat report out-of-tree; feat branch left for the human to merge.' },
+  ],
+}
+
+// ── Constants ────────────────────────────────────────────────────────────────
+// The skill lives in ~/.claude/skills (installed), invoked by absolute path. cwd is the
+// target repo root for every agent (same assumption nightcrawler-loop makes for its worktrees).
+const SKILL = '"$HOME/.claude/skills/nightcrawler/scripts"'
+const ENV_CMD = `python3 ${SKILL}/env_check.py`     // [REPO] -> exit 0 ready, 1 prints what to fix
+const VERIFY_CMD = `bash ${SKILL}/verify.sh`         // [DIR]  -> {pass,failures,checks} JSON
+const MODEL_RUNNER = 'haiku'                         // thin shell runners — no judgment to apply
+
+// ── Args: { feat, tasks: [...ordered], targetPath? } ─────────────────────────
+// Tolerate a JSON-encoded string (some callers stringify args); parse it back to an object.
+let A = args
+if (typeof A === 'string') { try { A = JSON.parse(A) } catch (_) { /* leave as string -> fails below */ } }
+if (!A || typeof A !== 'object' || Array.isArray(A)) {
+  throw new Error('nightcrawler-feat: args must be an object { feat, tasks: [...] } (got: ' + typeof args + ')')
+}
+const FEAT = String(A.feat || '').trim()
+const TASKS = Array.isArray(A.tasks) ? A.tasks.map((t) => String(t).trim()).filter(Boolean) : []
+const TARGET = (A.targetPath && String(A.targetPath)) || ''
+if (!FEAT) throw new Error('nightcrawler-feat: missing feat title (args.feat)')
+if (!TASKS.length) throw new Error('nightcrawler-feat: args.tasks[] is empty')
+// All git/env/verify run in the target repo. Default to the workflow cwd ($PWD = repo root),
+// which is where nightcrawler-loop also creates its worktrees — keep them the same repo.
+const REPO_ARG = TARGET ? JSON.stringify(TARGET) : '"$PWD"'
+
+// ── Deterministic identity (FNV-1a; NO Math.random / Date — would break resume) ──
+// These MUST mirror nightcrawler-loop's slugify/fnv1a exactly so the branch we compute
+// here equals the branch the loop creates (idSalt = featId).
+// Default truncation 24 for clean, readable branch names. taskIdentity() overrides to 40 to
+// stay byte-identical with nightcrawler-loop's own slugify (it truncates at 40), so the task
+// branch we precompute equals the branch the loop actually creates and merges target.
+function slugify(s, max = 24) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max) || 'task'
+}
+function fnv1a(str) {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0
+  }
+  return h.toString(36)
+}
+// featId = readable slug + a stable FNV-1a hash over the feat title + ordered task list
+// (order-sensitive on purpose). The slug makes the feat branch human-scannable; the hash keeps
+// it collision-resistant and resumable (re-running the same feat yields the same featId).
+const featSlug = slugify(FEAT)
+const featHash = fnv1a(FEAT + '\n---\n' + TASKS.join('\n')).slice(0, 6)
+const featId = `${featSlug}-${featHash}`
+const featBranch = `nc/feat-${featId}`
+// Task branches live in a SIBLING namespace `nc/feat/<id>/...` (slash after `feat`), NOT
+// `nc/feat-<id>/...`. Git stores `nc/feat-<id>` as a ref FILE, so a child ref `nc/feat-<id>/x`
+// would need a directory of the same name — an illegal file-vs-directory ref collision that
+// clobbers the feat branch. `nc/feat/<id>/` is a distinct dir entry under `nc/`, so the feat
+// branch (file `nc/feat-<id>`) and task branches (dir `nc/feat/<id>/`) coexist cleanly.
+const branchPrefix = `nc/feat/${featId}/`   // handed to nightcrawler-loop per task → nc/feat/<id>/<slug>-<id>
+
+// Per-task identity, computed exactly as the loop will (ID_SALT=featId): taskId = <slug>-<id>.
+// slug truncation MUST be 40 here to match nightcrawler-loop's slugify, so this precomputed
+// branch is byte-identical to the one the loop creates (the id hash is truncation-independent).
+function taskIdentity(task) {
+  const id = fnv1a(featId + '::' + task).slice(0, 6)
+  const taskId = `${slugify(task, 40)}-${id}`
+  return { taskId, branch: `${branchPrefix}${taskId}` }
+}
+
+// ── Persistent state + report paths (OUTSIDE any worktree, per-user) ─────────
+const STATE_PATH = `~/.claude/nightcrawler/feats/${featId}.json`
+const REPORT_PATH = `~/.claude/nightcrawler/reports/${featId}.json`
+
+// LINEAR DAG: every node carries dependsOn:[] (always empty in M1; lets M2 add edges
+// without migrating state). Strictly sequential execution regardless.
+const taskNodes = TASKS.map((spec) => {
+  const { taskId, branch } = taskIdentity(spec)
+  return { taskId, spec, dependsOn: [], status: 'pending', branch, loopStatus: null }
+})
+const state = {
+  featId, featBranch, base: null,
+  tasks: taskNodes,
+  baseline: null, env: null, envRecheck: null, integration: null,
+  status: 'running',
+}
+
+// ── JSON helpers — the SCRIPT parses agent stdout, never an agent (copied from
+//    nightcrawler-loop so verify parsing is byte-identical). ───────────────────
+function extractJsonObject(raw) {
+  if (raw == null) return null
+  let s = String(raw).trim().replace(/^```[a-zA-Z]*\s*/, '').replace(/\s*```$/, '').trim()
+  const start = s.indexOf('{')
+  if (start === -1) return null
+  let depth = 0, inStr = false, esc = false
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{') depth++
+    else if (c === '}') { depth--; if (depth === 0) { try { return JSON.parse(s.slice(start, i + 1)) } catch (_) { return null } } }
+  }
+  return null
+}
+function asVerify(raw) {
+  const v = extractJsonObject(raw)
+  if (!v || typeof v.pass !== 'boolean') {
+    return { pass: false, failures: [{ stage: 'verify', exit: -1, log_tail: 'verify output not parseable as {pass, failures}' }], inconclusive: true }
+  }
+  return v
+}
+
+// ── Schemas (only where the script branches on structured fields) ─────────────
+const WRITTEN_SCHEMA = { type: 'object', additionalProperties: false, required: ['written'], properties: { written: { type: 'boolean' } } }
+const PREFLIGHT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['clean', 'base', 'dirtyFiles', 'stateRaw'],
+  properties: {
+    clean: { type: 'boolean', description: 'true ONLY if `git status --porcelain` printed nothing' },
+    base: { type: 'string', description: 'current branch name (the base the feat is cut from)' },
+    dirtyFiles: { type: 'number', description: 'count of porcelain lines' },
+    stateRaw: { type: 'string', description: 'exact contents of the prior feat state file, or "" if absent' },
+  },
+}
+const FEATBRANCH_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['ok', 'branch', 'created'],
+  properties: {
+    ok: { type: 'boolean' }, branch: { type: 'string' },
+    created: { type: 'boolean', description: 'true if newly created, false if checked out on resume' },
+    error: { type: 'string' },
+  },
+}
+const ENV_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['ready', 'exitCode', 'output'],
+  properties: {
+    ready: { type: 'boolean', description: 'true ONLY if env_check.py exited 0' },
+    exitCode: { type: 'number' },
+    output: { type: 'string', description: 'full stdout/stderr (lists what to fix when not ready)' },
+  },
+}
+const MERGE_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['merged'],
+  properties: {
+    merged: { type: 'boolean', description: 'git exited 0 with NO conflict (includes the already-up-to-date case)' },
+    committed: { type: 'boolean', description: 'a NEW merge commit was actually created (HEAD moved)' },
+    alreadyUpToDate: { type: 'boolean', description: 'git printed "Already up to date." — the task branch added nothing' },
+    before: { type: 'string', description: 'HEAD SHA before the merge' },
+    after: { type: 'string', description: 'HEAD SHA after the merge' },
+    conflict: { type: 'boolean' },
+    error: { type: 'string', description: 'conflicting files / git error when merged=false' },
+  },
+}
+
+// ── State + report persistence (agents do all file I/O; script supplies bytes) ─
+async function persistState(phaseName) {
+  await agent(
+    `Persist Nightcrawler feat state. Create the directory ~/.claude/nightcrawler/feats if it does not exist, then write the following EXACT JSON (verbatim, byte-for-byte — do NOT reformat, summarize, or add anything) to ${STATE_PATH} :
+
+${JSON.stringify(state, null, 2)}
+
+Return {written:true} once that file is on disk with exactly that content.`,
+    { model: MODEL_RUNNER, phase: phaseName, label: 'state', schema: WRITTEN_SCHEMA }
+  )
+}
+
+async function finalize(status, extra = {}) {
+  state.status = status
+  const report = {
+    featId, feat: FEAT, featBranch, base: state.base, status,
+    env: state.env, baseline: state.baseline, envRecheck: state.envRecheck, integration: state.integration,
+    tasks: state.tasks.map((t) => ({
+      taskId: t.taskId, spec: t.spec, dependsOn: t.dependsOn, status: t.status, branch: t.branch, loopStatus: t.loopStatus,
+    })),
+    merged: state.tasks.filter((t) => t.status === 'done').map((t) => t.branch),
+    featBranchToReview: featBranch,
+    ...extra,
+  }
+  await agent(
+    `Write the Nightcrawler feat REPORT. Create the directory ~/.claude/nightcrawler/reports if it does not exist, then write the following EXACT JSON (verbatim, byte-for-byte) to ${REPORT_PATH} :
+
+${JSON.stringify(report, null, 2)}
+
+Return {written:true}.`,
+    { model: MODEL_RUNNER, phase: 'Report', label: 'report', schema: WRITTEN_SCHEMA }
+  )
+  await persistState('Report')
+  return report
+}
+
+// ── 1. PREFLIGHT — base tree must be CLEAN; read prior state for resume ────────
+phase('Preflight')
+const pf = await agent(
+  `THIN preflight runner for a git repo. cd ${REPO_ARG}, then run and report (do NOT modify anything):
+1. \`git rev-parse --abbrev-ref HEAD\`  -> base (the current branch name)
+2. \`git status --porcelain\`           -> clean is true ONLY if this prints NOTHING; dirtyFiles = number of lines
+3. \`cat ${STATE_PATH} 2>/dev/null || true\` -> stateRaw = the exact file contents, or "" if the file does not exist
+Return {clean, base, dirtyFiles, stateRaw}.`,
+  { model: MODEL_RUNNER, phase: 'Preflight', label: 'preflight', schema: PREFLIGHT_SCHEMA }
+)
+if (!pf) return finalize('infra_error', { stage: 'preflight', note: 'preflight agent returned nothing' })
+state.base = pf.base || null
+if (!pf.clean) {
+  return finalize('dirty_tree', {
+    note: `Base working tree has ${pf.dirtyFiles} uncommitted change(s). Commit or stash before running the feat — Nightcrawler will not run on a dirty tree.`,
+  })
+}
+// Resume: carry forward tasks already marked done in the prior state (already merged into the
+// feat branch, which persists in git) so we skip them.
+const prior = pf.stateRaw ? extractJsonObject(pf.stateRaw) : null
+if (prior && Array.isArray(prior.tasks)) {
+  const doneIds = new Set(prior.tasks.filter((t) => t && t.status === 'done').map((t) => t.taskId))
+  for (const node of state.tasks) if (doneIds.has(node.taskId)) node.status = 'done'
+  if (doneIds.size) log(`Resume: ${doneIds.size} task(s) already done in ${STATE_PATH} — will skip.`)
+}
+
+// ── 2. Cut (or resume) the feat branch from base ─────────────────────────────
+phase('Feat branch')
+const fb = await agent(
+  `THIN git runner. cd ${REPO_ARG}. Idempotently put the repo's working tree ON the feat branch ${JSON.stringify(featBranch)}:
+- If \`git rev-parse --verify --quiet ${JSON.stringify(featBranch)}\` succeeds (branch exists) -> \`git checkout ${JSON.stringify(featBranch)}\`, created=false (resume).
+- Otherwise create it from the current base branch -> \`git checkout -b ${JSON.stringify(featBranch)}\`, created=true.
+Do nothing else. Return {ok, branch, created, error}.`,
+  { model: MODEL_RUNNER, phase: 'Feat branch', label: 'feat-branch', schema: FEATBRANCH_SCHEMA }
+)
+if (!fb || !fb.ok) return finalize('infra_error', { stage: 'feat_branch', note: (fb && fb.error) || 'could not create/checkout the feat branch' })
+log(`Feat branch ${featBranch} ${fb.created ? 'created' : 'checked out (resume)'} from base ${state.base}.`)
+
+// ── 3. ENV CHECK on the feat branch (fresh trees lack node_modules — mandatory) ─
+phase('Env+Baseline')
+const env = await agent(
+  `THIN env doctor. cd ${REPO_ARG}, then run EXACTLY:  ${ENV_CMD} ${REPO_ARG}
+ready=true ONLY if it exits 0. Capture exitCode and the full stdout+stderr text in output (when not ready it lists what to fix, e.g. \`pnpm install\`). Do not interpret further.`,
+  { model: MODEL_RUNNER, phase: 'Env+Baseline', label: 'env-check', schema: ENV_SCHEMA }
+)
+state.env = env ? { ready: !!env.ready, exitCode: env.exitCode, output: env.output, when: 'baseline' }
+                : { ready: false, exitCode: -1, output: 'env agent returned nothing', when: 'baseline' }
+if (!state.env.ready) {
+  return finalize('env_not_ready', {
+    stage: 'baseline_env',
+    note: 'Environment not ready on the feat branch — fix the issues below (e.g. run the project install), then re-run.',
+    fix: state.env.output,
+  })
+}
+
+// ── 4. BASELINE VERIFY — base must be green before any task ───────────────────
+const baseRaw = await agent(
+  `THIN verifier. cd ${REPO_ARG}, then run EXACTLY:  ${VERIFY_CMD} ${REPO_ARG}
+Output the command's stdout VERBATIM as your entire reply (JSON {pass,failures,checks}). No fences, no commentary.`,
+  { model: MODEL_RUNNER, phase: 'Env+Baseline', label: 'baseline-verify' }
+)
+const baseV = asVerify(baseRaw)
+state.baseline = baseV
+if (baseV.pass !== true) {
+  return finalize('base_red', {
+    stage: 'baseline_verify',
+    note: baseV.inconclusive
+      ? 'Baseline verify could NOT run (toolchain/deps) — treat as not-ready, not code-red. Fix env and re-run.'
+      : 'Baseline verify FAILED on the freshly-cut feat branch — the base is red. Not running any task on red.',
+    failures: baseV.failures || [],
+  })
+}
+log(`Baseline green on ${featBranch}. Running ${state.tasks.length} task(s) strictly in order.`)
+
+// ── 5. TASKS — sequential; reuse nightcrawler-loop; merge on done; halt on first non-done ─
+phase('Tasks')
+for (let i = 0; i < state.tasks.length; i++) {
+  const node = state.tasks[i]
+  const n = `${i + 1}/${state.tasks.length}`
+  if (node.status === 'done') { log(`Task ${n} "${node.taskId}" already done (resume) — skipping.`); continue }
+
+  node.status = 'running'
+  log(`Task ${n}: ${node.spec}  →  loop (branch ${node.branch}).`)
+
+  // Reuse the PROVEN v2-lite loop verbatim (classify→plan→implement→codex-review↔fix→verify).
+  // Feat-scope its identity so the task branch is namespaced under the feat, and its worktree
+  // is cut from the CURRENT feat-branch HEAD (the main tree is on the feat branch).
+  let res = null
+  try {
+    res = await workflow('nightcrawler-loop', {
+      task: node.spec,
+      branchPrefix,        // 'nc/feat-<featId>/'
+      idSalt: featId,      // makes the loop's id hash feat-unique
+      ...(TARGET ? { targetPath: TARGET } : {}),
+    })
+  } catch (e) {
+    res = { status: 'infra_error', error: String((e && e.message) || e) }
+  }
+  node.loopStatus = (res && res.status) || 'unknown'
+
+  if (!res || res.status !== 'done') {
+    // Any non-done (review_unresolved / verify_failed / verify_inconclusive / infra_error /
+    // aborted) -> mark failed and HALT. M1 never builds later tasks on top of a failed one.
+    node.status = 'failed'
+    await persistState('Tasks')
+    log(`Task ${n} HALTED the feat — loop returned "${node.loopStatus}".`)
+    return finalize('halted', {
+      stage: 'task', haltedTask: node.taskId, haltReason: node.loopStatus, loopResult: res || null,
+      note: `Task ${n} did not reach "done" (${node.loopStatus}). Per M1, later tasks are NOT run on top of a failed one. Tasks merged before this remain on ${featBranch}.`,
+    })
+  }
+
+  // Merge the loop's reported branch (cross-check against our deterministic one).
+  const mergeBranch = res.branch || node.branch
+  if (res.branch && res.branch !== node.branch) {
+    log(`WARN: loop branch "${res.branch}" != expected "${node.branch}" — merging the loop's reported branch.`)
+  }
+  const mg = await agent(
+    `THIN git merge runner. cd ${REPO_ARG}. Merge the completed task branch into the feat branch. Run EXACTLY, in order, and report what git actually did:
+1. \`git checkout ${JSON.stringify(featBranch)}\`
+2. \`git rev-parse HEAD\`  -> record as before
+3. \`git merge --no-ff ${JSON.stringify(mergeBranch)} -m ${JSON.stringify('nc(feat): merge ' + node.taskId)}\`
+4. \`git rev-parse HEAD\`  -> record as after
+Report:
+- merged: true if git exited 0 with NO conflict (this INCLUDES the "Already up to date." case).
+- committed: true ONLY if after != before (a NEW merge commit was really created). false if git printed "Already up to date." or HEAD did not move.
+- alreadyUpToDate: true if git printed "Already up to date." (the task branch contributed nothing).
+- before, after: the two HEAD SHAs.
+On a CONFLICT: run \`git merge --abort\`, set merged=false, conflict=true, put the conflicting files in error. Never touch the base branch (${JSON.stringify(state.base)}).
+Return {merged, committed, alreadyUpToDate, before, after, conflict, error}.`,
+    { model: MODEL_RUNNER, phase: 'Tasks', label: `merge:${node.taskId}`, schema: MERGE_SCHEMA }
+  )
+  if (!mg || !mg.merged) {
+    node.status = 'merge_failed'
+    await persistState('Tasks')
+    return finalize('feat_integration_failed', {
+      stage: 'merge', haltedTask: node.taskId,
+      note: `Merging task ${node.taskId} into ${featBranch} failed (${(mg && mg.error) || 'unknown'}). Halting; earlier merges remain.`,
+    })
+  }
+  // FALSE-POSITIVE GUARD: the loop returned "done" but the merge added NO commit — the task
+  // contributed nothing to the feat branch (scope overlap with an earlier task, or an empty
+  // implement). Record it as a NO-OP, not a real merge, so the feat can never claim a plain
+  // "done" while a task actually did nothing. This guard only ever DOWNGRADES the outcome
+  // (done → done_with_noops); it can never turn a red feat green.
+  const didCommit = mg.committed === true && mg.alreadyUpToDate !== true && (!mg.before || !mg.after || mg.before !== mg.after)
+  if (!didCommit) {
+    node.status = 'noop'
+    node.noop = true
+    await persistState('Tasks')
+    log(`Task ${n}: loop said "done" but the merge added NO commit (already-up-to-date) → recorded as NO-OP, not a merge.`)
+    continue
+  }
+  node.status = 'done'
+  await persistState('Tasks')
+  log(`Task ${n} done → merged ${mergeBranch} into ${featBranch} (commit ${mg.after ? String(mg.after).slice(0, 8) : '?'}).`)
+}
+
+// ── 6. ENV RE-CHECK (tasks may have added deps) + FINAL INTEGRATION VERIFY ─────
+phase('Integration')
+const env2 = await agent(
+  `THIN env doctor. cd ${REPO_ARG}, then run EXACTLY:  ${ENV_CMD} ${REPO_ARG}
+ready=true ONLY if it exits 0. Capture exitCode and full stdout+stderr in output.`,
+  { model: MODEL_RUNNER, phase: 'Integration', label: 'env-recheck', schema: ENV_SCHEMA }
+)
+state.envRecheck = env2 ? { ready: !!env2.ready, exitCode: env2.exitCode, output: env2.output, when: 'integration' }
+                        : { ready: false, exitCode: -1, output: 'env agent returned nothing', when: 'integration' }
+if (!state.envRecheck.ready) {
+  return finalize('env_not_ready', {
+    stage: 'integration_env',
+    note: 'Environment not ready on the merged feat branch (a task may have added deps). Fix env (e.g. install) and re-run.',
+    fix: state.envRecheck.output,
+  })
+}
+const intRaw = await agent(
+  `THIN verifier. cd ${REPO_ARG}, then run EXACTLY:  ${VERIFY_CMD} ${REPO_ARG}
+Output the command's stdout VERBATIM (JSON {pass,failures,checks}). No fences, no commentary.`,
+  { model: MODEL_RUNNER, phase: 'Integration', label: 'integration-verify' }
+)
+const intV = asVerify(intRaw)
+state.integration = intV
+if (intV.pass === true) {
+  const noopTasks = state.tasks.filter((t) => t.status === 'noop').map((t) => t.taskId)
+  const realMerges = state.tasks.filter((t) => t.status === 'done').length
+  if (noopTasks.length) {
+    // Integration is green, but at least one task claimed "done" while adding no commit. Never
+    // report a plain "done" in that case — surface the no-op(s) so a feat can't look complete
+    // when a task actually did nothing.
+    return finalize('done_with_noops', {
+      noopTasks, realMerges,
+      note: `Integration verify is GREEN on ${featBranch} (${realMerges} task(s) merged real commits), but ${noopTasks.length} task(s) claimed "done" while adding NO commit (no-op — likely scope overlap with an earlier task, or an empty implement). NOT reported as a plain "done": review the no-op task(s) before trusting the feat. Left for human merge.`,
+    })
+  }
+  return finalize('done', {
+    note: `All ${state.tasks.length} task(s) merged real commits and integration verify is GREEN on ${featBranch}. Left for human merge.`,
+  })
+}
+if (intV.inconclusive) {
+  return finalize('env_not_ready', {
+    stage: 'integration_verify',
+    note: 'Integration verify could NOT run (toolchain/deps) — not code-red. Fix env and re-run.',
+    failures: intV.failures || [],
+  })
+}
+// Baseline was green, integration is red -> the merged feat broke something.
+return finalize('feat_integration_failed', {
+  stage: 'integration_verify',
+  note: 'Baseline was green but the merged feat fails integration verify. The feat branch is NOT shippable as-is.',
+  failures: intV.failures || [],
+})
