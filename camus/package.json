@@ -21,9 +21,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mateodaza/nightcrawler.git",
-    "directory": "camus"
+    "url": "git+https://github.com/mateodaza/camus.git",
+    "directory": "packages/cli"
   },
+  "homepage": "https://github.com/mateodaza/camus#readme",
+  "bugs": "https://github.com/mateodaza/camus/issues",
   "keywords": [
     "claude",
     "claude-code",

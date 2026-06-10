@@ -1,4 +1,4 @@
-# Camus v2 — Design Spec
+# [Camus v2](https://github.com/mateodaza/camus) — Design Spec
 
 **Status:** Draft for review · **Date:** 2026-06-08 · **Author:** Mateo (+ research pass)
 **Supersedes:** v1 bash orchestrator (HEAD `b366cf7`), now retired to portfolio/OSS reference.
@@ -185,7 +185,7 @@ The metering boundary is **interactive vs `claude -p`/SDK** — *not* GUI-vs-hea
 
 ---
 
-## 9. File layout (as shipped — see `camus/README.md` for the authoritative tree)
+## 9. File layout (as shipped — see [mateodaza/camus](https://github.com/mateodaza/camus) for the authoritative tree)
 
 ```
 ~/.claude/                         # installed via camus/install.sh (copy, not symlink)
@@ -265,7 +265,7 @@ inside it. Therefore the runner must be **frozen / known-good before a run**:
   "Frozen" must be checkable, not assumed.
 
 **Hard boundaries (state in conversation and/or as deny rules):** no push, no deploy, no
-package install unless explicitly needed, no editing the Camus runner scripts during
+package install unless explicitly needed, no editing the [Camus](https://github.com/mateodaza/camus) runner scripts during
 a run, clean worktree required at start. (Conversation boundaries are re-read each check and
 can be lost to context compaction — for a hard guarantee use a deny rule.)
 
@@ -318,4 +318,4 @@ no small patch substitutes for that.
 
 ---
 
-*The honest framing: you're not rebuilding Camus and you're not shelving it. You're keeping the judgment — the standard that keeps it honest — and renting the engine. The part that's yours survives the labs' weekly releases; the part they commoditized, you stop maintaining.*
+*The honest framing: you're not rebuilding [Camus](https://github.com/mateodaza/camus) and you're not shelving it. You're keeping the judgment — the standard that keeps it honest — and renting the engine. The part that's yours survives the labs' weekly releases; the part they commoditized, you stop maintaining.*

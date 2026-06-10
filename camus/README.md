@@ -1,15 +1,15 @@
-# Camus
+# [Camus](https://github.com/mateodaza/camus)
 
 **An autonomous coding loop that can't grade its own homework.**
 
-Camus runs a coding task from plan to verified commit without you watching it.
+[Camus](https://github.com/mateodaza/camus) runs a coding task from plan to verified commit without you watching it.
 Claude writes the code. Codex, a different vendor's model, reviews every change.
 Then your repo's own type-check and tests decide. No step in the chain is allowed
 to approve its own work.
 
 It runs as two Claude Code workflows plus a skill: `/camus-loop` takes one task,
 `/camus-feat` takes an ordered task list and ships it as one feature branch with a
-report. Formerly Nightcrawler v2; the v1 bash orchestrator lives at the repo root.
+report. Formerly Nightcrawler v2; the canonical repo is [mateodaza/camus](https://github.com/mateodaza/camus).
 Full design: [`../CAMUS-SPEC.md`](../CAMUS-SPEC.md).
 
 ```
@@ -20,7 +20,7 @@ plan → implement → [ Codex review ↔ fix ]* → commit gate → dep prep �
 ## Requirements
 
 - **Claude Code** v2.1.154+ with dynamic workflows, on a subscription plan.
-  Camus runs interactively, so usage counts against your plan limits rather than
+  [Camus](https://github.com/mateodaza/camus) runs interactively, so usage counts against your plan limits rather than
   metered API credit.
 - **Codex CLI** installed and authenticated (ChatGPT plan or API key). This is the
   reviewer. Without it, nothing gets approved.
@@ -126,7 +126,7 @@ real bugs each time.
 
 ## Boundary
 
-Camus is for code you already trust. The verifier executes the repo's own build and
+[Camus](https://github.com/mateodaza/camus) is for code you already trust. The verifier executes the repo's own build and
 test commands; on an untrusted repo that is remote code execution. Never run it as
-root. Camus may improve itself only through tasks that pass its own gates. It never
+root. [Camus](https://github.com/mateodaza/camus) may improve itself only through tasks that pass its own gates. It never
 touches its runner, skill, verifier, schemas, or permissions during a run.

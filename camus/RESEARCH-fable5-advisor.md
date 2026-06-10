@@ -1,6 +1,6 @@
 # RESEARCH — Fable 5, the Advisor tool, Managed Agents & nested subagents
 
-**Date:** 2026-06-09 · **Scope:** verify the June-2026 Anthropic release and decide what (if anything) Camus v2-lite should adopt.
+**Date:** 2026-06-09 · **Scope:** verify the June-2026 Anthropic release and decide what (if anything) [Camus v2-lite](https://github.com/mateodaza/camus) should adopt.
 **Method:** every factual claim below is sourced from a primary Anthropic page (anthropic.com / docs.claude.com / code.claude.com), fetched directly, not from the requester's paraphrase. Where a claim could **not** be verified against a primary source, it is flagged explicitly.
 
 ---
@@ -8,7 +8,7 @@
 ## TL;DR (decision-oriented)
 
 1. **Fable 5 is real**, GA on June 9 2026, **$10/M in · $50/M out**. It **is usable from interactive Claude Code** (`/model fable`) and inside dynamic workflows — but **only free on subscription plans through June 22**; from **June 23** it requires usage credits (metered) until capacity allows it back into subscriptions. So for the cost-sensitive loop, Fable is a *temporary* free window, not a durable free substrate.
-2. **The "advisor tool" is real, first-party, and shipped** (Claude Code v2.1.98+). It is a **server-side tool available to BOTH subscription and API-billed accounts** — i.e. it works under the interactive/subscription substrate, which is exactly the billing surface Camus lives on. This is the single most relevant finding.
+2. **The "advisor tool" is real, first-party, and shipped** (Claude Code v2.1.98+). It is a **server-side tool available to BOTH subscription and API-billed accounts** — i.e. it works under the interactive/subscription substrate, which is exactly the billing surface [Camus](https://github.com/mateodaza/camus) lives on. This is the single most relevant finding.
 3. **Managed Agents is real but it is an API/Claude-Platform hosted service** — it bills through the Claude Platform (metered), and the advisor/decoupling patterns it documents are the value, not the runtime. **Do not migrate the feat-runner onto it.**
 4. **Nested subagents depth=5 is NOT confirmed in official docs.** The current published Claude Code docs still state plainly and repeatedly that *"Subagents cannot spawn other subagents."* The depth=5 claim traces only to a third-party blog (Digg) summarizing a Boris Cherny post and to community repos — **treat as unconfirmed / possibly experimental or unreleased.** Design as if flat (depth-1) subagents are the contract.
 5. **Recommendation:** Adopt the **first-party advisor tool as an additive checkpoint *alongside* Codex, not instead of it.** Keep the hand-rolled interactive feat-runner (it is the cost moat). Borrow Managed-Agents *patterns* (brain/hands/session decoupling) only opportunistically. Do **not** build anything on nested subagents until it appears in docs.
@@ -29,7 +29,7 @@
 - **Subscription (Pro/Max/Team/seat Enterprise): free Jun 9 → Jun 22 only.** On **Jun 23** Anthropic removes Fable from those plans; using it after that **requires usage credits** (= metered spend on top of subscription). They intend to restore it as a standard subscription model "as quickly as we can" but give no date.
 - **Inside interactive Claude Code / dynamic workflows:** YES — Fable is selectable with `/model fable` or the `best` alias, requires Claude Code **v2.1.170+**, and is *not* the default on any plan ([model-config](https://code.claude.com/docs/en/model-config) → "Work with Fable 5"). On the API, Fable always runs with the 1M context window. Not available under zero-data-retention.
 
-**Implication for Camus:** Fable is interactive-usable, but for a cost-anchored loop it is **not** a free substrate after Jun 22. The right posture is: keep Opus as the top tier of the router; treat Fable as an *optional, manually-triggered* escalation for genuinely long-horizon tasks during the free window, and re-evaluate after Jun 23 when the metering boundary bites. It is **not** a default-model candidate.
+**Implication for [Camus](https://github.com/mateodaza/camus):** Fable is interactive-usable, but for a cost-anchored loop it is **not** a free substrate after Jun 22. The right posture is: keep Opus as the top tier of the router; treat Fable as an *optional, manually-triggered* escalation for genuinely long-horizon tasks during the free window, and re-evaluate after Jun 23 when the metering boundary bites. It is **not** a default-model candidate.
 
 ---
 
@@ -49,7 +49,7 @@ This is the headline finding. The advisor is a **shipped, documented, first-part
 > "The advisor runs server-side on Anthropic's infrastructure as a server tool, **available to both subscription and API-billed accounts.**"
 > "On subscription plans, advisor usage counts toward your plan's usage limits." (vs API billing, where advisor tokens are charged at the advisor model's input/output rates.)
 
-So **the advisor works under interactive Claude Code on a subscription** — it counts against your plan's usage limits (throttle-not-bill), it does **not** force you onto metered API credit. This is precisely Camus's billing surface.
+So **the advisor works under interactive Claude Code on a subscription** — it counts against your plan's usage limits (throttle-not-bill), it does **not** force you onto metered API credit. This is precisely [Camus](https://github.com/mateodaza/camus)'s billing surface.
 
 **How a worker invokes it:**
 
@@ -76,7 +76,7 @@ Plus: credential vault outside the sandbox (tokens never reachable from Claude's
 
 **Billing (the crux):** Managed Agents is a **Claude Platform / API product** — "a hosted service in the Claude Platform," with audit logs "in the Claude Console," set up via the platform docs. The page never positions it as a subscription/interactive feature; it is a **metered platform service.** Treat it as **API-billed.** (The page does not publish a price line; the unconfirmed point is only the exact rate, not the billing surface.)
 
-**Implication:** Managed Agents solves *Anthropic's* problem of shipping a durable harness as a product. It is the **wrong runtime for Camus's cost model** — moving the loop onto it means metered spend, which is the thing the project explicitly avoids. Its *ideas* (session-log-as-external-context, brain/hands decoupling, output-spill) are worth borrowing into the hand-rolled feat-runner; its *runtime* is not.
+**Implication:** Managed Agents solves *Anthropic's* problem of shipping a durable harness as a product. It is the **wrong runtime for [Camus](https://github.com/mateodaza/camus)'s cost model** — moving the loop onto it means metered spend, which is the thing the project explicitly avoids. Its *ideas* (session-log-as-external-context, brain/hands decoupling, output-spill) are worth borrowing into the hand-rolled feat-runner; its *runtime* is not.
 
 ---
 
@@ -90,11 +90,11 @@ Plus: credential vault outside the sandbox (tokens never reachable from Claude's
 
 **What I could NOT verify:** the "nested subagents, depth=5, landed Jun 9 2026" claim appears **only** in a third-party Digg article summarizing a Boris Cherny post and in community repos (e.g. `gruckion/nested-subagent`, a `ruvnet/ruflo` issue). **No anthropic.com / code.claude.com page confirms it.** It is plausibly real-but-experimental (the published docs lag, and forks/agent-teams gate behind env vars like `CLAUDE_CODE_FORK_SUBAGENT` and `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`), but **I will not assert it as fact.**
 
-**Constraint for a feat→loop→reviewer/implementer (~3 deep) nesting:** under the *documented* contract, you **cannot** nest subagents at all — the main session spawns subagents, and those are leaf nodes. The documented ways to get multi-level structure are: (a) **chain** subagents from the main conversation, (b) **Skills** (run in main context), (c) **agent teams** (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, each teammate independent context), or (d) **forks** (inherit full context, but a fork can't fork). Camus's current shape — a **workflow** (`camus-feat` → `camus-loop`) that calls **phase agents** (classify/plan/implement/review-runner/verify-runner) — is workflow-orchestrated, not subagent-nested, so **it is unaffected by the subagent depth limit either way.** If depth=5 does ship, it would let a phase agent (e.g. implementer) spawn its own helper without returning to the orchestrator — a nice-to-have, not a blocker. **Do not design on it yet.**
+**Constraint for a feat→loop→reviewer/implementer (~3 deep) nesting:** under the *documented* contract, you **cannot** nest subagents at all — the main session spawns subagents, and those are leaf nodes. The documented ways to get multi-level structure are: (a) **chain** subagents from the main conversation, (b) **Skills** (run in main context), (c) **agent teams** (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, each teammate independent context), or (d) **forks** (inherit full context, but a fork can't fork). [Camus](https://github.com/mateodaza/camus)'s current shape — a **workflow** (`camus-feat` → `camus-loop`) that calls **phase agents** (classify/plan/implement/review-runner/verify-runner) — is workflow-orchestrated, not subagent-nested, so **it is unaffected by the subagent depth limit either way.** If depth=5 does ship, it would let a phase agent (e.g. implementer) spawn its own helper without returning to the orchestrator — a nice-to-have, not a blocker. **Do not design on it yet.**
 
 ---
 
-## 5. Analysis for Camus
+## 5. Analysis for [Camus](https://github.com/mateodaza/camus)
 
 ### Current architecture (ground truth, from `camus/workflows/camus-loop.workflow.js`)
 
@@ -103,7 +103,7 @@ Plus: credential vault outside the sandbox (tokens never reachable from Claude's
 - **Runners** (review-runner, verify-runner) are **Haiku** — they only exec a script and echo JSON; *judgment lives in Codex (review) and `verify.sh` exit code.*
 - **Codex (gpt-5.x)** is the **strict external reviewer**, normalized to a gate contract (`findings[]` P0–P3 + verdict) via `adapter.py`. `ROUND_CAP=3` review↔fix rounds.
 
-So Camus **already implements the advisor *strategy*** — cheap implementer, stronger judgment at the gate — but its "stronger judge" is **cross-vendor Codex**, invoked **deterministically at a fixed phase** (always, after implement), not model-triggered mid-task.
+So [Camus](https://github.com/mateodaza/camus) **already implements the advisor *strategy*** — cheap implementer, stronger judgment at the gate — but its "stronger judge" is **cross-vendor Codex**, invoked **deterministically at a fixed phase** (always, after implement), not model-triggered mid-task.
 
 ### (a) Advisor vs Codex-reviewer + planned reviewer-persistence escalation
 
@@ -128,14 +128,14 @@ These are **complementary, not competing**, because they sit at different points
 
 **No. Keep the hand-rolled interactive feat-runner; borrow patterns, not the runtime.**
 
-- The **entire cost thesis of Camus is the interactive/subscription substrate** (throttle-not-bill before the Jun-15 metering boundary). **Managed Agents is a metered Claude Platform service.** Migrating the feat-runner onto it would convert the loop's spend from "subscription usage limits" to "API credit" — i.e. it would *cause* the exact failure mode ("don't die by costs") the project is built to avoid. That alone settles it.
-- The feat-runner's value is **the standard that keeps it honest** (Codex gate, verify exit-code, freeze-checked install, infra-vs-findings guard) — none of that is what Managed Agents provides; MA provides *durable session/sandbox plumbing*, which Camus already approximates with git worktrees + a `job_runs`-style ledger + the v2-lite skill contract.
+- The **entire cost thesis of [Camus](https://github.com/mateodaza/camus) is the interactive/subscription substrate** (throttle-not-bill before the Jun-15 metering boundary). **Managed Agents is a metered Claude Platform service.** Migrating the feat-runner onto it would convert the loop's spend from "subscription usage limits" to "API credit" — i.e. it would *cause* the exact failure mode ("don't die by costs") the project is built to avoid. That alone settles it.
+- The feat-runner's value is **the standard that keeps it honest** (Codex gate, verify exit-code, freeze-checked install, infra-vs-findings guard) — none of that is what Managed Agents provides; MA provides *durable session/sandbox plumbing*, which [Camus](https://github.com/mateodaza/camus) already approximates with git worktrees + a `job_runs`-style ledger + the v2-lite skill contract.
 - **What to borrow from Managed Agents (patterns only):**
-  - *Session-log-as-external-context* (`getEvents()` slicing): Camus already leans on durable artifacts/journals; the MA framing ("context is an object you slice, not a window you compact") is a good north star for the v2-lite journal design — keep raw events recoverable rather than compacting irreversibly.
+  - *Session-log-as-external-context* (`getEvents()` slicing): [Camus](https://github.com/mateodaza/camus) already leans on durable artifacts/journals; the MA framing ("context is an object you slice, not a window you compact") is a good north star for the v2-lite journal design — keep raw events recoverable rather than compacting irreversibly.
   - *Output-spill of >100K-token tool results to a file with a truncated preview*: cheap, high-value to replicate in the loop's runners so a huge test log never blows the context window.
   - *Brain/hands decoupling + credential-vault-outside-sandbox*: aligns with the existing auto-mode egress-classifier posture; reinforces "tokens/secrets never reachable from generated code."
 
-**Bottom line:** the **substrate stays hand-rolled and interactive** (cost moat); the **advisor tool is the one first-party feature worth wiring in now** because it's the rare new capability that runs *on subscription billing* and maps cleanly onto Camus's "cheap implementer + strong judgment" thesis — as an **additive planning/stuck-point checkpoint** that complements, and never replaces, the cross-vendor Codex gate. Fable is a manual-escalation option during the free window only. Nested subagents are not yet a thing to build on.
+**Bottom line:** the **substrate stays hand-rolled and interactive** (cost moat); the **advisor tool is the one first-party feature worth wiring in now** because it's the rare new capability that runs *on subscription billing* and maps cleanly onto [Camus](https://github.com/mateodaza/camus)'s "cheap implementer + strong judgment" thesis — as an **additive planning/stuck-point checkpoint** that complements, and never replaces, the cross-vendor Codex gate. Fable is a manual-escalation option during the free window only. Nested subagents are not yet a thing to build on.
 
 ---
 

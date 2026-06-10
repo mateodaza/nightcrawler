@@ -1,10 +1,10 @@
-# Camus — brand
+# [Camus](https://github.com/mateodaza/camus) — brand
 
 Minimal but forceful. Elegant while contemporary. Like the man.
 
 ## Essence
 
-Camus is a tool that refuses to flatter itself: the loop works, the gates doubt it,
+[Camus](https://github.com/mateodaza/camus) is a tool that refuses to flatter itself: the loop works, the gates doubt it,
 the tests decide. The brand carries that same posture — high contrast, no ornament,
 nothing that needs to raise its voice. The visual language is borrowed from mid-century
 literary modernism (the Vintage International cover grammar: half-square triangles,
@@ -59,7 +59,7 @@ Declarative sentences. Short ones. No exclamation marks, no emoji, no "blazingly
 Claims are verifiable or absent: say "159 assertions, 9 suites," not "battle-tested."
 The product admits its limits in the same breath as its strengths ("trusted-code tool
 only") — honesty IS the differentiator, in copy as in architecture. Philosophy is
-seasoning, not the meal: one Camus reference per surface, carried by the work, never
+seasoning, not the meal: one [Camus](https://github.com/mateodaza/camus) reference per surface, carried by the work, never
 winking.
 
 ## Provenance note

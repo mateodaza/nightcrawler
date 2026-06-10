@@ -2,7 +2,7 @@
 
 Autonomous coding agent that executes your backlog overnight. You define the tasks, it plans, implements, reviews, and commits — unsupervised.
 
-> **Successor: [Camus](camus/README.md)** — Nightcrawler's judgment layer ported onto Claude Code dynamic workflows, with a cross-vendor Codex review gate, zero-click auto mode, an HITL policy dial, and a full audit trail. This v1 bash orchestrator is kept as portfolio/OSS; new work happens in [`camus/`](camus/) (design: [`CAMUS-SPEC.md`](CAMUS-SPEC.md)).
+> **Successor: [Camus](https://github.com/mateodaza/camus)** — Nightcrawler's judgment layer ported onto Claude Code dynamic workflows, with a cross-vendor Codex review gate, zero-click auto mode, an HITL policy dial, and a full audit trail. This v1 bash orchestrator is kept as portfolio/OSS; new work happens in [mateodaza/camus](https://github.com/mateodaza/camus) (design: [`CAMUS-SPEC.md`](CAMUS-SPEC.md)).
 
 > **If you've used Claude Code's [`/loop`](https://code.claude.com/docs/en/scheduled-tasks) and want to go further:** `/loop` polls a deploy or babysits a PR inside a single session. Nightcrawler runs a full pipeline — plan → independent audit → implement → independent review → commit → verify — across your entire backlog, unattended, overnight. Different scope, same intuition: your codebase should move while you sleep.
 

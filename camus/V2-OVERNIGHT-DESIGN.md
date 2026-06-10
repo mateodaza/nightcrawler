@@ -1,4 +1,4 @@
-# Camus v2-overnight — Feat-Runner Design
+# [Camus v2-overnight](https://github.com/mateodaza/camus) — Feat-Runner Design
 
 **Status:** Draft for review · **Date:** 2026-06-08 · Depends on: v2-lite (proven 2026-06-08)
 **Goal:** hand it a *feature* (a unit of work too big for one task), walk away, check one report at the end.
@@ -175,7 +175,7 @@ candidate must:
   detector missed the monorepo's test script", "Codex flagged schema drift on `priority` three times",
   "review false-positived on generated files."* No evidence → no candidate.
 
-**Improvements to Camus itself go through Camus's own gate** — tests + Codex review +
+**Improvements to [Camus](https://github.com/mateodaza/camus) itself go through [Camus](https://github.com/mateodaza/camus)'s own gate** — tests + Codex review +
 deterministic verify. The system improves itself only through the same closed loop it runs on everything
 else. (This whole session *was* that loop, run by hand: Codex caught the schema-strictness 400, the
 `verdict`/`status` mismatch, and the `Math.random` resume break — each fixed under test + review. The retro
@@ -183,7 +183,7 @@ loop just formalizes it.)
 
 ### Hard rule — no self-mutation while driving
 
-> Camus may **learn** from reports, but it may **not mutate its own runner, skill, verifier, schemas,
+> [Camus](https://github.com/mateodaza/camus) may **learn** from reports, but it may **not mutate its own runner, skill, verifier, schemas,
 > or permission rules during a feat run.** It can only **propose improvement tasks for a later, explicit
 > maintenance run.**
 
