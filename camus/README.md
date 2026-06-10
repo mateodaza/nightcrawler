@@ -115,7 +115,7 @@ report lands in `~/.camus/reports/<featId>.json`. The branch is left for you to 
 
 ## Tests
 
-Pure stdlib, no network, no dependencies. 159 assertions across 9 suites:
+Pure stdlib, no network, no dependencies. 163 assertions across 9 suites:
 
 ```bash
 npm test    # or run the suites individually under skills/camus/scripts/
