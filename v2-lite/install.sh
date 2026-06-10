@@ -64,6 +64,9 @@ if [[ "${1:-}" == "--auto-setup" ]]; then
   echo "  export NC_REPO_ROOT=\"\$(pwd -P)\"  # REQUIRED: cd-immutable trust anchor for the target guard"
   echo "  export NC_VERIFY_CMD='<type-check && test>'   # include TESTS, not just type-check"
   echo "  claude --permission-mode auto   # then invoke the nightcrawler-feat workflow"
+  echo "  (optional) inside the session run  /advisor  (pick Opus) — gives the cheap think-model a"
+  echo "  stronger second opinion at plan/stuck points. Session-wide + automatic; soft helper, NEVER"
+  echo "  a gate (Codex review + verify stay authoritative). Counts against your subscription limits."
   echo
   echo "Safety: never as root; auto mode auto-approves local edits + declared dep installs, but"
   echo "the classifier still blocks destructive / out-of-repo actions and honors 'don't push'."
