@@ -28,11 +28,23 @@ _nc_common_dir() { git -C "$1" rev-parse --path-format=absolute --git-common-dir
 
 nc_guard() {
   local mode="$1" target="$2"
-  local anchor caller_common target_abs target_common branch base suffix
+  local anchor caller_common pwd_common target_abs target_common branch base suffix
   anchor="${NC_REPO_ROOT:-$PWD}"
   caller_common="$(_nc_common_dir "$anchor")" || true
   if [ -z "$caller_common" ]; then
     echo "nc_guard: trust anchor ($anchor) is not inside a git repo" >&2; return 1
+  fi
+  # Defense in depth (does NOT rely on the permission matcher): when an explicit NC_REPO_ROOT is set
+  # (auto runs), the ACTUAL $PWD must also be inside that same repo. An inline
+  # `NC_REPO_ROOT=/other <script> /other/...` override then still fails, because the real cwd points
+  # at the true repo — both the env anchor AND the cwd must agree on the repo. Manual runs (no
+  # NC_REPO_ROOT) skip this: $PWD already IS the anchor. ($PWD = repo root or any of its worktrees,
+  # which share the same git common-dir, so legitimate gate-script calls pass.)
+  if [ -n "${NC_REPO_ROOT:-}" ]; then
+    pwd_common="$(_nc_common_dir "$PWD")" || true
+    if [ "$pwd_common" != "$caller_common" ]; then
+      echo "nc_guard: \$PWD ($PWD) is not in the trusted repo NC_REPO_ROOT=$NC_REPO_ROOT" >&2; return 1
+    fi
   fi
   target_abs="$(cd "$target" 2>/dev/null && pwd -P)" || {
     echo "nc_guard: target is not a directory ($target)" >&2; return 1; }
