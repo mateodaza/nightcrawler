@@ -180,19 +180,25 @@ const planOf = (clarity, question = 'Q', interpretations = []) =>
   // F5: loop telemetry (tier/model/rounds/planSkipped) surfaced into the report per task.
   {
     const { res } = await runFeat({ feat: 'F', tasks: ['only task'] }, featBase,
-      [{ status: 'done', branch: 'nc/feat/x/only', decisions: [], tier: 'standard', model: 'opus', rounds: 2, planSkipped: false }])
+      [{ status: 'done', branch: 'nc/feat/x/only', decisions: [], tier: 'trivial', model: 'opus', rounds: 2,
+         planSkipped: false, initialModel: 'sonnet', finalFixModel: 'opus', escalated: true }])
     const t = res && res.tasks && res.tasks[0]
-    ok('F5 tier in report', !!t && t.tier === 'standard')
+    ok('F5 tier in report', !!t && t.tier === 'trivial')
     ok('F5 model in report', !!t && t.model === 'opus')
     ok('F5 rounds in report', !!t && t.rounds === 2)
     ok('F5 planSkipped in report', !!t && t.planSkipped === false)
+    // P3: a Sonnet→Opus escalation must be visible in the report
+    ok('F5 initialModel in report', !!t && t.initialModel === 'sonnet')
+    ok('F5 finalFixModel in report', !!t && t.finalFixModel === 'opus')
+    ok('F5 escalated in report', !!t && t.escalated === true)
   }
   {
     // Telemetry is OPTIONAL — a loop result omitting it must not emit the keys (graceful).
     const { res } = await runFeat({ feat: 'F', tasks: ['only task'] }, featBase,
       [{ status: 'done', branch: 'nc/feat/x/only', decisions: [] }])
     const t = res && res.tasks && res.tasks[0]
-    ok('F5 no telemetry keys when absent', !!t && !('tier' in t) && !('model' in t) && !('rounds' in t) && !('planSkipped' in t))
+    ok('F5 no telemetry keys when absent', !!t && !('tier' in t) && !('model' in t) && !('rounds' in t)
+      && !('planSkipped' in t) && !('initialModel' in t) && !('escalated' in t))
   }
   // F6: persisted state carries the feat TITLE (load-bearing for auto-resume arg reconstruction).
   {

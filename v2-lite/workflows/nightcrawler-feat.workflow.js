@@ -227,6 +227,9 @@ async function finalize(status, extra = {}) {
       ...(t.model != null ? { model: t.model } : {}),
       ...(t.rounds != null ? { rounds: t.rounds } : {}),
       ...(t.planSkipped != null ? { planSkipped: t.planSkipped } : {}),
+      ...(t.initialModel != null ? { initialModel: t.initialModel } : {}),
+      ...(t.finalFixModel != null ? { finalFixModel: t.finalFixModel } : {}),
+      ...(t.escalated != null ? { escalated: t.escalated } : {}),
       ...(t.question ? { question: t.question, clarity: t.clarity || '' } : {}),
     })),
     // Feat-level rollup of every decision the loop logged across tasks — the human's merge-time
@@ -464,6 +467,10 @@ Return {merged, committed, alreadyUpToDate, before, after, conflict, error}.`,
   if (res.model != null) node.model = res.model
   if (res.rounds != null) node.rounds = res.rounds
   if (res.planSkipped != null) node.planSkipped = res.planSkipped
+  // P3 escalation telemetry — surfaced so a Sonnet→Opus bump is visible in the report at merge time.
+  if (res.initialModel != null) node.initialModel = res.initialModel
+  if (res.finalFixModel != null) node.finalFixModel = res.finalFixModel
+  if (res.escalated != null) node.escalated = res.escalated
   await persistState('Tasks')
   const tele = [
     node.model != null ? `model ${node.model}` : null,
