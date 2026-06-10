@@ -13,9 +13,9 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"           # .../v2-lite
 SKILL_SRC="$here/skills/nightcrawler"
-WF_SRC="$here/workflows/nightcrawler-loop.workflow.js"
+WF_DIR_SRC="$here/workflows"
 SKILL_DST="$HOME/.claude/skills/nightcrawler"
-WF_DST="$HOME/.claude/workflows/nightcrawler-loop.workflow.js"
+WF_DIR_DST="$HOME/.claude/workflows"
 
 # Ignore Python/pytest caches — they're build artifacts, not part of the gate.
 EXCL=(--exclude=__pycache__ --exclude=.pytest_cache --exclude='pytest-cache-files-*' --exclude='*.pyc')
@@ -27,11 +27,18 @@ check() {
   else
     echo "DRIFT: skill differs from source (or not installed)"; drift=1
   fi
-  if diff -q "$WF_SRC" "$WF_DST" >/dev/null 2>&1; then
-    echo "ok:    workflow in sync"
-  else
-    echo "DRIFT: workflow differs from source (or not installed)"; drift=1
-  fi
+  # Cover EVERY workflow in the source dir. (Root cause of the 2026-06-09 drift: only the loop
+  # workflow was hardcoded here, so nightcrawler-feat.workflow.js was never installed OR checked —
+  # --check falsely reported "in sync" while the feat orchestration had drifted. Auto-discover so a
+  # newly added workflow can never be silently missed again.)
+  for src in "$WF_DIR_SRC"/*.workflow.js; do
+    local wf; wf="$(basename "$src")"
+    if diff -q "$src" "$WF_DIR_DST/$wf" >/dev/null 2>&1; then
+      echo "ok:    workflow $wf in sync"
+    else
+      echo "DRIFT: workflow $wf differs from source (or not installed)"; drift=1
+    fi
+  done
   return $drift
 }
 
@@ -83,10 +90,12 @@ rm -rf "$SKILL_DST"
 cp -r "$SKILL_SRC" "$SKILL_DST"
 # prune copied caches so the installed gate is clean
 find "$SKILL_DST" -type d \( -name __pycache__ -o -name '.pytest_cache' -o -name 'pytest-cache-files-*' \) -prune -exec rm -rf {} + 2>/dev/null || true
-cp "$WF_SRC" "$WF_DST"
+for src in "$WF_DIR_SRC"/*.workflow.js; do
+  cp "$src" "$WF_DIR_DST/$(basename "$src")"
+done
 
-echo "installed skill    -> $SKILL_DST"
-echo "installed workflow -> $WF_DST"
+echo "installed skill     -> $SKILL_DST"
+echo "installed workflows -> $WF_DIR_DST/ ($(cd "$WF_DIR_SRC" && ls *.workflow.js | tr '\n' ' '))"
 echo
 echo "freeze-check (shasum of installed gate scripts):"
 shasum "$SKILL_DST"/scripts/*.py "$SKILL_DST"/scripts/*.sh
