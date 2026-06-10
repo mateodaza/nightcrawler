@@ -319,7 +319,7 @@ function reviewerPrompt(attempt) {
 the worktree and return its stdout. Do NOT interpret, summarize, re-judge, or reformat.
 
 ${backoff}Run EXACTLY this one command (the worktree path is the argument — do NOT cd, do NOT add anything else):
-  ${REVIEW_CMD} ${JSON.stringify(WT)} ${JSON.stringify(TASK)}
+  ${REVIEW_CMD} ${JSON.stringify(WT)} ${JSON.stringify(TASK)} ${round}
 
 Output the command's stdout VERBATIM as your entire reply — nothing before or after, no code
 fences, no commentary. It is already JSON.`
@@ -331,12 +331,13 @@ let lastBlocking = []
 let infraAbort = null
 
 // FEATURE 1b — REVIEWER-PERSISTENCE ESCALATION: when the cheap model keeps failing Codex review,
-// bump the FIX agent to 'opus'. Trigger: round >= 2 (the first fix didn't clear review) OR any
-// current blocking finding has priority 0. Monotonic — once escalated, stay escalated. Since
-// standard/complex already start on opus, this only ever lifts trivial→opus. Deterministic
+// bump the FIX agent to the top routed model (TIER_MODEL.complex). Trigger: round >= 2 (the first
+// fix didn't clear review) OR any current blocking finding has priority 0. Monotonic. Only lifts
+// trivial→opus (standard/complex already start there). If the caller PINNED an exact model via
+// args.model we NEVER downgrade it — the pin may outrank opus (e.g. 'fable'). Deterministic
 // (round + finding-priority based; no Date/random).
 let fixModel = thinkModel
-let escalated = false
+let escalationFired = false
 
 while (round < ROUND_CAP) {
   round++
@@ -370,12 +371,18 @@ while (round < ROUND_CAP) {
   log(`Round ${round}: ${lastBlocking.length} blocking finding(s) — dispatching fix.`)
   // Escalate the FIX model if the cheap model is failing: round>=2 (first fix didn't clear review)
   // OR a priority-0 blocking finding is present. Monotonic, deterministic.
-  if (!escalated && (round >= 2 || lastBlocking.some(b => b && b.priority === 0))) {
-    escalated = true
-    fixModel = 'opus'
+  if (!escalationFired && (round >= 2 || lastBlocking.some(b => b && b.priority === 0))) {
+    escalationFired = true
     const why = round >= 2 ? `round ${round} (prior fix did not clear review)` : 'a priority-0 blocking finding'
-    if (fixModel !== thinkModel) log(`Escalating FIX model ${thinkModel} → ${fixModel} due to ${why}.`)
-    else log(`Escalation triggered by ${why} (already on ${fixModel}).`)
+    if (MODEL_OVERRIDE) {
+      // Caller pinned an exact model — respect it, NEVER downgrade (it may outrank opus, e.g. 'fable').
+      log(`Escalation triggered by ${why}, but model is pinned via args.model ("${MODEL_OVERRIDE}") — keeping it (no downgrade).`)
+    } else if (TIER_MODEL.complex !== fixModel) {
+      log(`Escalating FIX model ${fixModel} → ${TIER_MODEL.complex} due to ${why}.`)
+      fixModel = TIER_MODEL.complex
+    } else {
+      log(`Escalation triggered by ${why} (already on ${fixModel}).`)
+    }
   }
   await agent(
     `Fix the BLOCKING review findings below, in the EXISTING worktree. Do not refactor
@@ -482,7 +489,7 @@ if (verify.pass === true) {
   return {
     status: 'done', task: TASK, worktree: WT, branch: BRANCH, commit_sha: COMMIT_SHA,
     rounds: round, summary: impl.summary, decisions: Array.isArray(impl.decisions) ? impl.decisions : [],
-    tier, model: fixModel, planSkipped,
+    tier, model: fixModel, initialModel: thinkModel, finalFixModel: fixModel, escalated: fixModel !== thinkModel, planSkipped,
     note: 'Review clean, change committed, and verify passed. Worktree left in place for human merge/inspection.',
   }
 }
@@ -493,13 +500,13 @@ if (verify.pass === true) {
 if (verify.inconclusive) {
   return {
     status: 'verify_inconclusive', task: TASK, worktree: WT, branch: BRANCH,
-    rounds: round, failures: verify.failures || [], tier, model: fixModel, planSkipped,
+    rounds: round, failures: verify.failures || [], tier, model: fixModel, initialModel: thinkModel, finalFixModel: fixModel, escalated: fixModel !== thinkModel, planSkipped,
     note: 'Verification could not RUN (toolchain/deps missing in the worktree, or no verifier detected) — NOT a code failure. Fix the environment (install deps / correct node; see env_check) and re-run.',
   }
 }
 
 return {
   status: 'verify_failed', task: TASK, worktree: WT, branch: BRANCH,
-  rounds: round, failures: verify.failures || [], tier, model: fixModel, planSkipped,
+  rounds: round, failures: verify.failures || [], tier, model: fixModel, initialModel: thinkModel, finalFixModel: fixModel, escalated: fixModel !== thinkModel, planSkipped,
   note: 'Review was clean but deterministic verify ran and did not pass. Code is NOT done.',
 }

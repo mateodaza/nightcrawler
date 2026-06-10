@@ -3,7 +3,9 @@
     python3 test_resume_scan.py      # stdlib runner (bottom)
     python3 -m pytest -q
 
-No real ~/.nightcrawler is touched — every test writes feat-state files into a temp dir.
+Covers: only a STALE running feat with canonical resumeArgs is resumable; a FRESH running feat is
+not (still live); every terminal status is excluded; old-format / malformed-task states are
+rejected whole; the emitted entry reproduces the full original args + featId.
 """
 import json
 import os
@@ -12,129 +14,133 @@ import tempfile
 
 import resume_scan as R
 
-
-def _feats_dir(files):
-    """Create a temp feats dir; `files` maps filename -> raw file contents (string)."""
-    d = tempfile.mkdtemp(prefix="nc_resume_")
-    for name, contents in files.items():
-        with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
-            fh.write(contents)
-    return d
+FRESH = 10        # seconds idle — younger than the stale threshold (still live)
+STALE = 9999      # seconds idle — older than the threshold (interrupted)
+THRESH = 1800
 
 
-def _state(status, *, feat="My Feat", feat_id="my-feat-abc123",
-           tasks=(("do a", "a-1"), ("do b", "b-2")), base="main"):
-    """Build a minimal feat-state JSON string like nightcrawler-feat persists."""
-    return json.dumps({
-        "featId": feat_id,
-        "feat": feat,
-        "featBranch": "nc/feat-" + feat_id,
-        "base": base,
-        "tasks": [{"taskId": tid, "spec": spec, "status": "pending"} for spec, tid in tasks],
-        "status": status,
-    })
+def running_state(tasks=None, **arg_extra):
+    t = tasks if tasks is not None else ["task a", "task b"]
+    args = {"argsVersion": 1, "feat": "My Feat", "tasks": t, "policy": "ask_on_ambiguity"}
+    args.update(arg_extra)
+    return {"status": "running", "featId": "my-feat-abc123", "resumeArgs": args,
+            "tasks": [{"spec": s} for s in t if isinstance(s, str)]}
 
 
-# --- a running feat is returned -------------------------------------------
+# --- the SAFE rule -----------------------------------------------------------
 
-def test_running_feat_is_resumable():
-    d = _feats_dir({"f.json": _state("running")})
-    out = R.scan(d)
-    assert len(out) == 1
-    assert out[0]["featId"] == "my-feat-abc123"
-    assert out[0]["feat"] == "My Feat"
-    assert out[0]["tasks"] == ["do a", "do b"]   # SPEC strings, ready to feed back as args.tasks
-    assert out[0]["base"] == "main"
+def test_stale_running_is_resumable():
+    e = R.resumable_entry(running_state(), STALE, THRESH)
+    assert e is not None and e["feat"] == "My Feat" and e["tasks"] == ["task a", "task b"]
 
 
-def test_running_feat_carries_title_for_arg_reconstruction():
-    # The title is the load-bearing field — featId is a one-way hash, so resume needs `feat`.
-    d = _feats_dir({"f.json": _state("running", feat="Ship the widget")})
-    assert R.scan(d)[0]["feat"] == "Ship the widget"
+def test_fresh_running_is_NOT_resumable():
+    # a live run keeps touching its file → must not be restarted (would collide on branch/worktree)
+    assert R.resumable_entry(running_state(), FRESH, THRESH) is None
 
 
-# --- every terminal status is excluded ------------------------------------
-
-def test_each_terminal_status_excluded():
-    for status in R.TERMINAL_STATUSES:
-        d = _feats_dir({"f.json": _state(status)})
-        assert R.scan(d) == [], "expected %s to be NON-resumable" % status
+def test_unknown_age_is_NOT_resumable():
+    assert R.resumable_entry(running_state(), None, THRESH) is None
 
 
-def test_done_not_resumable():
-    d = _feats_dir({"f.json": _state("done")})
-    assert R.scan(d) == []
+def test_every_terminal_status_excluded():
+    for st in R.TERMINAL_STATUSES:
+        s = running_state()
+        s["status"] = st
+        assert R.resumable_entry(s, STALE, THRESH) is None, st
 
 
-def test_needs_human_not_resumable():
-    # needs_human is a deliberate pause — resuming requires an answers map, never a blind re-invoke.
-    d = _feats_dir({"f.json": _state("needs_human")})
-    assert R.scan(d) == []
+# --- P1: canonical resumeArgs required + reproduced ---------------------------
+
+def test_missing_resumeArgs_skipped():
+    s = running_state()
+    del s["resumeArgs"]
+    assert R.resumable_entry(s, STALE, THRESH) is None
 
 
-def test_unknown_status_not_resumable():
-    # Defensive: only the exact "running" string is safe; any other value is excluded.
-    d = _feats_dir({"f.json": _state("paused_somehow")})
-    assert R.scan(d) == []
+def test_wrong_argsVersion_skipped():
+    s = running_state()
+    s["resumeArgs"]["argsVersion"] = 2
+    assert R.resumable_entry(s, STALE, THRESH) is None
 
 
-# --- malformed / empty files are skipped ----------------------------------
-
-def test_empty_file_skipped():
-    d = _feats_dir({"f.json": ""})
-    assert R.scan(d) == []
-
-
-def test_malformed_json_skipped():
-    d = _feats_dir({"f.json": "{ not valid json"})
-    assert R.scan(d) == []
-
-
-def test_non_object_json_skipped():
-    d = _feats_dir({"f.json": "[1, 2, 3]"})
-    assert R.scan(d) == []
+def test_entry_reproduces_full_args():
+    s = running_state(model="fable", modelTier="complex", skipPlan=True,
+                      policy="ask_on_major", answers={"t-1": "do X"})
+    s["resumeArgs"]["targetPath"] = "."
+    e = R.resumable_entry(s, STALE, THRESH)
+    assert e["policy"] == "ask_on_major"
+    assert e["model"] == "fable" and e["modelTier"] == "complex"
+    assert e["skipPlan"] is True and e["targetPath"] == "."
+    assert e["answers"] == {"t-1": "do X"}
+    assert e["featId"] == "my-feat-abc123"   # included for the scheduler, ignored by the runner
 
 
-def test_running_but_missing_title_skipped():
-    obj = json.loads(_state("running"))
-    del obj["feat"]
-    d = _feats_dir({"f.json": json.dumps(obj)})
-    assert R.scan(d) == []
+# --- P2b: malformed task list rejects the WHOLE state ------------------------
+
+def test_blank_or_nonstring_task_rejects_whole_state():
+    for bad in ([], ["ok", ""], ["ok", None], ["ok", 3], ["ok", "  "]):
+        s = running_state()
+        s["resumeArgs"]["tasks"] = bad
+        assert R.resumable_entry(s, STALE, THRESH) is None, bad
 
 
-def test_running_but_no_task_specs_skipped():
-    d = _feats_dir({"f.json": _state("running", tasks=())})
-    assert R.scan(d) == []
+def test_missing_feat_title_skipped():
+    s = running_state()
+    del s["resumeArgs"]["feat"]
+    assert R.resumable_entry(s, STALE, THRESH) is None
 
 
-def test_non_json_files_ignored():
-    d = _feats_dir({"f.json": _state("running"), "notes.txt": "ignore me", "x.json.bak": "junk"})
-    assert len(R.scan(d)) == 1
+# --- file reading / scan integration ----------------------------------------
+
+def _write(d, name, obj, age=None, now=None):
+    p = os.path.join(d, name)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(obj if isinstance(obj, str) else json.dumps(obj))
+    if age is not None:
+        t = (now if now is not None else 0) - age
+        os.utime(p, (t, t))
+    return p
 
 
-def test_missing_dir_returns_empty():
-    assert R.scan("/nonexistent/nc/feats/dir") == []
+def test_read_feat_handles_bad_files():
+    d = tempfile.mkdtemp(prefix="nc_rs_")
+    assert R._read_feat(os.path.join(d, "nope.json")) is None       # missing
+    assert R._read_feat(_write(d, "empty.json", "")) is None          # empty
+    assert R._read_feat(_write(d, "bad.json", "{not json")) is None   # malformed
+    assert R._read_feat(_write(d, "arr.json", "[1,2]")) is None       # not a dict
 
 
-# --- mixed corpus: only running feats survive -----------------------------
-
-def test_mixed_corpus_returns_only_running():
-    d = _feats_dir({
-        "run1.json": _state("running", feat_id="run1"),
-        "done1.json": _state("done", feat_id="done1"),
-        "halt1.json": _state("halted", feat_id="halt1"),
-        "run2.json": _state("running", feat_id="run2"),
-        "bad1.json": "{bad",
-    })
-    ids = sorted(e["featId"] for e in R.scan(d))
-    assert ids == ["run1", "run2"]
+def test_scan_returns_only_stale_running():
+    now = 1_000_000
+    d = tempfile.mkdtemp(prefix="nc_rs_")
+    _write(d, "stale-running.json", running_state(), age=STALE, now=now)
+    _write(d, "fresh-running.json", running_state(), age=FRESH, now=now)
+    done = running_state(); done["status"] = "done"
+    _write(d, "done.json", done, age=STALE, now=now)
+    _write(d, "junk.json", "{not json", age=STALE, now=now)
+    res = R.scan(d, now=now, stale_sec=THRESH)
+    assert len(res) == 1 and res[0]["feat"] == "My Feat"
 
 
-# --- stdlib runner ---------------------------------------------------------
+def test_scan_missing_dir_returns_empty():
+    assert R.scan("/no/such/dir", now=1, stale_sec=THRESH) == []
+
+
+def test_env_threshold_default():
+    os.environ.pop("NC_RESUME_STALE_SEC", None)
+    assert R.stale_seconds() == 1800
+    os.environ["NC_RESUME_STALE_SEC"] = "60"
+    try:
+        assert R.stale_seconds() == 60
+    finally:
+        os.environ.pop("NC_RESUME_STALE_SEC", None)
+
+
+# --- stdlib runner ----------------------------------------------------------
 
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items())
-             if k.startswith("test_") and callable(v)]
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
     for fn in tests:
         try:

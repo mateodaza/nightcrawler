@@ -101,11 +101,28 @@ const taskNodes = TASKS.map((spec) => {
   const { taskId, branch } = taskIdentity(spec)
   return { taskId, spec, dependsOn: [], status: 'pending', branch, loopStatus: null }
 })
+// CANONICAL RESUME ARGS (Codex P1): an auto-resumer must reproduce the EXACT original invocation,
+// not just feat+tasks — dropping targetPath/policy/model/modelTier/skipPlan/answers would silently
+// change the run's behavior (e.g. ask_on_major → ask_on_ambiguity, lost overrides, lost human
+// answers). Persist the full arg set verbatim; resume_scan.py emits this object unchanged. The
+// argsVersion lets a resumer reject states written by an older format.
+const resumeArgs = {
+  argsVersion: 1,
+  feat: FEAT,
+  tasks: TASKS,
+  policy: POLICY,
+  ...(TARGET ? { targetPath: TARGET } : {}),
+  ...(MODEL ? { model: MODEL } : {}),
+  ...(MODEL_TIER ? { modelTier: MODEL_TIER } : {}),
+  ...(SKIP_PLAN ? { skipPlan: true } : {}),
+  ...(Object.keys(ANSWERS).length ? { answers: ANSWERS } : {}),
+}
 const state = {
   // `feat` (the title) is persisted so a watchdog/resumer can reconstruct the original args from
   // state alone: featId is a one-way deterministic hash of FEAT+tasks, so without the title the
   // feat can't be re-invoked. resume_scan.py reads exactly this field. (Feature 1: auto-resume.)
   featId, feat: FEAT, featBranch, base: null,
+  resumeArgs,            // full canonical args for a faithful auto-resume (Codex P1)
   tasks: taskNodes,
   baseline: null, env: null, envRecheck: null, integration: null,
   status: 'running',
