@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Camus — the coding loop that can't grade its own homework</title>
+<meta name="description" content="Camus runs coding tasks through a closed loop: Claude implements, Codex reviews, deterministic verify gates. Cross-vendor honesty, zero-click autonomy, full audit trail.">
+<style>
+  :root{
+    --bg:#0c0d10; --panel:#13151a; --panel2:#191c23; --line:#262a33;
+    --txt:#e8e6e1; --dim:#9a97a0; --faint:#5e5b66;
+    --accent:#e0b25c; --green:#7fb78a; --red:#c96f6f; --blue:#7da3c4;
+    --mono:'SF Mono',ui-monospace,'Cascadia Code',Menlo,Consolas,monospace;
+    --serif:Georgia,'Times New Roman',serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--txt);font:16px/1.65 -apple-system,'Segoe UI',Roboto,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:880px;margin:0 auto;padding:0 24px}
+  /* hero */
+  header{padding:96px 0 64px;border-bottom:1px solid var(--line)}
+  .brand{font-family:var(--mono);font-size:13px;letter-spacing:.35em;color:var(--accent);text-transform:uppercase;margin-bottom:24px}
+  h1{font-family:var(--serif);font-size:clamp(34px,5.5vw,54px);font-weight:400;line-height:1.15;max-width:760px}
+  h1 em{font-style:italic;color:var(--accent)}
+  .sub{margin-top:22px;font-size:18px;color:var(--dim);max-width:640px}
+  .hero-cta{margin-top:36px;display:flex;gap:14px;flex-wrap:wrap}
+  .btn{font-family:var(--mono);font-size:14px;padding:11px 22px;border-radius:6px;border:1px solid var(--line)}
+  .btn.primary{background:var(--accent);color:#1a1407;border-color:var(--accent);font-weight:600}
+  .btn.primary:hover{filter:brightness(1.1);text-decoration:none}
+  .btn.ghost{color:var(--txt)}
+  .btn.ghost:hover{border-color:var(--accent);text-decoration:none}
+  /* loop strip */
+  .loop{padding:56px 0;border-bottom:1px solid var(--line);overflow-x:auto}
+  .loop-row{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:13px;white-space:nowrap;min-width:max-content;padding-bottom:6px}
+  .stage{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:9px 15px}
+  .stage.claude{border-color:#3d4654}
+  .stage.codex{border-color:var(--accent);color:var(--accent)}
+  .stage.det{border-color:var(--green);color:var(--green)}
+  .arr{color:var(--faint)}
+  .loop-note{margin-top:14px;font-size:13px;color:var(--faint);font-family:var(--mono)}
+  .loop-note b{color:var(--accent);font-weight:600}
+  /* sections */
+  section{padding:72px 0;border-bottom:1px solid var(--line)}
+  h2{font-family:var(--serif);font-size:30px;font-weight:400;margin-bottom:8px}
+  .lede{color:var(--dim);margin-bottom:40px;max-width:620px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px}
+  .card h3{font-size:16px;margin-bottom:10px;display:flex;align-items:center;gap:9px}
+  .card p{font-size:14px;color:var(--dim)}
+  .card code{font-family:var(--mono);font-size:12.5px;color:var(--blue)}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.12em;padding:3px 8px;border-radius:99px;text-transform:uppercase}
+  .tag.gate{background:rgba(224,178,92,.12);color:var(--accent)}
+  .tag.safe{background:rgba(127,183,138,.12);color:var(--green)}
+  /* terminal */
+  .term{background:var(--panel2);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-family:var(--mono);font-size:13.5px;line-height:1.8}
+  .term-bar{display:flex;gap:7px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  .dot{width:11px;height:11px;border-radius:50%;background:var(--line)}
+  .term pre{padding:20px 22px;overflow-x:auto;color:var(--dim)}
+  .c{color:var(--faint)} .g{color:var(--green)} .y{color:var(--accent)} .b{color:var(--blue)} .w{color:var(--txt)}
+  /* principles */
+  .rules li{list-style:none;padding:18px 0;border-bottom:1px solid var(--line);display:flex;gap:18px;align-items:baseline}
+  .rules li:last-child{border-bottom:none}
+  .rules .n{font-family:var(--mono);color:var(--accent);font-size:13px;min-width:28px}
+  .rules b{display:block;margin-bottom:3px}
+  .rules p{font-size:14px;color:var(--dim)}
+  footer{padding:48px 0 64px;font-size:13px;color:var(--faint)}
+  footer .quote{font-family:var(--serif);font-style:italic;font-size:15px;color:var(--dim);margin-bottom:14px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="brand">Camus</div>
+    <h1>An autonomous coding loop that <em>can't grade its own homework</em>.</h1>
+    <p class="sub">Claude writes the code. Codex — a different vendor — reviews it. Your own
+    type-checks and tests have the final word. Nothing ships on self-assessment.</p>
+    <div class="hero-cta">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn ghost" href="#honesty">How it stays honest</a>
+    </div>
+  </div>
+</header>
+
+<div class="loop">
+  <div class="wrap">
+    <div class="loop-row">
+      <span class="stage claude">plan</span><span class="arr">→</span>
+      <span class="stage claude">implement</span><span class="arr">→</span>
+      <span class="stage codex">codex review</span><span class="arr">⇄</span>
+      <span class="stage claude">fix</span><span class="arr">→</span>
+      <span class="stage claude">commit gate</span><span class="arr">→</span>
+      <span class="stage det">verify: types + tests</span><span class="arr">→</span>
+      <span class="stage det">done</span>
+    </div>
+    <div class="loop-note">loops while <b>P0/P1/P2</b> findings remain · round cap 3 · every round audited on disk</div>
+  </div>
+</div>
+
+<section id="honesty">
+  <div class="wrap">
+    <h2>How it stays honest</h2>
+    <p class="lede">Most agent loops are maker and checker from the same vendor — the fox
+    auditing the henhouse. Camus structurally separates judgment from generation.</p>
+    <div class="grid">
+      <div class="card">
+        <h3><span class="tag gate">gate</span> Cross-vendor review</h3>
+        <p>The reviewer is <code>codex</code>, not another Claude. A thin runner relays its JSON
+        verbatim — Claude never re-judges the verdict. Fresh reviewer session every round, so
+        issues get re-raised, not politely dropped.</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag gate">gate</span> Deterministic verify</h3>
+        <p>A clean review doesn't ship code that fails <code>type-check</code> or <code>test</code>.
+        Stack-agnostic detection (node, python, rust, go, foundry, make) or
+        <code>CAMUS_VERIFY_CMD</code> — and if no verifier is found, that's a loud failure, never a pass.</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag safe">guard</span> Infra failure ≠ findings</h3>
+        <p>Codex didn't run? That's <code>ran:false</code> — retried, never fed to the fix loop as a
+        rejection, never counted as clean. Missing <code>node_modules</code>? That's
+        <code>verify_inconclusive</code>, not broken code. The #1 runaway cause, fenced off.</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag safe">guard</span> Work provably lands</h3>
+        <p>A commit gate after review-clean: nothing staged means <code>no_changes</code>, never a
+        silent empty merge marked done. Every <code>done</code> carries its <code>commit_sha</code>.</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag gate">audit</span> Reviews leave receipts</h3>
+        <p>Every round persists Codex's raw + parsed output to <code>~/.camus/reviews/</code>.
+        A missing audit file means the binary never ran — fabrication is detectable.</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag safe">guard</span> Fail-closed target guard</h3>
+        <p>Every gate script is bound to the caller's repo, <code>camus/*</code> branches and
+        <code>camus-wt-*</code> worktrees. Hardened across three Codex review rounds, probe-verified live.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Autonomy with a leash</h2>
+    <p class="lede">Zero clicks when it's safe to be autonomous. A question when it isn't. A
+    written record either way.</p>
+    <ul class="rules">
+      <li><span class="n">01</span><div><b>Zero-click auto mode</b>
+        <p>A narrow scoped profile: one egress trust line for the review diff plus allow rules for
+        five gate scripts — not <code>bypassPermissions</code>, not broad shell access. Full feature
+        runs with zero permission prompts, proven live.</p></div></li>
+      <li><span class="n">02</span><div><b>A policy dial, not a personality</b>
+        <p><code>autonomous</code> · <code>ask_on_ambiguity</code> (default) · <code>ask_on_major</code>.
+        Genuinely ambiguous tasks halt with a question; resume threads your answer back into the same run.</p></div></li>
+      <li><span class="n">03</span><div><b>Decisions log, always on</b>
+        <p>Every judgment call the loop makes — "widened param type <code>string → unknown</code>,
+        because…" — lands in the report with the why and the rejected alternative. You review
+        decisions, not just diffs.</p></div></li>
+      <li><span class="n">04</span><div><b>Model control with escalation</b>
+        <p>A cheap classify pass routes trivial work to Sonnet, the rest to Opus. Persistent review
+        findings escalate the fix model automatically. Force it with <code>model:</code> or
+        <code>modelTier:</code> when you know better.</p></div></li>
+      <li><span class="n">05</span><div><b>Resume, don't reconstruct</b>
+        <p>Interrupted feature runs are detected and resumed with their canonical persisted args —
+        same policy, same answers, same scope. Done tasks skip; the unfinished one re-runs.</p></div></li>
+    </ul>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Run it</h2>
+    <p class="lede">Two dynamic workflows + one skill + five audited gate scripts. Pure-stdlib
+    tests, no dependencies. Trusted-code tool: point it only at repos you already trust.</p>
+    <div class="term">
+      <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <pre><span class="c"># one-time</span>
+<span class="w">$</span> ./install.sh                  <span class="c"># skill + workflows → ~/.claude (frozen copy)</span>
+<span class="w">$</span> ./install.sh --auto-setup     <span class="c"># opt-in: scoped unattended profile</span>
+
+<span class="c"># per run, from your repo</span>
+<span class="w">$</span> ./install.sh --check          <span class="c"># gate in sync?</span>
+<span class="w">$</span> export CAMUS_REPO_ROOT=<span class="b">"$(pwd -P)"</span>
+<span class="w">$</span> export CAMUS_VERIFY_CMD=<span class="b">"pnpm type-check && pnpm test"</span>
+<span class="w">$</span> claude --permission-mode auto
+
+<span class="y">&gt;</span> /camus-feat <span class="b">{ feat: "Harden input boundaries", tasks: [...] }</span>
+<span class="g">✓</span> env + baseline · 3/3 tasks done · integration verify green
+<span class="g">✓</span> report → ~/.camus/reports/harden-input-boundaries-x1f9q2.json</pre>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p class="quote">"The struggle itself toward the heights is enough to fill a man's heart."</p>
+    <p>Camus — formerly Nightcrawler v2. The loop rolls the boulder; the gates make sure it actually reached the top.</p>
+  </div>
+</footer>
+
+</body>
+</html>
