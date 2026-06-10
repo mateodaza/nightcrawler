@@ -48,10 +48,11 @@ async function runLoop(args, scripts) {
 async function runFeat(args, scripts, loopResults) {
   const calls = []
   const capture = {}
+  const loopArgs = []
   let li = 0
   const res = await load(FEAT)(args, makeAgent(scripts, calls, capture), () => {}, () => {},
-    async () => loopResults[li++])
-  return { res, calls, workflowCalls: li, stateJSON: capture.state ? extractBraces(capture.state) : null }
+    async (name, a) => { loopArgs.push(a); return loopResults[li++] })
+  return { res, calls, loopArgs, workflowCalls: li, stateJSON: capture.state ? extractBraces(capture.state) : null }
 }
 
 const J = (o) => JSON.stringify(o)
@@ -66,6 +67,9 @@ const happyTail = {
   verify: J({ pass: true, failures: [] }),
 }
 const cls = { classify: { tier: 'trivial', reason: 'x' } }
+// Ask-gate tests must NOT be trivial: a trivial tier SKIPS planning (clarity forced to 'clear'),
+// which bypasses the ask-gate entirely. Use a standard tier so the planned clarity is honored.
+const clsStd = { classify: { tier: 'standard', reason: 'x' } }
 const planOf = (clarity, question = 'Q', interpretations = []) =>
   ({ plan: { plan: 'p', relevant_files: ['f'], clarity, question, interpretations } })
 
@@ -77,7 +81,7 @@ const planOf = (clarity, question = 'Q', interpretations = []) =>
     ok('S1 implement ran', calls.includes('implement'))
   }
   {
-    const { res, calls } = await runLoop({ task: 't' }, { ...cls, ...planOf('ambiguous', 'Which X?', ['a', 'b']) })
+    const { res, calls } = await runLoop({ task: 't' }, { ...clsStd, ...planOf('ambiguous', 'Which X?', ['a', 'b']) })
     ok('S2 ambiguous→needs_human', res.status === 'needs_human', res.status)
     ok('S2 question surfaced', res.question === 'Which X?')
     ok('S2 implement NOT reached', !calls.includes('implement'))
@@ -97,8 +101,26 @@ const planOf = (clarity, question = 'Q', interpretations = []) =>
     ok('S5a design_decision+ask_on_ambiguity→done', res.status === 'done', res.status)
   }
   {
-    const { res } = await runLoop({ task: 't', policy: 'ask_on_major' }, { ...cls, ...planOf('design_decision', 'Decide Y') })
+    const { res } = await runLoop({ task: 't', policy: 'ask_on_major' }, { ...clsStd, ...planOf('design_decision', 'Decide Y') })
     ok('S5b design_decision+ask_on_major→needs_human', res.status === 'needs_human', res.status)
+  }
+  // S6: skip-plan gating (opt-in, autonomous-only) — must never disable the ask-gate on an asking policy.
+  {
+    const { res, calls } = await runLoop({ task: 't', skipPlan: true, policy: 'autonomous' }, { ...cls, ...happyTail })
+    ok('S6a skipPlan+autonomous+trivial → plan agent skipped', !calls.includes('plan'), 'calls=' + calls.join(','))
+    ok('S6a → done', res.status === 'done', res.status)
+  }
+  {
+    // skipPlan set but policy is the default ask_on_ambiguity → NOT applied → plan runs → ask-gate fires
+    const { res, calls } = await runLoop({ task: 't', skipPlan: true }, { ...cls, ...planOf('ambiguous', 'Q?', ['a', 'b']) })
+    ok('S6b skipPlan ignored on asking policy → plan ran', calls.includes('plan'))
+    ok('S6b ask-gate still fires → needs_human', res.status === 'needs_human', res.status)
+  }
+  {
+    // skipPlan + autonomous but STANDARD tier → not trivial → plan runs
+    const { res, calls } = await runLoop({ task: 't', skipPlan: true, policy: 'autonomous' }, { ...clsStd, ...planOf('clear', ''), ...happyTail })
+    ok('S6c skipPlan + non-trivial → plan ran', calls.includes('plan'))
+    ok('S6c → done', res.status === 'done', res.status)
   }
 
   const featBase = {
@@ -140,6 +162,61 @@ const planOf = (clarity, question = 'Q', interpretations = []) =>
       [{ status: 'done', branch: 'nc/feat/x/b', decisions: [] }])
     ok('F3 only ONE task re-ran (noop a skipped)', r2.workflowCalls === 1, 'workflowCalls=' + r2.workflowCalls)
     ok('F3 prior noop carried in report', !!(r2.res && r2.res.tasks.find((t) => t.taskId === aId && t.status === 'noop')))
+  }
+
+  // F4: model / modelTier passthrough — forwarded UNCHANGED into each per-task loop call.
+  {
+    const { loopArgs } = await runFeat({ feat: 'F', tasks: ['only task'], model: 'opus', modelTier: 'high' }, featBase,
+      [{ status: 'done', branch: 'nc/feat/x/only', decisions: [] }])
+    ok('F4 model forwarded to loop', loopArgs.length === 1 && loopArgs[0].model === 'opus', J(loopArgs[0]))
+    ok('F4 modelTier forwarded to loop', loopArgs[0] && loopArgs[0].modelTier === 'high')
+  }
+  {
+    // No override → loop call must NOT carry model/modelTier (loop keeps its own defaults).
+    const { loopArgs } = await runFeat({ feat: 'F', tasks: ['only task'] }, featBase,
+      [{ status: 'done', branch: 'nc/feat/x/only', decisions: [] }])
+    ok('F4 no model key when unset', loopArgs[0] && !('model' in loopArgs[0]) && !('modelTier' in loopArgs[0]))
+  }
+  // F5: loop telemetry (tier/model/rounds/planSkipped) surfaced into the report per task.
+  {
+    const { res } = await runFeat({ feat: 'F', tasks: ['only task'] }, featBase,
+      [{ status: 'done', branch: 'nc/feat/x/only', decisions: [], tier: 'standard', model: 'opus', rounds: 2, planSkipped: false }])
+    const t = res && res.tasks && res.tasks[0]
+    ok('F5 tier in report', !!t && t.tier === 'standard')
+    ok('F5 model in report', !!t && t.model === 'opus')
+    ok('F5 rounds in report', !!t && t.rounds === 2)
+    ok('F5 planSkipped in report', !!t && t.planSkipped === false)
+  }
+  {
+    // Telemetry is OPTIONAL — a loop result omitting it must not emit the keys (graceful).
+    const { res } = await runFeat({ feat: 'F', tasks: ['only task'] }, featBase,
+      [{ status: 'done', branch: 'nc/feat/x/only', decisions: [] }])
+    const t = res && res.tasks && res.tasks[0]
+    ok('F5 no telemetry keys when absent', !!t && !('tier' in t) && !('model' in t) && !('rounds' in t) && !('planSkipped' in t))
+  }
+  // F6: persisted state carries the feat TITLE (load-bearing for auto-resume arg reconstruction).
+  {
+    const { res, stateJSON } = await runFeat({ feat: 'My Feat Title', tasks: ['only task'] }, featBase,
+      [{ status: 'done', branch: 'nc/feat/x/only', decisions: [] }])
+    ok('F6 state persists feat title', !!(stateJSON && stateJSON.feat === 'My Feat Title'), stateJSON && stateJSON.feat)
+    ok('F6 done state status', !!(stateJSON && stateJSON.status === 'done'), stateJSON && stateJSON.status)
+    // resume_scan SAFE rule (mirror): status == "running" ONLY. A done feat is NOT resumable.
+    const isResumable = (s) => !!(s && s.status === 'running' && s.feat && Array.isArray(s.tasks))
+    ok('F6 done feat NOT auto-resumable', !isResumable(stateJSON))
+    void res
+  }
+  {
+    // A feat interrupted mid-flight persists status:"running" (Tasks phase) WITH the title → resumable.
+    const { stateJSON } = await runFeat({ feat: 'Interrupted Feat', tasks: ['a', 'b'] }, featBase,
+      // first task halts the feat at needs_human, but the PRIOR persisted Tasks-phase state was
+      // status:"running" — we assert that mid-run state is resumable and a needs_human one is not.
+      [{ status: 'needs_human', question: 'Q', clarity: 'ambiguous', interpretations: [], plan: 'p' }])
+    void stateJSON
+    const running = { status: 'running', feat: 'Interrupted Feat', tasks: [{ spec: 'a' }] }
+    const halted = { status: 'needs_human', feat: 'Interrupted Feat', tasks: [{ spec: 'a' }] }
+    const isResumable = (s) => !!(s && s.status === 'running' && s.feat && Array.isArray(s.tasks))
+    ok('F6 running feat IS auto-resumable', isResumable(running))
+    ok('F6 needs_human feat NOT auto-resumable', !isResumable(halted))
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)

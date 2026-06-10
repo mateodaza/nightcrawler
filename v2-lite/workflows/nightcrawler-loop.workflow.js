@@ -183,14 +183,49 @@ const cls = await agent(
 Task: ${TASK}`,
   { model: MODEL_RUNNER, phase: 'Classify', label: 'classify', schema: CLASSIFY_SCHEMA }
 )
-const tier = (cls && TIER_MODEL[cls.tier]) ? cls.tier : 'standard'
-const thinkModel = TIER_MODEL[tier]
-log(`Task classified "${tier}" → think model: ${thinkModel} (runners: ${MODEL_RUNNER}).`)
+// Override precedence (FEATURE 1a): explicit `model` > `modelTier` > classifier result.
+//   args.model     — exact think-model string (e.g. 'opus'), used VERBATIM, forces nothing about tier.
+//   args.modelTier — one of trivial|standard|complex, forces the tier (and thus its TIER_MODEL).
+// The classifier still runs (its tier feeds skip-plan + escalation), but overrides win.
+const MODEL_OVERRIDE = (args && typeof args === 'object' && typeof args.model === 'string' && args.model) || ''
+const TIER_OVERRIDE = (args && typeof args === 'object' && TIER_MODEL[args.modelTier]) ? args.modelTier : ''
+// Opt-in (default OFF). Only honored under policy:autonomous (see skip-plan block) so it can never
+// silently disable ambiguity detection / the needs_human ask-gate on an asking policy.
+const SKIP_PLAN_REQ = !!(args && typeof args === 'object' && args.skipPlan === true)
+const classifiedTier = (cls && TIER_MODEL[cls.tier]) ? cls.tier : 'standard'
+const tier = TIER_OVERRIDE || classifiedTier
+const thinkModel = MODEL_OVERRIDE || TIER_MODEL[tier]
+const modelSource = MODEL_OVERRIDE ? `args.model override ("${MODEL_OVERRIDE}")`
+  : (TIER_OVERRIDE ? `args.modelTier override ("${TIER_OVERRIDE}")` : `classifier ("${classifiedTier}")`)
+log(`Tier=${tier}, think model: ${thinkModel} via ${modelSource} (classifier said "${classifiedTier}"; runners: ${MODEL_RUNNER}).`)
 
 // ── Phase 1: PLAN (think model) ──────────────────────────────────────────────
+// FEATURE 2 — INSTRUMENTED SKIP-PLAN (opt-in, default OFF). Skips the expensive PLAN AGENT to save
+// tokens on trivial tasks — but ONLY when the caller also set policy:autonomous. Rationale: the
+// ask-gate (needs_human) lives in the plan phase, so skipping plan would skip ambiguity detection;
+// under `autonomous` the ask-gate NEVER fires anyway (ASK_ON.autonomous = []), so skipping plan
+// there costs ZERO HITL coverage. Under any ASKING policy the plan ALWAYS runs and the ask-gate
+// stays intact — a "trivial" but under-specified task can still pause (Codex review 2026-06-09).
+// `planSkipped` is instrumented onto the result + logged so savings/quality can be correlated.
+const planSkipped = SKIP_PLAN_REQ && POLICY === 'autonomous' && tier === 'trivial'
 phase('Plan')
-const plan = await agent(
-  `You are planning ONE Nightcrawler task. Do NOT write code in this phase.
+let plan
+if (planSkipped) {
+  log('Plan SKIPPED (opt-in skipPlan + autonomous + trivial) — instrumented. Implement discovers files itself.')
+  plan = {
+    plan: TASK,                       // hand the task itself as the plan
+    relevant_files: [],               // empty → implement agent discovers files itself
+    clarity: 'clear',                 // autonomous never asks → no ambiguity detection is lost here
+    question: '',
+    interpretations: [],
+  }
+} else {
+  if (SKIP_PLAN_REQ) {
+    log(`skipPlan requested but NOT applied (requires policy=autonomous + trivial tier; have policy=${POLICY}, tier=${tier}) — running plan to keep the ask-gate intact.`)
+  }
+  log('Plan ran.')
+  plan = await agent(
+    `You are planning ONE Nightcrawler task. Do NOT write code in this phase.
 
 Task: ${TASK}
 ${targetLine}${HUMAN_ANSWER ? `\n\nA human has ALREADY answered the open question for this task — treat it as DECIDED, do not re-raise it:\n${HUMAN_ANSWER}` : ''}
@@ -204,10 +239,11 @@ Then assess CLARITY honestly:
 - "ambiguous": genuinely under-specified, valid interpretations diverge, or the change is irreversible — must not be guessed.
 If not "clear", put the single blocking question in question (and, when ambiguous, the divergent readings in interpretations).${HUMAN_ANSWER ? ' Since the human already answered, report "clear" unless a genuinely NEW, different question arises.' : ''}
 ${softBudget}`,
-  { model: thinkModel, phase: 'Plan', label: 'plan', schema: PLAN_SCHEMA }
-)
-if (!plan) return { status: 'aborted', stage: 'plan', task: TASK }
-log(`Plan ready — ${plan.relevant_files.length} file(s) in scope; clarity=${plan.clarity}.`)
+    { model: thinkModel, phase: 'Plan', label: 'plan', schema: PLAN_SCHEMA }
+  )
+  if (!plan) return { status: 'aborted', stage: 'plan', task: TASK }
+  log(`Plan ready — ${plan.relevant_files.length} file(s) in scope; clarity=${plan.clarity}.`)
+}
 
 // ── HITL ask-gate: pause BEFORE implementing if the policy says this clarity level warrants a
 // human decision (and we don't already hold an answer). Asking before the work is cheaper than
@@ -242,7 +278,7 @@ ${decisionGuidance}
 Approved plan:
 ${plan.plan}
 
-Files in scope: ${plan.relevant_files.join(', ') || '(discover from the plan)'}
+Files in scope: ${plan.relevant_files.join(', ') || (planSkipped ? 'discover the files yourself' : '(discover from the plan)')}
 
 Steps:
 1. From the repo root, run EXACTLY this command and NOTHING ELSE. Do NOT append the repo
@@ -294,6 +330,14 @@ let reviewPassed = false
 let lastBlocking = []
 let infraAbort = null
 
+// FEATURE 1b — REVIEWER-PERSISTENCE ESCALATION: when the cheap model keeps failing Codex review,
+// bump the FIX agent to 'opus'. Trigger: round >= 2 (the first fix didn't clear review) OR any
+// current blocking finding has priority 0. Monotonic — once escalated, stay escalated. Since
+// standard/complex already start on opus, this only ever lifts trivial→opus. Deterministic
+// (round + finding-priority based; no Date/random).
+let fixModel = thinkModel
+let escalated = false
+
 while (round < ROUND_CAP) {
   round++
 
@@ -324,6 +368,15 @@ while (round < ROUND_CAP) {
   // 3d: blocking findings → fix in the SAME worktree, then loop
   lastBlocking = Array.isArray(gate.blocking) ? gate.blocking : []
   log(`Round ${round}: ${lastBlocking.length} blocking finding(s) — dispatching fix.`)
+  // Escalate the FIX model if the cheap model is failing: round>=2 (first fix didn't clear review)
+  // OR a priority-0 blocking finding is present. Monotonic, deterministic.
+  if (!escalated && (round >= 2 || lastBlocking.some(b => b && b.priority === 0))) {
+    escalated = true
+    fixModel = 'opus'
+    const why = round >= 2 ? `round ${round} (prior fix did not clear review)` : 'a priority-0 blocking finding'
+    if (fixModel !== thinkModel) log(`Escalating FIX model ${thinkModel} → ${fixModel} due to ${why}.`)
+    else log(`Escalation triggered by ${why} (already on ${fixModel}).`)
+  }
   await agent(
     `Fix the BLOCKING review findings below, in the EXISTING worktree. Do not refactor
 beyond what each finding requires. Do not touch P3 nits.
@@ -336,7 +389,7 @@ ${JSON.stringify(lastBlocking, null, 2)}
 
 Apply the minimal correct fix for each. Do not run review or verify — the loop owns that.
 ${softBudget}`,
-    { model: thinkModel, phase: 'Fix', label: `fix:r${round}` }
+    { model: fixModel, phase: 'Fix', label: `fix:r${round}` }
   )
 }
 
@@ -429,6 +482,7 @@ if (verify.pass === true) {
   return {
     status: 'done', task: TASK, worktree: WT, branch: BRANCH, commit_sha: COMMIT_SHA,
     rounds: round, summary: impl.summary, decisions: Array.isArray(impl.decisions) ? impl.decisions : [],
+    tier, model: fixModel, planSkipped,
     note: 'Review clean, change committed, and verify passed. Worktree left in place for human merge/inspection.',
   }
 }
@@ -439,13 +493,13 @@ if (verify.pass === true) {
 if (verify.inconclusive) {
   return {
     status: 'verify_inconclusive', task: TASK, worktree: WT, branch: BRANCH,
-    rounds: round, failures: verify.failures || [],
+    rounds: round, failures: verify.failures || [], tier, model: fixModel, planSkipped,
     note: 'Verification could not RUN (toolchain/deps missing in the worktree, or no verifier detected) — NOT a code failure. Fix the environment (install deps / correct node; see env_check) and re-run.',
   }
 }
 
 return {
   status: 'verify_failed', task: TASK, worktree: WT, branch: BRANCH,
-  rounds: round, failures: verify.failures || [],
+  rounds: round, failures: verify.failures || [], tier, model: fixModel, planSkipped,
   note: 'Review was clean but deterministic verify ran and did not pass. Code is NOT done.',
 }

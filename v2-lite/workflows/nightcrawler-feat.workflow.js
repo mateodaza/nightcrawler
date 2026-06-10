@@ -35,6 +35,12 @@ const TARGET = (A.targetPath && String(A.targetPath)) || ''
 // matching task re-runs with that answer threaded back in. Neither enters featId (stable resume).
 const POLICY = (A.policy && String(A.policy)) || 'ask_on_ambiguity'
 const ANSWERS = (A.answers && typeof A.answers === 'object' && !Array.isArray(A.answers)) ? A.answers : {}
+// Model overrides forwarded UNCHANGED to every per-task loop. `model` / `modelTier` are a SHARED
+// CONTRACT with nightcrawler-loop — pass only when the caller set them (so the loop keeps its own
+// defaults otherwise). Neither enters featId (they don't change the work's identity → stable resume).
+const MODEL = (A.model != null && String(A.model)) || ''
+const MODEL_TIER = (A.modelTier != null && String(A.modelTier)) || ''
+const SKIP_PLAN = A.skipPlan === true   // opt-in; forwarded only when set (loop gates it to autonomous)
 if (!FEAT) throw new Error('nightcrawler-feat: missing feat title (args.feat)')
 if (!TASKS.length) throw new Error('nightcrawler-feat: args.tasks[] is empty')
 // All git/env/verify run in the target repo. Default to the workflow cwd ($PWD = repo root),
@@ -96,7 +102,10 @@ const taskNodes = TASKS.map((spec) => {
   return { taskId, spec, dependsOn: [], status: 'pending', branch, loopStatus: null }
 })
 const state = {
-  featId, featBranch, base: null,
+  // `feat` (the title) is persisted so a watchdog/resumer can reconstruct the original args from
+  // state alone: featId is a one-way deterministic hash of FEAT+tasks, so without the title the
+  // feat can't be re-invoked. resume_scan.py reads exactly this field. (Feature 1: auto-resume.)
+  featId, feat: FEAT, featBranch, base: null,
   tasks: taskNodes,
   baseline: null, env: null, envRecheck: null, integration: null,
   status: 'running',
@@ -196,6 +205,11 @@ async function finalize(status, extra = {}) {
     tasks: state.tasks.map((t) => ({
       taskId: t.taskId, spec: t.spec, dependsOn: t.dependsOn, status: t.status, branch: t.branch, loopStatus: t.loopStatus,
       decisions: t.decisions || [],
+      // OPTIONAL loop telemetry — only emitted when the loop reported it (Feature 3).
+      ...(t.tier != null ? { tier: t.tier } : {}),
+      ...(t.model != null ? { model: t.model } : {}),
+      ...(t.rounds != null ? { rounds: t.rounds } : {}),
+      ...(t.planSkipped != null ? { planSkipped: t.planSkipped } : {}),
       ...(t.question ? { question: t.question, clarity: t.clarity || '' } : {}),
     })),
     // Feat-level rollup of every decision the loop logged across tasks — the human's merge-time
@@ -332,6 +346,9 @@ for (let i = 0; i < state.tasks.length; i++) {
       branchPrefix,        // 'nc/feat/<featId>/'
       idSalt: featId,      // makes the loop's id hash feat-unique
       policy: POLICY,      // HITL posture, applied per task
+      ...(MODEL ? { model: MODEL } : {}),            // feat-level model override (shared contract)
+      ...(MODEL_TIER ? { modelTier: MODEL_TIER } : {}),
+      ...(SKIP_PLAN ? { skipPlan: true } : {}),       // opt-in; loop honors only under policy:autonomous
       ...(ANSWERS[node.taskId] ? { humanAnswer: String(ANSWERS[node.taskId]) } : {}),  // resume answer
       ...(TARGET ? { targetPath: TARGET } : {}),
     })
@@ -423,8 +440,20 @@ Return {merged, committed, alreadyUpToDate, before, after, conflict, error}.`,
   }
   node.status = 'done'
   node.decisions = Array.isArray(res.decisions) ? res.decisions : []   // audit trail for merge review
+  // OPTIONAL loop telemetry (shared contract with nightcrawler-loop; all may be absent). Surfaced
+  // in the report + log line so the human sees which tier/model ran the task and how many
+  // implement↔review rounds it took, without inventing UI.
+  if (res.tier != null) node.tier = res.tier
+  if (res.model != null) node.model = res.model
+  if (res.rounds != null) node.rounds = res.rounds
+  if (res.planSkipped != null) node.planSkipped = res.planSkipped
   await persistState('Tasks')
-  log(`Task ${n} done → merged ${mergeBranch} into ${featBranch} (commit ${mg.after ? String(mg.after).slice(0, 8) : '?'})${node.decisions.length ? ` · ${node.decisions.length} decision(s) logged` : ''}.`)
+  const tele = [
+    node.model != null ? `model ${node.model}` : null,
+    node.tier != null ? `tier ${node.tier}` : null,
+    node.rounds != null ? `${node.rounds} round${node.rounds === 1 ? '' : 's'}` : null,
+  ].filter(Boolean)
+  log(`Task ${n} done → merged ${mergeBranch} into ${featBranch} (commit ${mg.after ? String(mg.after).slice(0, 8) : '?'})${tele.length ? ` (${tele.join(' · ')})` : ''}${node.decisions.length ? ` · ${node.decisions.length} decision(s) logged` : ''}.`)
 }
 
 // ── 6. ENV RE-CHECK (tasks may have added deps) + FINAL INTEGRATION VERIFY ─────
