@@ -4,14 +4,23 @@
 # The auto-mode allow-list trusts the script PATH, but the target DIRECTORY is still
 # attacker-influenceable (a prompt-injected command could pass ANY path). Without this guard a
 # "trusted script, hostile path" call — e.g. `codex_review.sh /some/other/repo` (ships that repo's
-# diff to OpenAI) or `commit.sh /some/other/repo` (stages/commits unrelated work) — would be
-# allowed. This binds the target to the CALLER'S OWN repo and to Nightcrawler-created
-# branches/worktrees. Fail CLOSED: on any doubt, reject.
+# diff to OpenAI) or `commit.sh /some/other/repo` (stages/commits unrelated work) — would be allowed.
 #
-# Source this, then call BEFORE any cd/work (it reads the caller's $PWD as the trust anchor):
+# Defense, fail CLOSED:
+#  - Trust anchor = $NC_REPO_ROOT (exported ONCE at the auto-mode session launch; immutable across
+#    `cd` and across separate tool calls), falling back to $PWD for manual/dev runs. Anchoring on the
+#    env var closes the "cd into another repo first, then call the script" rebind — and a `cd`- or
+#    env-var-prefixed command won't match the narrow allow rule anyway, so it can't reach here
+#    auto-approved. For UNATTENDED auto runs, NC_REPO_ROOT MUST be set (the install recipe sets it).
+#  - Target must be in the SAME git repo as the anchor (absolute --git-common-dir equality).
+#  - Target must be on an `nc/*` branch, and its name must be COHERENT with that branch
+#    (a task worktree is `nc-wt-<branch's last path segment>`), so a hand-crafted same-repo
+#    `nc-wt-anything` on `nc/anything` does not pass as a Nightcrawler worktree.
+#
+# Source this, then call BEFORE any cd/work:
 #   nc_guard <mode> <target>
-#     mode = worktree          (write/egress gates: codex_review.sh, prep.sh, commit.sh)
-#            repo_or_worktree   (verify.sh — may run on the repo root OR an nc-wt-* worktree)
+#     mode = worktree         (write/egress gates: codex_review.sh, prep.sh, commit.sh)
+#            repo_or_worktree  (verify.sh — repo root on an nc/feat-* branch OR an nc-wt-* worktree)
 # Returns 0 = ok, 1 = reject (one-line reason on stderr). The CALLER emits its own infra JSON on
 # reject — never proceed past a non-zero return.
 
@@ -19,13 +28,11 @@ _nc_common_dir() { git -C "$1" rev-parse --path-format=absolute --git-common-dir
 
 nc_guard() {
   local mode="$1" target="$2"
-  local caller_common target_abs target_common branch base
-  # caller anchor = the repo the workflow is operating on (its $PWD when the gate script was invoked).
-  # The loop runs gate scripts from the repo root (relative worktree paths prove it); the feat cd's
-  # to the repo first. If $PWD is somehow not a repo, we reject (fail closed, visible halt).
-  caller_common="$(_nc_common_dir "$PWD")" || true
+  local anchor caller_common target_abs target_common branch base suffix
+  anchor="${NC_REPO_ROOT:-$PWD}"
+  caller_common="$(_nc_common_dir "$anchor")" || true
   if [ -z "$caller_common" ]; then
-    echo "nc_guard: caller \$PWD is not inside a git repo ($PWD)" >&2; return 1
+    echo "nc_guard: trust anchor ($anchor) is not inside a git repo" >&2; return 1
   fi
   target_abs="$(cd "$target" 2>/dev/null && pwd -P)" || {
     echo "nc_guard: target is not a directory ($target)" >&2; return 1; }
@@ -34,19 +41,43 @@ nc_guard() {
     echo "nc_guard: target is not inside a git repo ($target_abs)" >&2; return 1
   fi
   if [ "$caller_common" != "$target_common" ]; then
-    echo "nc_guard: target repo ($target_common) != caller repo ($caller_common)" >&2; return 1
+    echo "nc_guard: target repo ($target_common) != trusted repo ($caller_common)" >&2; return 1
   fi
   branch="$(git -C "$target_abs" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
   base="$(basename "$target_abs")"
+  suffix="${branch##*/}"   # last path segment of the branch
   case "$branch" in
     nc/*) ;;
     *) echo "nc_guard: target branch ($branch) is not an nc/* branch" >&2; return 1 ;;
   esac
-  if [ "$mode" = worktree ]; then
-    case "$base" in
-      nc-wt-*) ;;
-      *) echo "nc_guard: target ($base) is not an nc-wt-* worktree" >&2; return 1 ;;
-    esac
-  fi
+  case "$mode" in
+    worktree)
+      # write/egress gate: must be a Nightcrawler task worktree, name coherent with its branch.
+      if [ "$base" != "nc-wt-$suffix" ]; then
+        echo "nc_guard: worktree '$base' not coherent with branch '$branch' (expected nc-wt-$suffix)" >&2
+        return 1
+      fi
+      ;;
+    repo_or_worktree)
+      case "$base" in
+        nc-wt-*)
+          if [ "$base" != "nc-wt-$suffix" ]; then
+            echo "nc_guard: worktree '$base' not coherent with branch '$branch' (expected nc-wt-$suffix)" >&2
+            return 1
+          fi
+          ;;
+        *)
+          # repo root (feat baseline / integration verify): must be ON the feat branch nc/feat-<id>.
+          case "$branch" in
+            nc/feat-*) ;;
+            *) echo "nc_guard: repo-root target not on an nc/feat-* branch ($branch)" >&2; return 1 ;;
+          esac
+          ;;
+      esac
+      ;;
+    *)
+      echo "nc_guard: unknown mode '$mode'" >&2; return 1
+      ;;
+  esac
   return 0
 }

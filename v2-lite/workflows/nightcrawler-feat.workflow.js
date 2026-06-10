@@ -295,11 +295,18 @@ Output the command's stdout VERBATIM as your entire reply (JSON {pass,failures,c
 const baseV = asVerify(baseRaw)
 state.baseline = baseV
 if (baseV.pass !== true) {
+  // A verify that could NOT run (missing toolchain/deps, or a guard refusal) is infra/env — NOT a
+  // red base. Surface it as env_not_ready so a setup issue never masquerades as broken base code.
+  if (baseV.inconclusive) {
+    return finalize('env_not_ready', {
+      stage: 'baseline_verify',
+      note: 'Baseline verify could NOT run (toolchain/deps missing, or the target guard refused) — env/infra, not code-red. Fix the environment and re-run.',
+      failures: baseV.failures || [],
+    })
+  }
   return finalize('base_red', {
     stage: 'baseline_verify',
-    note: baseV.inconclusive
-      ? 'Baseline verify could NOT run (toolchain/deps) — treat as not-ready, not code-red. Fix env and re-run.'
-      : 'Baseline verify FAILED on the freshly-cut feat branch — the base is red. Not running any task on red.',
+    note: 'Baseline verify FAILED on the freshly-cut feat branch — the base is red. Not running any task on red.',
     failures: baseV.failures || [],
   })
 }

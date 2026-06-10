@@ -54,6 +54,7 @@ if [[ "${1:-}" == "--auto-setup" ]]; then
   echo "  cd <your repo root>             # your own, trusted repo"
   echo "  git status                      # must be CLEAN (Preflight halts on a dirty tree)"
   echo "  bash \"$here/install.sh\" --check  # gate must be in sync"
+  echo "  export NC_REPO_ROOT=\"\$(pwd -P)\"  # REQUIRED: cd-immutable trust anchor for the target guard"
   echo "  export NC_VERIFY_CMD='<type-check && test>'   # include TESTS, not just type-check"
   echo "  claude --permission-mode auto   # then invoke the nightcrawler-feat workflow"
   echo
