@@ -43,9 +43,12 @@ const MODEL_TIER = (A.modelTier != null && String(A.modelTier)) || ''
 const SKIP_PLAN = A.skipPlan === true   // opt-in; forwarded only when set (loop gates it to autonomous)
 if (!FEAT) throw new Error('camus-feat: missing feat title (args.feat)')
 if (!TASKS.length) throw new Error('camus-feat: args.tasks[] is empty')
-// All git/env/verify run in the target repo. Default to the workflow cwd ($PWD = repo root),
-// which is where camus-loop also creates its worktrees — keep them the same repo.
-const REPO_ARG = TARGET ? JSON.stringify(TARGET) : '"$PWD"'
+// All feat-level git/env/verify run in the repo root (workflow cwd = $PWD).
+// `targetPath` is a CODE-SCOPE HINT only: it is forwarded to camus-loop per task,
+// but must never become the feat runner's cd/verify target. Baseline/integration
+// guards require the repo root on a camus/feat-* branch; passing a relative subdir
+// would both double-resolve the path after `cd` and fail the guard.
+const REPO_ARG = '"$PWD"'
 
 // ── Deterministic identity (FNV-1a; NO Math.random / Date — would break resume) ──
 // These MUST mirror camus-loop's slugify/fnv1a exactly so the branch we compute

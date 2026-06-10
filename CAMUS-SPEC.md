@@ -185,24 +185,22 @@ The metering boundary is **interactive vs `claude -p`/SDK** — *not* GUI-vs-hea
 
 ---
 
-## 9. File layout
+## 9. File layout (as shipped — see `camus/README.md` for the authoritative tree)
 
 ```
-.claude/
+~/.claude/                         # installed via camus/install.sh (copy, not symlink)
   skills/
     camus/
-      SKILL.md            # rules, phase definitions, reviewer rubric, P0/P1/P2 defs
-      workflow.js         # the dynamic-workflow template (treated as template, not verbatim)
+      SKILL.md            # playbook: severity model, hard rules, run surface
       sev.schema.json     # Codex output schema (priority 0–3 + verdict)
-      review-prompt.md    # the reviewer instruction (cross-vendor audit persona)
+      review-prompt.md    # cross-vendor audit persona + completeness check
+      scripts/            # 5 gate scripts + _guard.sh + adapter + preflight tools
   workflows/
-    camus.js       # saved run (or save from /workflows after first good run)
-config/
-  projects/
-    camello/conventions.md
-    clout/conventions.md
+    camus-loop.workflow.js   # single task: the closed loop
+    camus-feat.workflow.js   # M1 feat runner (calls camus-loop per task)
+~/.camus/                          # run state: feats/, reports/, reviews/ (audit trail)
 ```
-- Save the workflow via `/workflows` → `s` into `.claude/workflows/` (project) or `~/.claude/workflows/` (personal). Invoke as `/camus <task>`; pass a task list via `args`.
+- Invoke as `/camus-loop <task>` or `/camus-feat` with a task list via `args`.
 - Express portable conventions in `AGENTS.md` / `SKILL.md` so they survive a harness swap.
 
 ---
@@ -249,12 +247,12 @@ the loop's gates. Keep both.
 
 **Mode by phase:**
 - Building / inspecting the generated workflow → `default` or `acceptEdits`. Keep clicking.
-- Trusted unattended run → `auto` mode **plus narrow allow rules** for exactly:
-  - `Bash(bash ~/.claude/skills/camus/scripts/codex_review.sh)`
-  - `Bash(bash ~/.claude/skills/camus/scripts/verify.sh)`
-  - narrowly-scoped `git worktree` commands the workflow uses
-  Narrow rules carry over into auto mode and resolve immediately; broad `Bash(*)` rules are
-  dropped on entering auto mode. Never use `bypassPermissions` on a real repo (no injection
+- Trusted unattended run → `auto` mode **plus the installed narrow profile**. The source of
+  truth is `install.sh --auto-setup` (which runs `merge_settings.py`): one egress-trust line
+  for the Codex review diff plus allow rules for exactly the **5 gate scripts**
+  (`codex_review.sh`, `verify.sh`, `prep.sh`, `commit.sh`, `env_check.py`) in literal-`$HOME`
+  and expanded forms — no broad `Bash(*)` rules, `$defaults` preserved. Do not hand-author
+  this profile from the spec. Never use `bypassPermissions` on a real repo (no injection
   protection).
 
 **The wrapper-trust rule (non-obvious):** allowing `Bash(...codex_review.sh)` trusts that
@@ -263,7 +261,8 @@ inside it. Therefore the runner must be **frozen / known-good before a run**:
 - Gate scripts live at `~/.claude/skills/` (installed, option 2) — *outside* the worktree —
   so implement/fix agents cannot edit the reviewer/verifier that judges them mid-run.
 - Before a trusted run, verify the installed scripts match the reviewed versions
-  (`shasum` the three files). "Frozen" must be checkable, not assumed.
+  (`install.sh --check` diffs the whole installed skill + both workflows against source).
+  "Frozen" must be checkable, not assumed.
 
 **Hard boundaries (state in conversation and/or as deny rules):** no push, no deploy, no
 package install unless explicitly needed, no editing the Camus runner scripts during

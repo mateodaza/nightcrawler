@@ -34,6 +34,10 @@ function makeAgent(scripts, calls, capture) {
   return async (p, opts = {}) => {
     const label = opts.label || opts.phase || '?'
     calls.push(label)
+    if (capture) {
+      capture.prompts = capture.prompts || {}
+      capture.prompts[label] = p
+    }
     if (capture && label === 'state') capture.state = p   // the persist prompt embeds the state JSON
     const s = (label in scripts) ? scripts[label] : scripts[key(label)]
     return typeof s === 'function' ? s() : s
@@ -52,7 +56,11 @@ async function runFeat(args, scripts, loopResults) {
   let li = 0
   const res = await load(FEAT)(args, makeAgent(scripts, calls, capture), () => {}, () => {},
     async (name, a) => { loopArgs.push(a); return loopResults[li++] })
-  return { res, calls, loopArgs, workflowCalls: li, stateJSON: capture.state ? extractBraces(capture.state) : null }
+  return {
+    res, calls, loopArgs, workflowCalls: li,
+    stateJSON: capture.state ? extractBraces(capture.state) : null,
+    prompts: capture.prompts || {},
+  }
 }
 
 const J = (o) => JSON.stringify(o)
@@ -176,6 +184,16 @@ const planOf = (clarity, question = 'Q', interpretations = []) =>
     const { loopArgs } = await runFeat({ feat: 'F', tasks: ['only task'] }, featBase,
       [{ status: 'done', branch: 'camus/feat/x/only', decisions: [] }])
     ok('F4 no model key when unset', loopArgs[0] && !('model' in loopArgs[0]) && !('modelTier' in loopArgs[0]))
+  }
+  {
+    // targetPath is a per-task scope hint only. Feat-level git/env/verify must stay rooted at "$PWD";
+    // otherwise a relative subdir is applied twice and the repo-root guard refuses baseline verify.
+    const { loopArgs, prompts } = await runFeat({ feat: 'F', tasks: ['only task'], targetPath: 'packages/ai/src' }, featBase,
+      [{ status: 'done', branch: 'camus/feat/x/only', decisions: [] }])
+    ok('F4 targetPath forwarded to loop', loopArgs[0] && loopArgs[0].targetPath === 'packages/ai/src', J(loopArgs[0]))
+    ok('F4 targetPath not used as preflight cwd', prompts.preflight && prompts.preflight.includes('cd "$PWD"') && !prompts.preflight.includes('cd "packages/ai/src"'))
+    ok('F4 targetPath not used as baseline verify target', prompts['baseline-verify'] && prompts['baseline-verify'].includes('verify.sh "$PWD"') && !prompts['baseline-verify'].includes('packages/ai/src'))
+    ok('F4 targetPath not used as integration verify target', prompts['integration-verify'] && prompts['integration-verify'].includes('verify.sh "$PWD"') && !prompts['integration-verify'].includes('packages/ai/src'))
   }
   // F5: loop telemetry (tier/model/rounds/planSkipped) surfaced into the report per task.
   {

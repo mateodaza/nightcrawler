@@ -2,105 +2,131 @@
 
 **An autonomous coding loop that can't grade its own homework.**
 
-Camus runs one task — or an ordered feature's worth of tasks — through a closed loop:
-plan → implement → cross-vendor review → fix → deterministic verify. Claude writes the
-code; **Codex (a different vendor) reviews it**; `verify.sh` runs the repo's own
-type-check and tests. Nothing ships on self-assessment.
+Camus runs a coding task from plan to verified commit without you watching it.
+Claude writes the code. Codex, a different vendor's model, reviews every change.
+Then your repo's own type-check and tests decide. No step in the chain is allowed
+to approve its own work.
 
-Formerly Nightcrawler v2. The v1 bash orchestrator lives at the repo root as
-portfolio/OSS; Camus is its judgment layer ported onto Claude Code dynamic workflows.
+It runs as two Claude Code workflows plus a skill: `/camus-loop` takes one task,
+`/camus-feat` takes an ordered task list and ships it as one feature branch with a
+report. Formerly Nightcrawler v2; the v1 bash orchestrator lives at the repo root.
 Full design: [`../CAMUS-SPEC.md`](../CAMUS-SPEC.md).
 
 ```
-discovery → plan → implement → [ Codex review ↔ fix ]* → commit gate → dep-prep → verify
-                                 ↑ loops while P0/P1/P2 findings remain, ROUND_CAP = 3
+plan → implement → [ Codex review ↔ fix ]* → commit gate → dep prep → verify
+       loops while P0/P1/P2 findings remain, round cap 3
 ```
 
-## Why it's honest
+## Requirements
 
-- **Cross-vendor gate.** The reviewer is Codex, not another Claude. Claude never
-  re-judges the verdict; a thin runner relays Codex's JSON verbatim. Every round is
-  persisted to `~/.camus/reviews/` — a missing audit file means the binary never ran.
-- **Deterministic ground truth.** A clean review does not ship code that fails
-  `type-check`/`test`. Stack-agnostic verifier (node/python/rust/go/foundry/make),
-  `CAMUS_VERIFY_CMD` override, fails loud when nothing is detected.
-- **Infra failure ≠ findings.** Codex not running is `ran:false` — retried, never fed
-  into the fix loop, never treated as clean. Missing `node_modules` is
-  `verify_inconclusive`, never `verify_failed`. A broken environment can't masquerade
-  as broken (or working) code.
-- **Work provably lands.** A commit gate after review-clean: no staged changes →
-  `no_changes`, never a silent empty merge. `done` carries the `commit_sha`.
+- **Claude Code** v2.1.154+ with dynamic workflows, on a subscription plan.
+  Camus runs interactively, so usage counts against your plan limits rather than
+  metered API credit.
+- **Codex CLI** installed and authenticated (ChatGPT plan or API key). This is the
+  reviewer. Without it, nothing gets approved.
+- **node ≥ 18**, **python3**, **git**. The gate scripts are pure stdlib.
+- A repo you trust. The verifier runs that repo's own build and test commands.
 
-## Autonomy with a leash
+## Why you can trust a green run
 
-- **Zero-click auto mode** — `install.sh --auto-setup` installs a narrow scoped profile:
-  one egress trust line (the Codex review diff) plus allow rules for the five gate
-  scripts, nothing else. Every gate script is bound by `_guard.sh` to the caller's repo,
-  `camus/*` branches, and `camus-wt-*` worktrees — fail-closed, hardened across three
-  Codex review rounds.
-- **HITL policy dial** — `autonomous` | `ask_on_ambiguity` (default) | `ask_on_major`.
-  Genuinely ambiguous tasks halt with a question (`needs_human`); resume threads your
-  answer back in. Either way, an always-on **decisions log** puts every judgment call
-  ("widened param type `string` → `unknown`, because…") in the report.
-- **Model control** — a cheap classify pass routes the think-model (trivial→Sonnet,
-  else Opus); `model`/`modelTier` force it; persistent review findings escalate the fix
-  model automatically (round ≥ 2 or any P0). Bounded everything: round caps, agent caps.
-- **Auto-resume** — interrupted feats are detected (`running`, idle ≥ 30 min) and resumed
-  with their canonical args, not a lookalike reconstruction.
+**The reviewer is a different vendor.** Codex reviews; a thin runner relays its JSON
+verbatim. Claude never re-judges the verdict. Each round starts a fresh Codex session
+so old findings get re-raised instead of politely dropped. Every round is also written
+to `~/.camus/reviews/`. If that file is missing, the review binary never ran.
+
+**Tests are the last word.** A clean review does not ship code that fails
+`type-check` or `test`. The verifier auto-detects the stack (node, python, rust, go,
+foundry, make) or uses `CAMUS_VERIFY_CMD`. If it finds no verifier at all, that is a
+loud failure, not a pass.
+
+**A broken environment never reads as broken code.** Codex failing to run is
+`ran:false`: retried, never fed to the fix loop, never counted as clean. Missing
+`node_modules` is `verify_inconclusive`, not `verify_failed`. This distinction is the
+#1 defense against runaway loops, and it is enforced in the adapter, not in a prompt.
+
+**Work provably lands.** After review passes, a commit gate stages and commits the
+worktree. Nothing staged means `no_changes`; the task is reported as a no-op, never
+silently marked done. Every `done` carries its `commit_sha`.
+
+## Autonomy controls
+
+- **Zero-click runs.** `camus auto-setup` installs a narrow permission profile: one
+  egress trust line for the review diff, plus allow rules for the five gate scripts.
+  Not `bypassPermissions`, no broad shell access. The runner agents' routine git
+  plumbing is approved by Claude Code's auto-mode classifier; the profile and the
+  classifier together are what make runs prompt-free.
+- **It asks when it should.** `policy: autonomous | ask_on_ambiguity (default) |
+  ask_on_major`. A genuinely ambiguous task halts with a question (`needs_human`);
+  resuming with your answer re-runs just that task.
+- **Decisions are reported.** Every judgment call the implementer makes (say,
+  widening a parameter type) lands in the report with the reason and the rejected
+  alternative. You review decisions, not just diffs.
+- **Models are routed, then escalated.** A cheap classify pass sends trivial tasks to
+  Sonnet and the rest to Opus. If review findings persist past round 2, or any P0
+  appears, the fix model escalates automatically. Override with `model:` or `modelTier:`.
+- **Interrupted runs resume.** `camus resume` lists interrupted feats with their
+  exact original arguments. Finished tasks skip; the unfinished one re-runs.
+- **Gate scripts are fenced in.** Every script checks it is operating on the calling
+  repo, a `camus/*` branch, and a `camus-wt-*` worktree. Anything else is rejected.
 
 ## Layout
 
 ```
 camus/
-  install.sh              # install/--check/--auto-setup/--env-check
-  merge_settings.py       # narrow auto-profile merger (preserves all existing settings)
+  bin/camus.js            # CLI; dispatches to install.sh, adds no logic of its own
+  install.sh              # install / check / auto-setup / env-check
+  merge_settings.py       # permission-profile merger (preserves your settings)
   workflows/
-    camus-loop.workflow.js   # one task: the closed loop
-    camus-feat.workflow.js   # M1 feat runner: sequential tasks, baseline + integration verify
+    camus-loop.workflow.js   # one task
+    camus-feat.workflow.js   # ordered task list as one feature
   skills/camus/
-    SKILL.md              # the playbook: severity model, hard rules, run surface
-    review-prompt.md      # cross-vendor audit persona + completeness check
+    SKILL.md              # severity model, hard rules, run surface
+    review-prompt.md      # Codex's audit persona and completeness check
     sev.schema.json       # Codex --output-schema
-    scripts/              # gate scripts + guard + adapter + preflight, all unit-tested
+    scripts/              # gate scripts, guard, adapter; all unit-tested
 ```
 
-## Install & run
+## Install
 
 ```bash
-./install.sh                 # copy skill + workflows into ~/.claude (copy, not symlink — frozen gate)
-./install.sh --check         # preflight: exit 0 = in sync, 1 = drifted (run before any auto/feat run)
-./install.sh --env-check <repo>   # is the repo runnable? (node version, deps, toolchain)
-./install.sh --auto-setup    # opt-in: scoped unattended profile + per-run recipe
+npm i -g camus
+camus install        # copy skill + workflows into ~/.claude (a frozen copy, not a symlink)
+camus check          # exit 0 = installed matches package. Run before every auto run.
+camus env-check .    # will this repo's toolchain actually run? (node version, deps)
+camus auto-setup     # optional: the zero-click permission profile
 ```
 
-Per-run (from the target repo):
+From a checkout: `npm i -g ./camus` from the repo root, or run `./install.sh`
+directly inside `camus/`. The CLI and the shell script are the same entrypoints.
+
+## Run
+
+From your repo:
 
 ```bash
+camus check
 export CAMUS_REPO_ROOT="$(pwd -P)"
-export CAMUS_VERIFY_CMD="pnpm type-check && pnpm test"   # include TESTS, not just types
+export CAMUS_VERIFY_CMD="pnpm type-check && pnpm test"   # include tests, not only types
 claude --permission-mode auto
-# then: /camus-feat with your task list, or /camus-loop <one task>
 ```
+
+Then `/camus-feat` with your task list, or `/camus-loop <one task>`. The feature
+report lands in `~/.camus/reports/<featId>.json`. The branch is left for you to merge.
 
 ## Tests
 
-Pure stdlib, no network, no deps:
+Pure stdlib, no network, no dependencies. 159 assertions across 9 suites:
 
 ```bash
-cd skills/camus/scripts
-for t in test_adapter.py test_verify.py test_env_check.py test_prep.py \
-         test_resume_scan.py test_review_audit.py; do python3 $t; done
-bash test_guard.sh
-cd ../../.. && python3 test_merge_settings.py && node test_hitl_workflows.js
+npm test    # or run the suites individually under skills/camus/scripts/
 ```
 
-159 assertions across 9 suites. The cross-vendor gate reviewed its own adapter,
-guard, and workflows — and caught real bugs each time.
+The cross-vendor gate has reviewed its own adapter, guard, and workflows, and caught
+real bugs each time.
 
-## Hard boundary
+## Boundary
 
-Trusted-code tool only. The verifier runs the repo's own build/test commands — that is
-RCE by design on code you already trust. Do not point it at untrusted repos, and never
-run it as root. Camus may improve itself only through explicit maintenance tasks that
-pass its own gates; it never mutates its runner, skill, verifier, schemas, or
-permissions during a feat run.
+Camus is for code you already trust. The verifier executes the repo's own build and
+test commands; on an untrusted repo that is remote code execution. Never run it as
+root. Camus may improve itself only through tasks that pass its own gates. It never
+touches its runner, skill, verifier, schemas, or permissions during a run.

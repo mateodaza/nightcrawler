@@ -45,7 +45,7 @@ def _major(v):
 
 
 def _detect_node_version(login_shell=False, cwd=None):
-    # Probe node the SAME way verify will invoke it. An CAMUS_VERIFY_CMD override runs through
+    # Probe node the SAME way verify will invoke it. A CAMUS_VERIFY_CMD override runs through
     # `bash -lc`, which sources login files (.bash_profile / .zprofile) and can resolve a
     # DIFFERENT node (nvm/fnm/brew) than a direct subprocess. Probing directly here once reported
     # v22 as "ready" while the login-shell verify actually ran v12 -> false base_red. (#3)
@@ -67,7 +67,7 @@ def check_env(repo, which=None, node_version=None, env=None):
 
     issues = []
 
-    # Resolve the checks ONCE and detect the context verify will run in: an CAMUS_VERIFY_CMD override
+    # Resolve the checks ONCE and detect the context verify will run in: a CAMUS_VERIFY_CMD override
     # runs via `bash -lc` (login shell), auto-detected checks run as direct subprocesses. Every
     # probe below must match that context so env_check can't disagree with verify about node. (#3)
     checks = verify.detect_checks(repo, env)

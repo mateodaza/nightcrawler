@@ -11,7 +11,7 @@
 # Run --check before any auto-mode / feat run so you never run a stale gate.
 set -euo pipefail
 
-here="$(cd "$(dirname "$0")" && pwd)"           # .../v2-lite
+here="$(cd "$(dirname "$0")" && pwd)"           # .../camus
 SKILL_SRC="$here/skills/camus"
 WF_DIR_SRC="$here/workflows"
 SKILL_DST="$HOME/.claude/skills/camus"

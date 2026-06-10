@@ -24,7 +24,12 @@ if [ ! -f "$review" ]; then
   exit 1
 fi
 
-echo "Running cross-vendor Codex review on the v2-lite scaffold..."
+# WARNING — KNOWN-BROKEN (audit 2026-06-10, P1, pre-existing): codex_review.sh's first
+# positional arg is now the TARGET DIRECTORY (guard-checked: camus/* branch +
+# coherent worktree), so passing the focus string here always yields ran:false.
+# Needs a rewrite to invoke `codex exec` directly against the scaffold — tracked
+# for the next batch. Do not trust this script's output until then.
+echo "Running cross-vendor Codex review on the scaffold..."
 bash "$review" "$focus" > "$out" 2>/dev/null
 
 echo
